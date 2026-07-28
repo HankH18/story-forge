@@ -1,0 +1,79 @@
+/* Story Forge design tokens — style guide §12, dropped in as-is.
+   CSS variables are the source of truth; the Tailwind extension names in
+   tailwind.config.ts map 1:1 so utilities and raw CSS never drift. */
+:root {
+  /* paper */
+  --sf-page:        #FDF6E7;
+  --sf-card:        #FFFBF0;
+  --sf-warm:        #F6EAD2;
+  --sf-shell:       #F1E4C8;
+  --sf-rule:        #EADCBE;
+  --sf-shade:       #E3D3B2;
+  /* ink */
+  --sf-ink-900:     #2B2118;
+  --sf-ink-700:     #4A3A2A;
+  --sf-ink-500:     #6F5B45;
+  --sf-ink-300:     #A08A6E;
+  /* accents */
+  --sf-gold-300:    #F2D48A;
+  --sf-gold-500:    #D8A93C;
+  --sf-gold-700:    #A87A22;
+  --sf-berry-100:   #F8E3DF;
+  --sf-berry-500:   #C0453B;
+  --sf-berry-700:   #92302A;
+  --sf-leaf-100:    #E7F0E2;
+  --sf-leaf-500:    #4C7C51;
+  --sf-leaf-700:    #35603A;
+  --sf-sky-100:     #E2EDF2;
+  --sf-sky-500:     #3D7891;
+  --sf-sky-700:     #2A5A70;
+  --sf-amber-100:   #FBEFD4;
+  --sf-amber-500:   #C98A2E;
+  --sf-amber-700:   #96631A;
+  /* validator semantics */
+  --sf-v-decodable:     var(--sf-leaf-500);
+  --sf-v-decodable-bg:  var(--sf-leaf-100);
+  --sf-v-sight:         var(--sf-sky-500);
+  --sf-v-sight-bg:      var(--sf-sky-100);
+  --sf-v-story:         var(--sf-amber-500);
+  --sf-v-story-bg:      var(--sf-amber-100);
+  --sf-v-violation:     var(--sf-berry-500);
+  --sf-v-violation-bg:  var(--sf-berry-100);
+  --sf-v-oov:           var(--sf-ink-500);
+  --sf-v-oov-bg:        var(--sf-shell);
+  /* type */
+  --sf-font-display: 'Bree Serif', Georgia, serif;
+  --sf-font-ui:      'Nunito', system-ui, sans-serif;
+  --sf-font-read:    'Andika', 'Nunito', sans-serif;
+  --sf-font-mono:    'IBM Plex Mono', ui-monospace, monospace;
+  --sf-font-hand:    'Kalam', cursive;
+  --sf-read-size:    34px;
+  --sf-read-size-lg: 40px;
+  --sf-read-lh:      1.65;
+  --sf-read-lh-lg:   1.9;
+  /* radius */
+  --sf-r-rule:   4px;
+  --sf-r-chip:   10px;
+  --sf-r-btn:    16px;
+  --sf-r-card:   22px;
+  --sf-r-pill:   999px;
+  /* ink-offset shadows */
+  --sf-lift-kid:      0 6px 0 var(--sf-ink-900);
+  --sf-lift-kid-down: 0 2px 0 var(--sf-ink-900);
+  --sf-lift-parent:   0 4px 0 var(--sf-shade);
+  --sf-focus-ring:    0 0 0 4px var(--sf-gold-300);
+  /* borders */
+  --sf-border-kid:    3px solid var(--sf-ink-900);
+  --sf-border-parent: 2px solid var(--sf-rule);
+  --sf-border-admin:  1px solid var(--sf-shade);
+  /* motion */
+  --sf-dur-press: 90ms;
+  --sf-dur-tap:   160ms;
+  --sf-dur-page:  320ms;
+  --sf-dur-pop:   420ms;
+  --sf-ease-page: cubic-bezier(.2,.7,.2,1);
+  --sf-ease-pop:  cubic-bezier(.2,.8,.3,1.2);
+  /* min targets */
+  --sf-tap-min:   48px;
+  --sf-tap-kid:   64px;
+}

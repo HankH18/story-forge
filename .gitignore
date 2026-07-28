@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# --- Node ---
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# --- Secrets & env ---
+# Never commit real keys. .env.example IS committed.
+.env
+.env.*
+!.env.example
+
+# --- Generated artifacts ---
+# Eval reports (§14) are run output, not source.
+reports/
+# OpenAPI-generated TS client (§0: regenerate via `make codegen`).
+packages/shared/src/generated/
+
+# --- Local infra state ---
+.pgdata/
+
+# --- gstack runtime state (browse daemon pid/port/token) ---
+.gstack/
+.gstack-worktrees/
+
+# --- OS ---
+.DS_Store

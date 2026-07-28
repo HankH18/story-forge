@@ -1,0 +1,86 @@
+@import './tokens.css';
+
+/* Self-hosted per docs/DEVIATIONS.md 0.4 — no third-party font CDN in a
+   child-facing app (§13). */
+@import '@fontsource/bree-serif/400.css';
+@import '@fontsource/nunito/400.css';
+@import '@fontsource/nunito/600.css';
+@import '@fontsource/nunito/700.css';
+@import '@fontsource/nunito/800.css';
+@import '@fontsource/andika/400.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+@import '@fontsource/kalam/400.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Style guide §04: one texture, applied to the app shell only — never behind
+     story text, never on cards. CSS gradient, so zero asset weight. */
+  html {
+    background-color: var(--sf-shell);
+    background-image: repeating-linear-gradient(
+      135deg, rgba(43, 33, 24, 0.025) 0 1px, transparent 1px 7px
+    );
+  }
+
+  body {
+    font-family: var(--sf-font-ui);
+    color: var(--sf-ink-900);
+    /* §11: cream background, never white. */
+    background-color: var(--sf-page);
+  }
+
+  /* §11: focus is always visible — 4px gold ring plus a 2px ink outline.
+     Never removed. */
+  :focus-visible {
+    outline: 2px solid var(--sf-ink-900);
+    outline-offset: 2px;
+    box-shadow: var(--sf-focus-ring);
+  }
+}
+
+/* Style guide §02: the locked verdict mapping. Colour is never the sole signal —
+   every verdict also carries an underline style.
+
+   Deliberately NOT inside `@layer utilities`. Tailwind only emits layered rules
+   whose class names it finds as literals while scanning `content`, and these are
+   applied dynamically (`verdict-${verdict}`). Layered, they get purged and every
+   verdict silently renders as plain ink — which is precisely the "colour alone"
+   accessibility failure §11 forbids. As plain CSS they are always emitted. */
+.verdict-decodable {
+  color: var(--sf-v-decodable);
+  text-decoration: underline solid 2px;
+  text-underline-offset: 6px;
+}
+.verdict-sight {
+  color: var(--sf-v-sight);
+  text-decoration: underline dotted 2px;
+  text-underline-offset: 6px;
+}
+.verdict-story {
+  color: var(--sf-v-story);
+  text-decoration: underline double 2px;
+  text-underline-offset: 6px;
+}
+.verdict-violation {
+  color: var(--sf-v-violation);
+  text-decoration: underline wavy 2px;
+  text-underline-offset: 6px;
+}
+.verdict-oov {
+  color: var(--sf-v-oov);
+  background: var(--sf-v-oov-bg);
+  text-decoration: line-through;
+}
+
+/* §05: honour prefers-reduced-motion globally. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
