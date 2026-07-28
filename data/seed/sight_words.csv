@@ -1,0 +1,36 @@
+# Per-stage sight words (§4, Appendix A) — high-frequency non-decodable words.
+# Cumulative: a kid at stage N has every word with stage <= N.
+stage,word
+1,the
+1,a
+1,i
+2,is
+2,to
+2,no
+2,go
+3,he
+3,she
+3,we
+3,me
+3,was
+4,said
+4,you
+4,they
+5,are
+5,her
+5,all
+6,some
+6,come
+6,there
+7,little
+7,one
+7,when
+8,what
+8,out
+8,oh
+9,people
+9,your
+10,because
+10,again
+11,thought
+11,through

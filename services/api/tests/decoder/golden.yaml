@@ -1,0 +1,58 @@
+# §5.7 golden cases. THESE ARE THE ACCEPTANCE CRITERIA.
+#
+# Appendix B is explicit: "the tests are the acceptance criteria, the CSV is an
+# implementation detail". When a case fails, edit gpcs.csv — never the aligner,
+# and never this file (see .claude skill `justify-test-edit`).
+#
+# `alignment` is asserted on the cases where the *reasoning* matters, not just
+# the verdict — without it a wrong-but-lucky path would pass.
+
+- {id: cat-1, word: cat, stage: 1, expect: decodable, alignment: [c|K, a|AE, t|T]}
+- {id: ship-2, word: ship, stage: 2, expect: violation, missing: [sh|SH]}
+- {id: ship-3, word: ship, stage: 3, expect: decodable}
+- {id: the-1, word: the, stage: 1, expect: sight}
+- {id: duck-2, word: duck, stage: 2, expect: decodable, alignment: [d|D, u|AH, ck|K]}
+- {id: cake-4, word: cake, stage: 4, expect: violation, missing: [a_e|EY]}
+# The split digraph: 3 letters, 2 GPCs, one composite edge.
+- {id: cake-5, word: cake, stage: 5, expect: decodable, alignment: [c|K, a_e|EY, k|K]}
+# `x` is one grapheme consuming two phonemes.
+- {id: fox-2, word: fox, stage: 2, expect: decodable, alignment: [f|F, o|AA, x|K.S]}
+- {id: night-5, word: night, stage: 5, expect: violation, missing: [igh|AY]}
+- {id: night-6, word: night, stage: 6, expect: decodable}
+# singer/finger are the pair that pins the `ng|NG` vs `n|NG` distinction:
+# CMUdict gives S IH1 NG ER0 but F IH1 NG G ER0 — there is no /g/ in "singer".
+- {id: singer-6, word: singer, stage: 6, expect: decodable, alignment: [s|S, i|IH, ng|NG, er|ER]}
+- {id: finger-6, word: finger, stage: 6, expect: decodable, alignment: [f|F, i|IH, n|NG, g|G, er|ER]}
+# Heteronym: §5.2.5 lets ANY pronunciation pass, so /riːd/ carries it. The flag
+# records that a child could still meet the /rɛd/ reading.
+- {id: read-6, word: read, stage: 6, expect: decodable, flags: {heteronym_flag: true}}
+# Soft c. The missing set must be exactly {c|S} — if `y|IY` were not yet mastered
+# the set would be size 2, which is how this case pins y|IY to stage 6.
+- {id: city-8, word: city, stage: 8, expect: violation, missing: [c|S]}
+- {id: city-9, word: city, stage: 9, expect: decodable, alignment: [c|S, i|IH, t|T, y|IY]}
+# §5.2.6 schwa relaxation: `o` matches the reduced AH0 via its citation GPC.
+- {id: dragon-4, word: dragon, stage: 4, expect: decodable, flags: {schwa_relaxed: true}}
+- {id: zorp, word: zorp, stage: 12, expect: oov}
+# In CMUdict but unspellable by the inventory (B Y UW1 T AH0 F AH0 L needs `eau`).
+# VIOLATION with an empty missing set and alignable=false — NOT a seventh verdict.
+- {id: beautiful-12, word: beautiful, stage: 12, expect: violation, missing: [],
+   flags: {alignable: false}}
+
+# §17 item 1 is the thesis in one slide. Locked so it cannot regress.
+- id: demo-sentence-stage-3
+  text: The knight sees a beautiful dragon
+  stage: 3
+  story_words: [dragon]
+  expect_verdicts:
+    the: sight
+    knight: violation
+    sees: violation
+    a: sight
+    beautiful: violation
+    dragon: story
+  expect_missing:
+    knight: [igh|AY, kn|N]
+    sees: [ee|IY, s|Z]
+  expect_decodability: 0.0
+  expect_story_words: 1
+  expect_oov: 0

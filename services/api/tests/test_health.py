@@ -5,6 +5,8 @@ up (`make db`), which is exactly the point — a health check that passes withou
 database is not evidence of anything.
 """
 
+import re
+
 import httpx
 import pytest
 
@@ -32,8 +34,22 @@ async def test_health_reports_a_live_database(client):
     assert db["detail"].startswith("postgres 16"), db["detail"]
 
 
+async def test_health_reports_a_genuinely_loaded_decoder(client):
+    """§15: health checks the CMUdict load, not merely that the module imports.
+
+    Phase 0 asserted `pending` here. Phase 1 built the decoder, so the assertion
+    was replaced with the stronger claim — the detail string must carry real
+    counts read from the pinned artifacts.
+    """
+    decoder = (await client.get("/api/health")).json()["components"]["decoder"]
+    assert decoder["status"] == "ok", decoder["detail"]
+
+    entries, gpcs = re.search(r"cmudict (\d+) entries, (\d+) gpcs", decoder["detail"]).groups()
+    assert int(entries) > 100_000
+    assert int(gpcs) > 50
+
+
 async def test_health_declares_unbuilt_components_as_pending(client):
-    """Phase 0 must not overstate what exists: decoder and Anthropic are pending."""
+    """Health must not overstate what exists. Generation lands in phase 3."""
     components = (await client.get("/api/health")).json()["components"]
-    assert components["decoder"]["status"] == "pending"
     assert components["anthropic"]["status"] == "pending"

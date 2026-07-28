@@ -29,8 +29,83 @@ to Safari 16.4, which is a real risk for a tablet-first kid app on older iPads.
 addresses to a third party; self-hosting keeps the COPPA posture the doc claims
 in §13 and the README.
 
+**0.6 — Verdict CSS lives outside `@layer utilities`.**
+Tailwind only emits layered rules whose class names it finds as literals while
+scanning `content`. The verdict classes are applied dynamically, so layering them
+purged all four and every verdict rendered as plain ink — precisely the
+"colour alone" failure style guide §11 forbids. Caught by asserting computed
+styles in a real browser, not by the build passing.
+
 **0.5 — Unimplemented Makefile targets exit non-zero.**
 §0 requires `make dev/test/eval/seed` to work from the repo root. `eval`,
 `precompute`, `warm`, and `codegen` are later-phase targets; they are present but
 fail loudly with the phase that will implement them, rather than silently
 succeeding and creating a false green.
+
+---
+
+## Phase 1 — decoder
+
+**1.1 — Four GPCs move stage, and one is added, against Appendix A.**
+Appendix A contradicts the §5.7 golden table. Appendix B settles it: "the tests
+are the acceptance criteria, the CSV is an implementation detail."
+
+| GPC | Appendix A | Now | Forced by |
+|---|---|---|---|
+| `c\|K` | 2 | **1** | `cat@1` must be DECODABLE |
+| `x\|K.S` | 3 | **2** | `fox@2` must be DECODABLE |
+| `er\|ER` | 7 | **6** | `singer@6`, `finger@6` |
+| `y\|IY` | 11 | **6** | `city@9` decodable *and* `city@8` missing exactly `{c\|S}` |
+| `n\|NG` | absent | **3** | `finger` is `F IH1 NG G ER0` — /ŋ/ spelled with a bare `n` |
+
+**1.2 — Split digraphs are composite edges.**
+`a_e` and friends consume 3 letters and emit 2 GPCs (the split vowel plus the
+consonant it straddles), which exceeds §5.2.4's literal "0–2 phonemes" per step.
+The vowel's phoneme and the straddled consonant's phoneme are not adjacent to the
+vowel's letter, so a plain 2-D DP cannot express the move. This is the smallest
+change that works and keeps the aligner data-driven.
+
+**1.3 — Position constraints are narrow by design.**
+Only genuinely position-sensitive graphemes are constrained (`kn`/`wr` initial,
+`mb` final, `y` as consonant initial / as vowel final, suffixes final). Marking
+doubles or `ng` as final produced false VIOLATIONs — `ng` in "singer", `ll` in
+"little". A false violation is worse than a missed one: it shrinks the allowlist
+and starves generation.
+
+**1.4 — `gpcs.csv` lives in the package; `data/seed/gpcs.csv` is a symlink.**
+The decoder must load identically from the API, the eval CLI and tests, so it
+cannot resolve repo-relative paths — but Appendix B names `data/seed/gpcs.csv`.
+One byte-sequence, both paths true, asserted by a test. Note for Phase 7: a
+Docker `COPY` must target the package path, since symlinks do not survive a build
+context.
+
+**1.5 — `WordReport` gains four additive fields.**
+`alignable`, `missing_minimal`, `heteronym_flag`, `schwa_relaxed`. Each exists to
+surface a real limitation instead of hiding it (§5.3's posture, applied further).
+
+**1.6 — CMUdict-known but inventory-unspellable words are VIOLATION, not a new verdict.**
+`beautiful` (needs `eau`), `of` (`f`→/v/) get `alignable=False` and an empty
+missing set. §5.1 defines six verdicts and stays at six. The unalignable *rate* is
+the monitored alarm for the inventory being too small (§18).
+
+**1.7 — Heteronyms are disclosed, not resolved.**
+§5.2.5 mandates that any pronunciation may pass, so `read@6` is DECODABLE via
+/riːd/ even in a sentence requiring /rɛd/. The validator cannot know which. Rather
+than weaken the gate or silently over-credit, `heteronym_flag` records it and eval
+reports the rate.
+
+**1.8 — Minimal missing-GPC set is bounded.**
+Iterative deepening over subsets of the unmastered GPCs present in the word's
+lattice, capped at 14 candidates / size 3. Beyond the cap the answer is still a
+correct missing set but is flagged `missing_minimal=False`, so an approximation is
+never mistaken for a proof.
+
+**1.9 — Digits tokenise as words and fail as OOV.**
+A numeral in a decodable reader is a real problem, not free punctuation. Loud
+beats silent.
+
+**Measured, for the record:** on 1,500 randomly sampled CMUdict words, 35.8% are
+decodable at some stage and 64.2% are unspellable by the 82-GPC inventory. That
+is the conservative direction (§18) — the adult lexicon is full of proper nouns
+and Latinate spellings the inventory deliberately omits, and §5.4's precompute
+intersects with SUBTLEX top-20k before any of it reaches a prompt.

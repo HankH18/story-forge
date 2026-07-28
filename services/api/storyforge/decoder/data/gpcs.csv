@@ -1,0 +1,93 @@
+# Master GPC inventory (Appendix B). DATA, NOT CODE — §18: if golden cases fight
+# the inventory, shrink this file rather than adding cleverness to the aligner.
+#
+# phonemes  space-separated stress-stripped ARPAbet; empty means silent.
+# position  any | initial | final — where the grapheme may appear in a word.
+# schwa_ok  may this grapheme's citation vowel match a reduced AH0/IH0 (§5.2.6)?
+#           Single letters only; vowel teams must never relax, or the rule
+#           becomes a universal solvent.
+# stage     first stage at which the GPC is mastered (Appendix A, corrected by
+#           the §5.7 goldens — see docs/DEVIATIONS.md 1.1).
+grapheme,phonemes,kind,position,stage,schwa_ok,example
+s,S,single,any,1,0,sat
+a,AE,single,any,1,1,cat
+t,T,single,any,1,0,tap
+p,P,single,any,1,0,pin
+i,IH,single,any,1,1,sit
+n,N,single,any,1,0,net
+m,M,single,any,1,0,mat
+d,D,single,any,1,0,dad
+c,K,single,any,1,0,cat
+g,G,single,any,2,0,got
+o,AA,single,any,2,1,pot
+o,AO,single,any,2,1,dog
+k,K,single,any,2,0,kit
+e,EH,single,any,2,1,pet
+u,AH,single,any,2,1,duck
+r,R,single,any,2,0,run
+h,HH,single,any,2,0,hat
+b,B,single,any,2,0,bat
+f,F,single,any,2,0,fan
+l,L,single,any,2,0,lip
+ck,K,double,any,2,0,duck
+ss,S,double,any,2,0,miss
+ll,L,double,any,2,0,bell
+ff,F,double,any,2,0,off
+zz,Z,double,any,2,0,buzz
+x,K S,multi_phoneme,any,2,0,fox
+sh,SH,digraph,any,3,0,ship
+ch,CH,digraph,any,3,0,chip
+th,TH,digraph,any,3,0,thin
+th,DH,digraph,any,3,0,this
+ng,NG,digraph,any,3,0,sing
+n,NG,single,any,3,0,finger
+qu,K W,multi_phoneme,any,3,0,quick
+w,W,single,any,3,0,win
+y,Y,single,initial,3,0,yes
+z,Z,single,any,3,0,zip
+v,V,single,any,3,0,van
+j,JH,single,any,3,0,jam
+s,Z,suffix,final,4,0,dogs
+es,IH Z,suffix,final,4,0,boxes
+ed,T,suffix,final,4,0,jumped
+ed,D,suffix,final,4,0,filled
+ed,IH D,suffix,final,4,0,wanted
+ing,IH NG,suffix,final,4,0,jumping
+a_e,EY,split,any,5,0,cake
+i_e,AY,split,any,5,0,bike
+o_e,OW,split,any,5,0,bone
+u_e,UW,split,any,5,0,tube
+u_e,Y UW,split,any,5,0,cube
+e_e,IY,split,any,5,0,these
+ai,EY,vowel_team,any,6,0,rain
+ay,EY,vowel_team,any,6,0,day
+ee,IY,vowel_team,any,6,0,see
+ea,IY,vowel_team,any,6,0,read
+oa,OW,vowel_team,any,6,0,boat
+ow,OW,vowel_team,any,6,0,snow
+igh,AY,vowel_team,any,6,0,night
+er,ER,r_controlled,any,6,0,singer
+y,IY,vowel_team,final,6,0,city
+y,AY,vowel_team,final,6,0,my
+ar,AA R,r_controlled,any,7,0,car
+or,AO R,r_controlled,any,7,0,for
+ir,ER,r_controlled,any,7,0,bird
+ur,ER,r_controlled,any,7,0,turn
+oi,OY,vowel_team,any,8,0,coin
+oy,OY,vowel_team,any,8,0,boy
+ou,AW,vowel_team,any,8,0,out
+ow,AW,vowel_team,any,8,0,cow
+au,AO,vowel_team,any,8,0,haul
+aw,AO,vowel_team,any,8,0,saw
+oo,UW,vowel_team,any,8,0,moon
+oo,UH,vowel_team,any,8,0,book
+c,S,soft,any,9,0,city
+g,JH,soft,any,9,0,gem
+kn,N,silent_pair,initial,9,0,knight
+wr,R,silent_pair,initial,9,0,write
+mb,M,silent_pair,final,9,0,lamb
+ph,F,digraph,any,9,0,phone
+le,AH L,suffix,final,10,0,little
+ti,SH,soft,any,11,0,action
+si,ZH,soft,any,11,0,vision
+ture,CH ER,suffix,final,11,0,picture
