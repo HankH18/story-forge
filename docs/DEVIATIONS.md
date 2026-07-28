@@ -109,3 +109,44 @@ decodable at some stage and 64.2% are unspellable by the 82-GPC inventory. That
 is the conservative direction (§18) — the adult lexicon is full of proper nouns
 and Latinate spellings the inventory deliberately omits, and §5.4's precompute
 intersects with SUBTLEX top-20k before any of it reaches a prompt.
+
+**1.10 — Ten GPCs added beyond Appendix A; inventory 82 -> 92.**
+Measured against 92 real early-reader words, nine were unspellable: *house,
+mouse, little, happy, funny, water, sunny, bunny, puppy*. Three gaps caused all
+nine.
+
+| Added | Stage | Why |
+|---|---|---|
+| `tt pp nn dd gg bb mm rr` | 2 | The doubling convention. Appendix A lists only `ck ss ll ff`, but without these *happy, little, rabbit, kitten, carrot, egg* are all unspellable. Same rule, same stage. |
+| `e` (silent) | 5 | Standalone silent final `e` — the split digraphs already cover *cake*, but not *house*, *mouse*, *have*. |
+| `wa` -> /wɔ/ | 7 | "w changes the a". Scoped as the two-letter unit rather than a bare `a`->/ɔ/, which would fire anywhere. |
+
+The boundary applied: **does a real scope & sequence teach this?** `pp` is taught
+in week three of every phonics programme; `eau` is taught to nobody at this
+level. Adding the first makes the gate more accurate, the second less. Appendix B
+budgets ~100 entries, so 92 is inside the doc's own target.
+
+Explicitly NOT done: importing a descriptive GPC table (Brooks, Gontijo, 400+
+entries). §5.2.5 makes the validator an existence check, so every GPC widens what
+passes and none narrows it. A comprehensive table would certify *beautiful* and
+*colonel* and the guarantee would mean nothing — while still reporting a healthy
+number on the eval dashboard.
+
+**1.11 — Anti-golden tests (`tests/decoder/test_anti_golden.py`).**
+The golden suite proves the validator accepts what it should; nothing there stops
+the inventory growing until it accepts everything. Two guards:
+
+- 16 named words that must never align at any stage, each annotated with the
+  correspondence it would require.
+- A vacuity ratchet: the share of an 800-word adult-dictionary sample decodable
+  at stage 12, currently 44.6%, ceiling 50%.
+
+Both were **sabotage-tested rather than assumed**. Adding `eau|Y.UW` trips the
+named list on *beautiful*; an eleven-rule junk vowel import that hits no named
+word trips the ratchet at 58.8%. The ratchet's first draft used a 0.60 ceiling
+and let that same import pass — a guard nobody has fired at is not a guard.
+
+Known limitation: the ratchet does not cleanly separate good growth from bad. The
+ten justified rows above moved it +8.8 points; the junk import moved it +14.2.
+The named list is the primary guard; the ratchet is a backstop for gross
+dissolution.

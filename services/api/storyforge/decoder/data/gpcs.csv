@@ -34,6 +34,17 @@ ss,S,double,any,2,0,miss
 ll,L,double,any,2,0,bell
 ff,F,double,any,2,0,off
 zz,Z,double,any,2,0,buzz
+# The doubling convention — a doubled consonant spells one sound. Appendix A
+# lists only ck/ss/ll/ff, but without these eight, "happy", "little", "rabbit",
+# "kitten" and "carrot" are all unspellable. Same rule, same stage.
+tt,T,double,any,2,0,little
+pp,P,double,any,2,0,happy
+nn,N,double,any,2,0,funny
+dd,D,double,any,2,0,ladder
+gg,G,double,any,2,0,egg
+bb,B,double,any,2,0,rabbit
+mm,M,double,any,2,0,hammer
+rr,R,double,any,2,0,carrot
 x,K S,multi_phoneme,any,2,0,fox
 sh,SH,digraph,any,3,0,ship
 ch,CH,digraph,any,3,0,chip
@@ -59,6 +70,9 @@ o_e,OW,split,any,5,0,bone
 u_e,UW,split,any,5,0,tube
 u_e,Y UW,split,any,5,0,cube
 e_e,IY,split,any,5,0,these
+# Standalone silent final e — the same lesson as the split digraphs ("the e on
+# the end is quiet"), but for words with no long vowel: house, mouse, have.
+e,,silent,final,5,0,house
 ai,EY,vowel_team,any,6,0,rain
 ay,EY,vowel_team,any,6,0,day
 ee,IY,vowel_team,any,6,0,see
@@ -73,6 +87,9 @@ ar,AA R,r_controlled,any,7,0,car
 or,AO R,r_controlled,any,7,0,for
 ir,ER,r_controlled,any,7,0,bird
 ur,ER,r_controlled,any,7,0,turn
+# "w changes the a" — deliberately scoped as the two-letter `wa` unit rather than
+# a bare a->/aw/, which would fire anywhere and let far too much through.
+wa,W AO,vowel_team,any,7,0,water
 oi,OY,vowel_team,any,8,0,coin
 oy,OY,vowel_team,any,8,0,boy
 ou,AW,vowel_team,any,8,0,out
