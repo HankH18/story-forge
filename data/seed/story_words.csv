@@ -1,0 +1,32 @@
+# Story-word bank (§5.5): theme words a reader cannot yet decode, offered to
+# generation which picks <=3 per story. Each renders as a picture chip with
+# tap-to-hear (style guide §07) and is EXCLUDED from the decodability
+# denominator but reported separately.
+#
+# min_stage = earliest stage this word may be offered at. Words are deliberately
+# NOT required to be decodable — that is the entire point of a story word.
+theme,word,gloss,min_stage
+dragons,dragon,a big lizard that can fly,1
+dragons,knight,a person in metal armour,1
+dragons,castle,a huge stone house with towers,1
+dragons,treasure,gold and jewels,3
+dragons,cave,a hole in a hill you can walk into,1
+dragons,wings,what a bird or dragon flies with,1
+dragons,fire,hot orange flames,1
+dragons,scales,the small hard bits on a lizard,3
+space,rocket,a ship that flies to space,1
+space,planet,a big round world in space,1
+space,moon,the white circle in the night sky,1
+space,stars,the tiny lights in the night sky,1
+space,alien,someone from another planet,3
+space,astronaut,a person who goes to space,3
+space,comet,a rock in space with a bright tail,3
+space,orbit,the path around a planet,5
+animals,rabbit,a small animal with long ears,1
+animals,elephant,a huge grey animal with a trunk,1
+animals,giraffe,a tall animal with a long neck,1
+animals,penguin,a black and white bird that swims,1
+animals,forest,a place with many trees,1
+animals,burrow,a hole an animal lives in,3
+animals,feathers,what covers a bird,3
+animals,whiskers,the long hairs on a cat's face,3

@@ -1,0 +1,7 @@
+# Kid-facing themes (§8). emoji is a pre-asset fallback only — style guide §07
+# permits it in exactly one place, the themes.emoji column, until real cover art
+# exists.
+slug,display_name,emoji
+dragons,Dragons,🐲
+space,Space,🚀
+animals,Animals,🦊

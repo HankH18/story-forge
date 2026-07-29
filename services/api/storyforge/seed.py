@@ -14,11 +14,12 @@ import asyncio
 import csv
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from storyforge.db import SessionLocal
 from storyforge.decoder import load_gpcs
-from storyforge.models import AllowedWord, Gpc, SightWord, Stage
+from storyforge.models import AllowedWord, Gpc, SightWord, Stage, StoryWord, Theme
 
 SEED_DIR = Path(__file__).resolve().parents[3] / "data/seed"
 
@@ -94,13 +95,61 @@ async def seed_sight_words(session) -> int:
     return len(rows)
 
 
+async def seed_themes(session) -> int:
+    rows = [
+        {"slug": r["slug"].strip(), "display_name": r["display_name"], "emoji": r["emoji"]}
+        for r in _rows("themes.csv")
+    ]
+    stmt = insert(Theme).values(rows)
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[Theme.slug],
+            set_={c: stmt.excluded[c] for c in ("display_name", "emoji")},
+        )
+    )
+    return len(rows)
+
+
+async def seed_story_words(session) -> int:
+    """Depends on themes, so it resolves slugs after `seed_themes` has run."""
+    theme_ids = {
+        slug: tid
+        for tid, slug in (await session.execute(select(Theme.id, Theme.slug))).all()
+    }
+    rows = []
+    for r in _rows("story_words.csv"):
+        theme_id = theme_ids.get(r["theme"].strip())
+        if theme_id is None:
+            raise SystemExit(f"story_words.csv references unknown theme {r['theme']!r}")
+        rows.append(
+            {
+                "theme_id": theme_id,
+                "word": r["word"].strip().lower(),
+                "gloss": r["gloss"].strip(),
+                "min_stage": int(r["min_stage"]),
+            }
+        )
+    stmt = insert(StoryWord).values(rows)
+    await session.execute(
+        stmt.on_conflict_do_update(
+            constraint="uq_storyword_theme_word",
+            set_={c: stmt.excluded[c] for c in ("gloss", "min_stage")},
+        )
+    )
+    return len(rows)
+
+
 async def run() -> dict[str, int]:
     async with SessionLocal() as session:
         counts = {
             "stages": await seed_stages(session),
             "gpcs": await seed_gpcs(session),
             "sight_words": await seed_sight_words(session),
+            "themes": await seed_themes(session),
         }
+        # story_words resolves theme slugs, so themes must be flushed first.
+        await session.flush()
+        counts["story_words"] = await seed_story_words(session)
         await session.commit()
     return counts
 

@@ -93,3 +93,38 @@ class AllowedWord(Base):
     syllables: Mapped[int] = mapped_column(Integer)
     # 1 = most frequent. Rank within the vendored frequency list.
     freq_rank: Mapped[int] = mapped_column(Integer)
+
+
+class Theme(Base):
+    """Kid-facing theme (§8).
+
+    `emoji` is a pre-asset fallback only. Style guide §07 permits emoji in
+    exactly one place — this column — until real cover art exists.
+    """
+
+    __tablename__ = "themes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slug: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(64))
+    emoji: Mapped[str] = mapped_column(String(8), default="")
+
+
+class StoryWord(Base):
+    """Theme vocabulary a reader cannot yet decode (§5.5).
+
+    Deliberately NOT required to be decodable — that is the point. Generation
+    picks at most three per story; each renders as a picture chip with
+    tap-to-hear, is excluded from the decodability denominator, and is reported
+    separately (§4).
+    """
+
+    __tablename__ = "story_word_bank"
+    __table_args__ = (UniqueConstraint("theme_id", "word", name="uq_storyword_theme_word"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    theme_id: Mapped[int] = mapped_column(ForeignKey("themes.id"), index=True)
+    word: Mapped[str] = mapped_column(String(64))
+    gloss: Mapped[str] = mapped_column(Text, default="")
+    # Earliest stage this word may be offered at.
+    min_stage: Mapped[int] = mapped_column(Integer, default=1)

@@ -196,3 +196,43 @@ in 1.6s** — 190x inside the 5-minute budget. Per-stage counts run 159 (stage 1
 by up to 3.8x. This is the opposite of the feared starvation risk and is harmless:
 §6 caps the generation prompt at the top 400 by frequency, and the full table is
 the browsable §5.4 artifact. Stage 1 at 159 words is the genuinely tight one.
+
+---
+
+## Phase 3 — generation (in progress)
+
+**3.1 — Structured outputs use `output_config.format`, not tool-use JSON schema.**
+§6 and §7 call for "structured outputs enforced via Anthropic tool-use JSON
+schema". The API now has native structured outputs, which constrain the response
+directly rather than routing through a tool call. Strictly better here: no
+tool-call parsing, and no failure mode where the model returns prose when a tool
+call was expected. §7's `api_fail` taxonomy still covers a schema-parse failure.
+
+**3.2 — Model IDs are `claude-sonnet-5` and `claude-haiku-4-5`.**
+Bare aliases, never date-suffixed. §3 requires model IDs live in env; the values
+in `.env.example` are defaults, not hard-codes.
+
+**3.3 — `max_tokens=8000` for a 30-200 word story.**
+Looks oversized, and isn't. On Sonnet 5 adaptive thinking is ON when the
+`thinking` parameter is omitted, and thinking counts against `max_tokens`. A
+tight budget produces a response that is mostly thinking plus a truncated story
+(`stop_reason: "max_tokens"`) — which reads as a bad model rather than a bad
+parameter.
+
+**3.4 — Sampling parameters are absent by necessity.**
+Sonnet 5 rejects non-default `temperature`/`top_p`/`top_k` with a 400. Output
+variety, where wanted, has to come from prompting.
+
+**3.5 — Prompt is split for per-stage cache reuse.**
+Render order is tools -> system -> messages, so the stable material (frozen rules,
+then the stage's vocabulary) goes in `system` with the cache breakpoint after the
+vocabulary; per-request material (theme, story words, length) goes in `messages`.
+Generating N stories for one stage pays the vocabulary cost once.
+`test_system_rules_are_frozen_of_request_detail` guards the split — any
+per-request detail leaking into the frozen block would silently destroy the cache.
+
+**3.6 — Cost accounting takes an explicit date.**
+`price_for(model, on)` rather than `date.today()`, so an eval report regenerated
+later reproduces its original numbers. Sonnet 5's introductory pricing expires
+2026-08-31; encoding the cutover keeps reports honest across it instead of
+silently under-reporting cost from September.
