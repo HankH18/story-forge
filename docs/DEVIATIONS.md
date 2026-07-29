@@ -236,3 +236,19 @@ per-request detail leaking into the frozen block would silently destroy the cach
 later reproduces its original numbers. Sonnet 5's introductory pricing expires
 2026-08-31; encoding the cutover keeps reports honest across it instead of
 silently under-reporting cost from September.
+
+**3.7 — `TextReport` gains `distinct_story_words`; §7's gate uses it.**
+§4 caps story words at "<=3 per story". `story_word_count` counts token
+occurrences, so a story using "dragon" three times scored 3 against the cap and
+was rejected — even though the child meets exactly one new picture-chip word.
+Repetition is correct decodable-reader behaviour. The gate now counts distinct
+story words; `story_word_count` remains as an occurrence metric for eval.
+
+**3.8 — The model's `story_words_used` claim is intersected with the offered bank.**
+Story words are excluded from the decodability denominator, so an unchecked
+self-report lets the generator shrink its own denominator and inflate its score.
+Observed live: a draft declared "king", "big", "class" and "red" as story words —
+none offered — cutting the scored word count from 11 to 6 and reporting 100%.
+§0 is explicit that the LLM is an untrusted generator and a pure function is the
+gate, so the claim is now intersected with the words actually offered and
+anything invented falls through to normal scoring.

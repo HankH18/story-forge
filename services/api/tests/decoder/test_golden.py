@@ -60,3 +60,23 @@ def test_golden_text(case):
     assert report.decodability == pytest.approx(case["expect_decodability"])
     assert report.story_word_count == case["expect_story_words"]
     assert report.counts["oov"] == case["expect_oov"]
+
+
+def test_story_words_distinct_vs_occurrences():
+    """§4's "<=3 per story" limits DISTINCT story words, not appearances.
+
+    Repeating a story word is correct decodable-reader behaviour — the child
+    meets one new picture-chip word, however often it recurs. Counting
+    occurrences made the pipeline reject compliant stories.
+    """
+    from storyforge.decoder import validate_text
+
+    report = validate_text(
+        "The dragon ran. The dragon sat in the cave. The dragon fell.",
+        mastered_ids(3),
+        sight_words(3),
+        frozenset({"dragon", "cave"}),
+    )
+    assert report.story_word_count == 4  # dragon x3 + cave
+    assert report.distinct_story_words == ["cave", "dragon"]
+    assert len(report.distinct_story_words) == 2

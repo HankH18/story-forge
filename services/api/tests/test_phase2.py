@@ -183,3 +183,28 @@ async def test_validate_endpoint_rejects_an_unseeded_stage(client):
 async def test_validate_endpoint_rejects_overlong_text(client):
     resp = await client.post("/api/validate", json={"text": "a " * 3000, "stage_id": 1})
     assert resp.status_code == 422
+
+
+# --- pipeline integrity ------------------------------------------------------
+async def test_invented_story_words_cannot_shrink_the_denominator(session):
+    """§0: the LLM is an untrusted generator.
+
+    Story words are excluded from the decodability denominator, so a model that
+    declares ordinary words as "story words" inflates its own score. The claim
+    must be intersected with the words actually offered.
+    """
+    from storyforge.pipeline import load_vocabulary, validate_draft
+
+    vocab = await load_vocabulary(session, 3, "dragons")
+    text_body = "The king set a big dragon. The big lot got and the class red ran last."
+
+    honest = validate_draft(vocab, text_body, ["dragon"])
+    inflated = validate_draft(
+        vocab, text_body, ["dragon", "king", "big", "class", "red"]
+    )
+
+    # Only the genuinely-offered word survives the intersection.
+    assert honest.distinct_story_words == ["dragon"]
+    assert inflated.distinct_story_words == ["dragon"]
+    # And the denominator is therefore identical — the claim buys nothing.
+    assert inflated.scored_word_count == honest.scored_word_count

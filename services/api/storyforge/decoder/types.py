@@ -86,7 +86,13 @@ class TextReport(BaseModel):
     words: list[WordReport]
     decodability: float
     violations: list[WordReport]
+    # Token occurrences of story words — equals counts["story"]. Repetition is
+    # good in a decodable reader, so this is a reporting metric, NOT the gate.
     story_word_count: int
+    # The DISTINCT story words. §4's "<=3 per story" is a limit on how many new
+    # picture-chip words a child must absorb, so this is what §7 gates on —
+    # using "dragon" four times is still one story word.
+    distinct_story_words: list[str] = Field(default_factory=list)
 
     # Additive reporting surface for the eval harness (§14).
     counts: dict[str, int] = Field(default_factory=dict)

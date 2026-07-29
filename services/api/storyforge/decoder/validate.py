@@ -94,6 +94,9 @@ def validate_text(
         decodability=decodability,
         violations=[r for r in reports if r.verdict is WordVerdict.VIOLATION],
         story_word_count=counts["story"],
+        distinct_story_words=sorted(
+            {r.word for r in reports if r.verdict is WordVerdict.STORY}
+        ),
         counts=counts,
         scored_word_count=scored,
         schwa_relaxed_count=sum(1 for r in reports if r.schwa_relaxed),

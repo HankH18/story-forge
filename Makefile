@@ -68,7 +68,7 @@ eval: ## Full eval harness run across stages and themes (§14)
 	@echo "make eval: not implemented until phase 7" >&2; exit 1
 
 eval-smoke: ## Regression gate: 2 stages x 1 theme x 2 stories (§14)
-	@echo "make eval-smoke: not implemented until phase 3" >&2; exit 1
+	cd $(API) && uv run python -m storyforge.eval smoke
 
 codegen: ## Regenerate the OpenAPI TypeScript client (§3)
 	@echo "make codegen: not implemented until phase 4" >&2; exit 1
