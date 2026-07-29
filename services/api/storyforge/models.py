@@ -1,11 +1,12 @@
 """ORM models (§8).
 
 Tables land in the phase that actually exercises them — an empty table passing a
-phase gate is a false green. Readings, answers, gpc_stats and eval_runs (§8)
-arrive with Phases 5 and 7.
+phase gate is a false green. `eval_runs`/`eval_run_items` (§8) arrive with Phase 7.
 
     stages ──< sight_words
        │   └──< allowed_words       (precompute output, §5.4)
+       │   └──< kids ──< readings ──< answers >── questions
+       │                  └──< gpc_stats >── gpcs
        └──< stories ──< story_segments
     themes ──┘   └──< story_word_bank
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -250,5 +252,143 @@ class Question(Base):
     prompt: Mapped[str] = mapped_column(Text)
     # tap_word: {"options": [...]}; mcq2: {"options": [a, b]}
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
-    # {"correct": "shed"} — never sent to kid mode unvalidated.
+    # {"correct": "shed", "index": 0} — graded server-side at
+    # POST /api/readings/{id}/answers and NEVER shipped to a client. §8's
+    # promotion rule is only meaningful while these counts are unforgeable.
     answer: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class Kid(Base):
+    """A reader (§8, §13).
+
+    **The whole COPPA posture is in the column list.** §13 gives kids no account,
+    no auth identity, no email, no date of birth, no voice and no free-text
+    input — so this table holds a first name, a stage, and nothing else. There is
+    deliberately no column a future feature could quietly fill with PII; adding
+    one is a §13 decision, not a schema tweak.
+
+    `parent_id` is a plain nullable int rather than `fk users`, on the DEVIATIONS
+    3.9 precedent: `users` lands with Clerk in Phase 6, and a FK to a table that
+    does not exist cannot be created. Reserving the column now means Phase 6 adds
+    a constraint rather than a column — and the ownership shape §9 requires
+    ("parent → own kids only") is already in the schema.
+    """
+
+    __tablename__ = "kids"
+    __table_args__ = (Index("ix_kids_parent", "parent_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # First name only (§13). Bounded here as well as in the API so a direct
+    # writer cannot store an essay.
+    display_name: Mapped[str] = mapped_column(String(40))
+    stage_id: Mapped[int] = mapped_column(ForeignKey("stages.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Reading(Base):
+    """One kid's pass through one story (§8).
+
+    `completed_at` is the idempotency latch for the whole mastery pipeline.
+    `POST /api/readings/{id}/complete` sets it with a single conditional UPDATE,
+    so exactly one caller can ever observe the transition and `gpc_stats` cannot
+    be incremented twice for the same reading (§8: promotion must be honest).
+
+    `path` records branch choices for the dashboard (§10: "Maya chose the cave
+    path") as `{"choices": [{"segment_id": n, "choice": "...", "at": iso}]}`.
+    Branching is schema-only until §10's generator lands, so the list is normally
+    empty — but the endpoint and the storage shape are real.
+
+    `stage_id` is additive to §8 and is the kid's stage **when the reading
+    started**, not the story's. §8's promotion rule counts "stories completed at
+    current stage"; the §7 fallback ladder deliberately serves *lower*-stage
+    stories when a pool is empty, so `stories.stage_id` would undercount, and
+    after a promotion there would be no way to tell which readings belonged to
+    the stage just left. Without this column the rule is not computable.
+    """
+
+    __tablename__ = "readings"
+    __table_args__ = (
+        # The two hot queries: "this kid's recent readings" (dashboard) and
+        # "how many has this kid completed at this stage" (promotion).
+        Index("ix_readings_kid_started", "kid_id", "started_at"),
+        Index("ix_readings_kid_stage_done", "kid_id", "stage_id", "completed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kid_id: Mapped[int] = mapped_column(ForeignKey("kids.id", ondelete="CASCADE"), index=True)
+    story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), index=True)
+    stage_id: Mapped[int] = mapped_column(ForeignKey("stages.id"))
+    path: Mapped[dict] = mapped_column(JSONB, default=dict)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class Answer(Base):
+    """One graded response (§8).
+
+    §8 stores the *verdict*, not the response. That is both the spec's shape and
+    the §13 posture: the minimum record that makes mastery computable is a
+    boolean, so nothing more about the child is kept.
+
+    The unique constraint is the anti-forgery guard. Without it a client could
+    resubmit a question until it guessed right and inflate `gpc_stats` — the very
+    signal §8 promotes on. One row per (reading, question), first answer wins.
+    """
+
+    __tablename__ = "answers"
+    __table_args__ = (
+        UniqueConstraint("reading_id", "question_id", name="uq_answer_reading_question"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reading_id: Mapped[int] = mapped_column(
+        ForeignKey("readings.id", ondelete="CASCADE"), index=True
+    )
+    question_id: Mapped[int] = mapped_column(
+        ForeignKey("questions.id", ondelete="CASCADE"), index=True
+    )
+    correct: Mapped[bool] = mapped_column()
+    answered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class GpcStat(Base):
+    """Per-kid, per-GPC evidence (§8) — the entire mastery model.
+
+    Two integers per grapheme-phoneme correspondence. No latent state, no
+    inferred knowledge parameter, nothing a parent cannot read off the row: §8 is
+    explicit that this is "interpretable by design — no BKT". The dashboard's
+    per-GPC accuracy table is `n_correct / n_seen`, and promotion is a comparison
+    against thresholds that are themselves displayed (`storyforge.mastery`).
+
+    `gpc_id` references `gpcs.gpc_id` — the decoder's own stable identifier
+    (`"sh|SH"`) — rather than the surrogate `gpcs.id`. `validate_word().alignment`
+    emits exactly these strings, so the counters join to the validator on the key
+    it actually produces and a row is legible without a join. Same argument as
+    seeding `gpcs` from `load_gpcs()`: one identifier, not two that can drift.
+    """
+
+    __tablename__ = "gpc_stats"
+    __table_args__ = (
+        CheckConstraint("n_correct <= n_seen", name="ck_gpc_stats_correct_le_seen"),
+        CheckConstraint("n_seen >= 0 AND n_correct >= 0", name="ck_gpc_stats_non_negative"),
+        Index("ix_gpc_stats_gpc", "gpc_id"),
+    )
+
+    kid_id: Mapped[int] = mapped_column(
+        ForeignKey("kids.id", ondelete="CASCADE"), primary_key=True
+    )
+    gpc_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("gpcs.gpc_id", ondelete="CASCADE"), primary_key=True
+    )
+    # A GPC *instance* (§8): a word aligning to `d|D` twice counts twice.
+    n_seen: Mapped[int] = mapped_column(Integer, default=0)
+    n_correct: Mapped[int] = mapped_column(Integer, default=0)

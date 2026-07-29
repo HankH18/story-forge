@@ -19,6 +19,7 @@ from storyforge.llm.questions import (
     Mcq2Draft,
     Mcq2Only,
     QuestionDraft,
+    SoundTarget,
     TapWordDraft,
     TapWordOnly,
     build_question_request,
@@ -31,6 +32,7 @@ from storyforge.llm.questions import (
     sound_targets,
     story_supports,
     tap_word_prompt,
+    uses_stage_gpc,
     word_graphemes,
 )
 
@@ -83,7 +85,25 @@ def check_two(draft, stage_id=STAGE, story_text=STORY, seed=7):
     )
 
 
-GOOD_TAP = TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "man"])
+# /w/ ("went") is what stage 3 TEACHES, so it is the only sound this story is
+# offered — see `test_the_offered_sound_is_the_one_this_stage_teaches`. The
+# fixture used to be /h/, which is a stage-2 sound: a perfectly valid question
+# that earns the child no evidence toward promotion (§8), which is the defect
+# `_prefer_current_stage` exists to fix.
+GOOD_TAP = TapWordDraft(target_grapheme="w", correct_word="went", other_words=["ran", "man"])
+
+# The rule tests below check `check_tap_word` as a pure function of the list it
+# is HANDED — "is a distractor carrying the sound rejected?" is a different
+# question from "which sound should be offered?". They hand it this one: /h/,
+# older than stage 3, exactly as the fallback tier would produce.
+H_TARGET = SoundTarget(
+    grapheme="h",
+    cue="had",
+    onset_words=["hit", "hill"],
+    clean_words=["ran", "man", "fast", "up", "back", "glad", "into", "it"],
+    stage=2,
+    scope="older_stage_fallback",
+)
 GOOD_MCQ = Mcq2Draft(
     prompt="Did the man run?",
     correct="The man ran back.",
@@ -108,7 +128,7 @@ def test_question_rules_are_frozen_of_request_detail():
 
 def test_sound_block_offers_the_words_and_the_cue():
     block = build_sound_block(targets())
-    target = next(t for t in targets() if t.grapheme == "h")
+    target = targets()[0]
     assert f"as in {target.cue}" in block
     for word in target.onset_words + target.clean_words:
         assert word in block
@@ -193,7 +213,7 @@ def test_retry_block_names_the_specific_problem():
 # --- the closed sound list ---------------------------------------------------
 def test_targets_are_derived_from_the_story():
     found = {t.grapheme for t in targets()}
-    assert "h" in found  # "hit"/"hill"
+    assert "w" in found  # "went" — the sound stage 3 teaches (§8, see below)
     for target in targets():
         assert target.onset_words
         assert len(target.clean_words) >= 2
@@ -249,6 +269,116 @@ def test_a_story_with_no_usable_sound_offers_nothing():
     )
 
 
+# --- §8: the target must be a sound this stage teaches -----------------------
+# Live failure this section exists for: stage-4 and stage-5 warm stories asked
+# about `fast`, `ran` and `held`. Every one is a valid question and none of them
+# contains a stage-4 or stage-5 GPC, so a reader could complete every story in
+# the pool and accumulate zero evidence toward promotion (§8 measures accuracy
+# over the GPCs introduced AT the current stage, and only `tap_word` counts).
+
+# Stage 4 teaches ONLY final suffixes — ed, es, ing, s|Z — so no word can start
+# with one and the onset tier is structurally impossible there.
+STAGE4_STORY = "The man went up. He jumped fast. A big dog runs and digs."
+
+
+def stage4_targets():
+    return sound_targets(
+        story_text=STAGE4_STORY, stage_id=4, allowed_words=ALLOWED, sight_words=SIGHT
+    )
+
+
+def test_the_offered_sound_is_the_one_this_stage_teaches():
+    """Tier 1: a grapheme introduced at the story's own stage, or nothing."""
+    offered = targets()
+    assert offered, "stage 3 teaches /w/ and the story says 'went'"
+    for target in offered:
+        assert target.stage == STAGE
+        assert target.scope == "current_stage_onset"
+    # And the older sounds the story could ask about are no longer on the menu.
+    assert "h" not in {t.grapheme for t in offered}
+
+
+def test_the_correct_word_earns_evidence_at_the_stage_that_teaches_suffixes():
+    """Tier 2, and the only tier that can ever fire at stage 4.
+
+    No word STARTS with `ed`/`ing`/`s|Z`, so the onset tier is empty by
+    construction. The correct word must therefore be one that uses a stage-4
+    sound somewhere — `jumped`, `runs` — or the child reads a question that
+    teaches nothing new.
+    """
+    offered = stage4_targets()
+    assert offered, "the stage-4 story must still offer a question"
+    for target in offered:
+        assert target.scope == "current_stage_word"
+        assert target.onset_words
+        for word in target.onset_words:
+            assert uses_stage_gpc(word, 4), word
+
+
+def test_a_correct_word_that_earns_no_evidence_is_rejected_at_that_tier():
+    """The scope is ENFORCED, not merely offered. `went` is a fine tap-a-word
+    answer and contains no stage-4 GPC, so at this tier it is not one."""
+    target = next(t for t in stage4_targets() if t.grapheme == "j")
+    question, problems = check_tap_word(
+        TapWordDraft(target_grapheme="j", correct_word="jumped", other_words=["went", "fast"]),
+        targets=[target],
+        stage_id=4,
+        story_text=STAGE4_STORY,
+        sight_words=SIGHT,
+    )
+    assert problems == [] and question is not None
+
+    # Same sound, a word that earns nothing.
+    swapped = target.model_copy(update={"onset_words": ["jumped", "went"]})
+    question, problems = check_tap_word(
+        TapWordDraft(target_grapheme="j", correct_word="went", other_words=["up", "man"]),
+        targets=[swapped],
+        stage_id=4,
+        story_text=STAGE4_STORY,
+        sight_words=SIGHT,
+    )
+    assert question is None
+    assert any("teaches nothing new" in p for p in problems)
+
+
+def test_the_fallback_still_asks_a_question_and_says_that_it_did():
+    """Tier 3. A story that supports neither is not left with no question —
+    §14 is told the fallback fired instead."""
+    offered = sound_targets(
+        story_text=STORY, stage_id=5, allowed_words=ALLOWED, sight_words=SIGHT,
+        story_words=STORY_WORDS,
+    )
+    assert offered, "stage 5 must still get a phonics question"
+    for target in offered:
+        assert target.scope == "older_stage_fallback"
+        assert target.stage < 5
+
+
+async def test_the_node_reports_which_tier_produced_the_target(monkeypatch):
+    result, _ = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)])
+    assert result.tap_word_target == {
+        "grapheme": "w",
+        "stage": 3,
+        "scope": "current_stage_onset",
+        "offered": 1,
+        "stage_id": 3,
+        "earns_stage_evidence": True,
+    }
+
+
+async def test_a_story_with_no_target_reports_none_available(monkeypatch):
+    only = Mcq2Only(
+        mcq2=Mcq2Draft(
+            prompt="Was it in the cave?",
+            correct="The dragon was in the cave.",
+            incorrect="The cave was in the dragon.",
+        )
+    )
+    result, _ = await _run(monkeypatch, [only], story_text="The dragon was in the cave.")
+    assert result.tap_word_target["scope"] == "none_available"
+    assert result.tap_word_target["offered"] == 0
+
+
 # --- the prompt frame ladder -------------------------------------------------
 def test_the_richest_readable_frame_wins():
     prompt = tap_word_prompt("had", 12, SIGHT_12, STORY_WORDS)
@@ -272,16 +402,27 @@ def test_a_correct_tap_word_question_is_accepted():
     question, problems = check_tap(GOOD_TAP)
     assert problems == []
     assert question.qtype == "tap_word"
-    assert sorted(question.payload["options"]) == ["hit", "man", "ran"]
-    assert question.answer["correct"] == "hit"
-    assert question.payload["options"][question.answer["index"]] == "hit"
-    assert question.payload["target_grapheme"] == "h"
+    assert sorted(question.payload["options"]) == ["man", "ran", "went"]
+    assert question.answer["correct"] == "went"
+    assert question.payload["options"][question.answer["index"]] == "went"
+    # The grapheme is ANSWER-KEY material, not payload. This assertion used to
+    # read `question.payload["target_grapheme"] == "h"`, which encoded the defect
+    # as the contract: `check_tap_word` proves exactly one option starts with the
+    # target grapheme, so a served grapheme IS the answer — solving 9/9 live rows
+    # by `[o for o in options if o.startswith(g)][0]` — and §9 / DEVIATIONS 4.9
+    # say the key never reaches the client.
+    assert question.answer["target_grapheme"] == "w"
+    assert "target_grapheme" not in question.payload
+    # `cue_word` stays: it comes from the ALLOWED list and is rejected as an
+    # option, so it names the sound without naming the answer.
+    assert question.payload["cue_word"] not in question.payload["options"]
 
 
 def test_a_claimed_answer_that_does_not_start_with_the_sound_is_rejected():
     """The model saying so is not evidence — the GPC alignment is."""
     question, problems = check_tap(
-        TapWordDraft(target_grapheme="h", correct_word="ran", other_words=["man", "it"])
+        TapWordDraft(target_grapheme="h", correct_word="ran", other_words=["man", "it"]),
+        ts=[H_TARGET],
     )
     assert question is None
     assert any("does not start with h" in p for p in problems)
@@ -290,7 +431,8 @@ def test_a_claimed_answer_that_does_not_start_with_the_sound_is_rejected():
 def test_a_distractor_carrying_the_sound_is_rejected():
     """Two options with /h/ means two defensible answers."""
     question, problems = check_tap(
-        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["hill", "man"])
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["hill", "man"]),
+        ts=[H_TARGET],
     )
     assert question is None
     assert any("also uses h" in p for p in problems)
@@ -299,7 +441,8 @@ def test_a_distractor_carrying_the_sound_is_rejected():
 def test_a_word_that_is_not_in_the_story_is_rejected():
     """§11.3: the options are drawn from the story the child just read."""
     question, problems = check_tap(
-        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "camp"])
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "camp"]),
+        ts=[H_TARGET],
     )
     assert question is None
     assert any("not in the story" in p for p in problems)
@@ -307,7 +450,8 @@ def test_a_word_that_is_not_in_the_story_is_rejected():
 
 def test_repeated_options_are_rejected():
     question, problems = check_tap(
-        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "ran"])
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "ran"]),
+        ts=[H_TARGET],
     )
     assert question is None
     assert any("different" in p for p in problems)
@@ -319,6 +463,7 @@ def test_an_undecodable_option_is_rejected():
     story = STORY + " The man saw a night."
     question, problems = check_tap(
         TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "night"]),
+        ts=[H_TARGET],
         story_text=story,
     )
     assert question is None
@@ -334,12 +479,12 @@ def test_a_sound_that_was_not_offered_is_rejected():
 
 
 def test_the_cue_word_cannot_also_be_an_option():
-    target = next(t for t in targets() if t.grapheme == "h")
-    story = STORY + f" The man had a {target.cue}."
+    story = STORY + f" The man ran to a {H_TARGET.cue}."
     question, problems = check_tap(
         TapWordDraft(
-            target_grapheme="h", correct_word="hit", other_words=["ran", target.cue]
+            target_grapheme="h", correct_word="hit", other_words=["ran", H_TARGET.cue]
         ),
+        ts=[H_TARGET],
         story_text=story,
     )
     assert question is None
@@ -351,13 +496,16 @@ def test_an_option_that_stands_out_by_length_is_rejected():
     story = "The man ran up the hill. He went to stand on it."
     question, problems = check_tap(
         TapWordDraft(target_grapheme="s", correct_word="stand", other_words=["up", "man"]),
-        ts=sound_targets(
-            story_text=story,
-            stage_id=STAGE,
-            allowed_words=ALLOWED,
-            sight_words=SIGHT,
-            story_words=STORY_WORDS,
-        ),
+        ts=[
+            SoundTarget(
+                grapheme="s",
+                cue="sit",
+                onset_words=["stand"],
+                clean_words=["up", "man", "ran", "hill"],
+                stage=1,
+                scope="older_stage_fallback",
+            )
+        ],
         story_text=story,
     )
     assert question is None
@@ -366,7 +514,8 @@ def test_an_option_that_stands_out_by_length_is_rejected():
 
 def test_a_multi_word_option_is_rejected():
     question, problems = check_tap(
-        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "the man"])
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "the man"]),
+        ts=[H_TARGET],
     )
     assert question is None
     assert any("single word" in p for p in problems)
@@ -561,7 +710,7 @@ async def _run(monkeypatch, responses, **overrides):
     return await generate_questions(**kwargs), calls
 
 
-BAD_TAP = TapWordDraft(target_grapheme="h", correct_word="ran", other_words=["man", "it"])
+BAD_TAP = TapWordDraft(target_grapheme="w", correct_word="ran", other_words=["man", "it"])
 
 
 async def test_both_questions_pass_on_the_first_attempt(monkeypatch):
@@ -601,7 +750,7 @@ async def test_the_retry_prompt_carries_the_rejection_reason(monkeypatch):
         monkeypatch,
         [QuestionDraft(tap_word=BAD_TAP, mcq2=GOOD_MCQ), TapWordOnly(tap_word=GOOD_TAP)],
     )
-    assert "does not start with h" in calls[1]["user_block"]
+    assert "does not start with w" in calls[1]["user_block"]
 
 
 async def test_a_story_with_no_usable_sound_skips_tap_word_entirely(monkeypatch):
@@ -650,11 +799,33 @@ async def test_a_different_seed_reorders_the_options(monkeypatch):
 
 
 def test_generated_question_shape_matches_the_questions_table():
-    """models.Question stores prompt / payload / answer as written here."""
+    """models.Question stores prompt / payload / answer as written here.
+
+    The split is the child-safety line: `payload` is served verbatim to kid mode,
+    `answer` never leaves the server (§9, DEVIATIONS 4.9). This assertion
+    previously expected `target_grapheme` in `payload` — see
+    `test_a_correct_tap_word_question_is_accepted` for why that was the defect.
+    """
     question, _ = check_tap(GOOD_TAP)
     assert isinstance(question, GeneratedQuestion)
-    assert set(question.payload) == {"options", "target_grapheme", "cue_word"}
-    assert set(question.answer) == {"correct", "index"}
+    assert set(question.payload) == {"options", "cue_word"}
+    assert set(question.answer) == {"correct", "index", "target_grapheme"}
+
+
+def test_no_served_payload_field_identifies_the_correct_option():
+    """The property, not the field list: nothing in `payload` picks the answer.
+
+    A field-name assertion only catches the grapheme by name. This catches any
+    future payload field that happens to single out the correct option.
+    """
+    question, _ = check_tap(GOOD_TAP)
+    correct = question.answer["correct"]
+    others = [o for o in question.payload["options"] if o != correct]
+    for key, value in question.payload.items():
+        if key == "options" or not isinstance(value, str):
+            continue
+        singles_out = correct.startswith(value) and not any(o.startswith(value) for o in others)
+        assert not singles_out, f"payload[{key!r}]={value!r} identifies the answer"
 
 
 @pytest.mark.parametrize("qtype", ["tap_word", "mcq2"])

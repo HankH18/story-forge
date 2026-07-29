@@ -38,6 +38,10 @@ export default {
         'focus-gold': '0 0 0 4px #F2D48A',
       },
       minHeight: { tap: '48px', 'tap-kid': '64px' },
+      // §11 targets are a floor in BOTH axes: a 64px-tall, 30px-wide button is
+      // not a 64px target. Same two token values as minHeight, so `min-w-tap`
+      // and `min-h-tap` can never drift apart.
+      minWidth: { tap: '48px', 'tap-kid': '64px' },
       transitionTimingFunction: {
         page: 'cubic-bezier(.2,.7,.2,1)',
         pop: 'cubic-bezier(.2,.8,.3,1.2)',

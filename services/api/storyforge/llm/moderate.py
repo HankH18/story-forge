@@ -14,6 +14,15 @@ decodable and perfectly blocklist-clean.
 §6 is explicit that this runs *even though* the allowlist already constrains
 heavily. For a child-facing product the cost of a false negative is not
 symmetric with the cost of a false positive.
+
+Layer 3 also carries the **grammar** check (docs/DEVIATIONS.md 4.12). The
+validator proves decodability and this node judges safety; nothing looked at
+whether the sentence was well-formed English, and live warm-pool output shipped
+"He did not came back." — 100% decodable and wrong. It rides here because this
+is already a Haiku call on the final text, so the extra judgement is nearly
+free, and because the answer belongs in the same gate: an ungrammatical story is
+rejected exactly like an unsafe one. The decodability gate is NOT lowered to
+accommodate grammar — the warm pool absorbs the rejection.
 """
 
 from __future__ import annotations
@@ -50,12 +59,68 @@ The prose will be extremely simple and repetitive. That is the reading format \
 working as intended and is never a reason to reject.
 
 Judge content and tone only. When the only concern is that a storybook hazard \
-exists without anyone being harmed, approve."""
+exists without anyone being harmed, approve.
+
+SEPARATELY, judge whether the story is WELL-FORMED ENGLISH (docs/DEVIATIONS.md \
+4.12). The writer works from a tiny word list, so it sometimes grabs a word that \
+fits the sounds but breaks the sentence. This is a different question from \
+safety: answer it independently in `well_formed`.
+
+Judge each sentence ON ITS OWN. Set well_formed = false only when a single \
+sentence is unmistakably broken AND you can name the one wrong word and the \
+word that should replace it:
+- Wrong verb form after a helper: "He did not came back."   (came -> come)
+- Subject and verb disagree:      "A dragon sit in a cave."  (sit -> sits)
+- A stray or missing word, so the sentence cannot parse: \
+"The dragon had a got time."   (a got -> a good)
+- A pronoun in the wrong case, even where speech would allow it: \
+"The dragon and him ran up the hill."   (him -> he)
+
+Everything below is the decodable-reader format working as intended and is \
+NEVER a reason to set well_formed = false:
+- Very short sentences, fragments and one-word beats: "Sam sat.", \
+"Up, up, up.", "Fun!", "The end."
+- The same word, sentence or pattern repeated many times.
+- A tiny, plain vocabulary; odd, bald or childish phrasing; a thin or abrupt \
+story.
+- A sentence opening with "And", "But", "So" or "Then".
+- Emphatic "did" or "do" plus a plain verb: "It did nap.", "Sam did stand.", \
+"The dragon did like the cave." Those are correct English.
+- The tense changing from one sentence to the next, or past and present mixed \
+across the story. Consistency BETWEEN sentences is style, not grammar. NEVER \
+mark a sentence wrong because of the tense used in a DIFFERENT sentence. The \
+child has not been taught the "-ed" ending yet, so the past-tense form of a \
+verb often does not exist in the word list and the writer MUST use the present. \
+"It had big wings. Its wings help it." is well-formed; do not ask for "helped". \
+"Sam sat in a rocket. Sam and Bob go up fast." is well-formed too. A modal — \
+"can", "will", "may" — is always correct as written; never ask for "could", \
+"would" or "might". \
+(Inside ONE sentence, verbs joined by "and" must still match: "Dan sat and \
+admits it." is wrong.)
+- Reported speech that is not backshifted: "He said he will go." is fine.
+- A sentence that is grammatical but strange, dull or illogical. Judge the \
+grammar, not the sense.
+
+If you cannot quote the broken sentence and give the exact replacement word, \
+the story is well-formed. When in doubt, well_formed = true: a wrongly rejected \
+story is thrown away and the child gets nothing in its place."""
 
 
 class ModerationVerdict(BaseModel):
     approved: bool = Field(description="True only if the story is safe for ages 5-10.")
     reason: str = Field(description="One sentence. If rejecting, name the specific problem.")
+    well_formed: bool = Field(
+        description=(
+            "True if every sentence is grammatical English. Plain, short and "
+            "repetitive prose is well-formed; only real grammar errors are not."
+        )
+    )
+    grammar_note: str = Field(
+        description=(
+            "Empty string when well_formed. Otherwise quote the broken sentence "
+            "and name the error, in under fifteen words."
+        )
+    )
 
 
 class ModerationResult(BaseModel):
@@ -64,6 +129,14 @@ class ModerationResult(BaseModel):
     layer: str  # "blocklist" | "model"
     blocked_words: list[str] = Field(default_factory=list)
     usage: Usage | None = None
+    # §13's three layers cover safety; nothing covered GRAMMAR until now
+    # (docs/DEVIATIONS.md 4.12). `well_formed` is folded into `approved` by
+    # `moderate()`, so an ungrammatical story is rejected exactly like an unsafe
+    # one and the warm pool absorbs it. Defaults describe "no grammar defect
+    # found", which is the honest reading of the blocklist short-circuit — that
+    # story died at layer 1 and was never judged for grammar.
+    well_formed: bool = True
+    grammar_note: str = ""
 
 
 def blocklist_check(body: str) -> list[str]:
@@ -102,17 +175,30 @@ async def moderate(body: str) -> ModerationResult:
     verdict = response.parsed_output
     if verdict is None:
         # §7: a schema-parse failure is an api_fail. Fail CLOSED — an
-        # unparseable moderation result must never read as approval.
+        # unparseable moderation result must never read as approval, and that
+        # applies to the grammar half of the verdict too.
         return ModerationResult(
             approved=False,
             reason=f"moderation response unparseable (stop_reason={response.stop_reason})",
             layer="model",
             usage=usage_from_response(model, response.usage),
+            well_formed=False,
         )
 
+    # An ungrammatical story is rejected the same way an unsafe one is. Folding
+    # it in here rather than asking the model to also flip `approved` keeps the
+    # two judgements independent in the prompt (so grammar cannot leak into the
+    # safety call) while the gate stays a single deterministic boolean.
+    reason = verdict.reason
+    if verdict.approved and not verdict.well_formed:
+        note = verdict.grammar_note.strip() or "sentence is not well-formed English"
+        reason = f"ungrammatical: {note}"
+
     return ModerationResult(
-        approved=verdict.approved,
-        reason=verdict.reason,
+        approved=verdict.approved and verdict.well_formed,
+        reason=reason,
         layer="model",
         usage=usage_from_response(model, response.usage),
+        well_formed=verdict.well_formed,
+        grammar_note=verdict.grammar_note.strip(),
     )

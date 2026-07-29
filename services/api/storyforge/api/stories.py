@@ -157,6 +157,14 @@ class QuestionDTO(BaseModel):
     `POST /api/readings/{id}/answers` (§9) because that is also what writes
     `answers` and `gpc_stats` (§8) — so shipping the key to the client would buy
     no round trip and would make the mastery signal trivially forgeable.
+
+    "Absent" has to mean absent in *fact*, not by intention. `payload` used to be
+    forwarded verbatim, and `tap_word` payloads carried `target_grapheme` — from
+    which the answer is `[o for o in options if o.startswith(grapheme)][0]`,
+    because the generator PROVES exactly one option starts with it. The node no
+    longer writes it there, and `_public_payload` strips it (and any other
+    key-shaped field) on the way out, so a row written by an older build cannot
+    leak one either.
     """
 
     id: int
@@ -166,9 +174,15 @@ class QuestionDTO(BaseModel):
     prompt: str
     # Projection of payload["options"] for both qtypes (§8 model docstring).
     options: list[str] = Field(default_factory=list)
-    # Verbatim, so fields the question-gen node adds reach the UI without a
-    # change here.
+    # Everything the UI may see, minus answer-key fields (see `_public_payload`).
     payload: dict[str, Any] = Field(default_factory=dict)
+    # The parent story's distinct story words (§4). `mcq2` options are validated
+    # with the story-word exemption — words that are by definition NOT decodable
+    # at this stage — so an option can legitimately contain "rocket" or "moon".
+    # The story body renders those as picture chips from `StoryDTO.story_words`;
+    # without the same list here the question screen has no way to chip them and
+    # a stage-1 reader is handed a word nobody has taught them.
+    story_words: list[str] = Field(default_factory=list)
 
 
 class FallbackDTO(BaseModel):
@@ -290,6 +304,27 @@ def _options(payload: Any) -> list[str]:
     return []
 
 
+#: Payload keys that identify the correct option and therefore must not be
+#: served (§9, DEVIATIONS 4.9). `target_grapheme` is the live one — exactly one
+#: option starts with it, by construction. The rest are the shapes the `answer`
+#: column uses, listed so a future node that writes the key into the wrong column
+#: fails safe rather than shipping it.
+ANSWER_KEY_FIELDS = frozenset({"target_grapheme", "correct", "index", "answer"})
+
+
+def _public_payload(payload: Any) -> dict[str, Any]:
+    """The payload minus anything that gives the answer away.
+
+    A denylist rather than an allowlist because the payload is deliberately
+    open-ended — the question-gen node adds fields (`cue_word`) and they should
+    reach the UI without a change here. The cost of that openness is exactly this
+    filter, and it is applied at the one place every question leaves the server.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    return {k: v for k, v in payload.items() if k not in ANSWER_KEY_FIELDS}
+
+
 async def _load_story(session: AsyncSession, story_id: int) -> StoryDTO | None:
     story = (await session.execute(_STORY_SQL, {"id": story_id})).first()
     if story is None:
@@ -338,7 +373,8 @@ async def _load_story(session: AsyncSession, story_id: int) -> StoryDTO | None:
                 qtype=q.qtype,
                 prompt=q.prompt,
                 options=_options(q.payload),
-                payload=q.payload if isinstance(q.payload, dict) else {},
+                payload=_public_payload(q.payload),
+                story_words=list(story.story_words or []),
             )
             for q in questions
         ],

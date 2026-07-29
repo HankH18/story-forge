@@ -365,6 +365,11 @@ async def run_pipeline(
                                 "layer": result.moderation.layer,
                                 "reason": result.moderation.reason,
                                 "blocked_words": result.moderation.blocked_words,
+                                # 4.12: `approved` already folds this in, so the
+                                # gate needs nothing more — but without it on the
+                                # span a grammar rejection is indistinguishable
+                                # from a safety one in Langfuse.
+                                "well_formed": result.moderation.well_formed,
                             },
                             usage=result.moderation.usage,
                             level=None if result.passed else "WARNING",

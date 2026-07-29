@@ -24,15 +24,49 @@ is taken on trust.
 Bounded retries (§7): three attempts. A type that still fails is DROPPED —
 returning one good question beats returning two when one of them is wrong.
 
+**A tap-a-word question is also the mastery signal, so it must target the sounds
+this stage teaches.** §8 promotes on ≥80% accuracy over the GPCs introduced AT
+the child's current stage, and only `tap_word` moves those counters
+(`mastery.MASTERY_QTYPES`). Sorting the candidate sounds newest-first was not
+enough: live stage-4 and stage-5 stories asked about `fast`, `ran` and `held`,
+none of which contains a stage-4 or stage-5 GPC, so a reader could finish every
+story in the pool and accumulate exactly zero evidence toward promotion. The loop
+could not close. `sound_targets` now picks in three tiers, and reports which one
+fired so §14 can measure it:
+
+    current_stage_onset   the target grapheme is introduced at this stage
+    current_stage_word    no grapheme qualifies, but the correct word USES a
+                          sound taught at this stage somewhere in its alignment
+                          (stage 4 teaches only final suffixes — `ed`, `ing`,
+                          `es`, `s|Z` — so no word can START with one and this
+                          tier is the only way stage 4 ever earns evidence)
+    older_stage_fallback  the story supports neither; ask the newest sound it
+                          does support, because a question about an older sound
+                          is still a real question and dropping it is worse
+
+Nothing about the gate or the "exactly one correct option" proof is relaxed to
+achieve this: the tiers only NARROW the closed list the model may choose from.
+
 **Prompt frames are a ladder, not a sentence.** A phonics prompt normally names
 the sound ("/sh/"), but a bare grapheme is not a word: 61 of the inventory's 78
 graphemes are OOV or a violation when tokenised, so a literal "/sh/" fails the
-gate at every stage. The target is therefore carried as a decodable CUE WORD
-plus a `target_grapheme` in the payload (kid mode renders the sound chip). Even
-then, "word" is undecodable at every stage in this inventory, so `PROMPT_FRAMES`
-is tried richest-first and the first frame that PASSES the gate wins. Below
-stage 7 that is the terse frame. Honest consequence, logged in DEVIATIONS: the
-gate stays where it is and the sentence gets shorter, never the reverse.
+gate at every stage. The target is therefore carried as a decodable CUE WORD in
+the payload — kid mode renders the sound chip from `cue_word`. Even then, "word"
+is undecodable at every stage in this inventory, so `PROMPT_FRAMES` is tried
+richest-first and the first frame that PASSES the gate wins. Below stage 7 that
+is the terse frame. Honest consequence, logged in DEVIATIONS: the gate stays
+where it is and the sentence gets shorter, never the reverse.
+
+**`target_grapheme` is answer-key material and lives in `answer`, never in
+`payload`.** `check_tap_word` guarantees that exactly one option starts with the
+target grapheme and that no distractor uses it anywhere, which is precisely what
+makes the question checkable — and precisely what makes the grapheme a complete
+giveaway. Shipped in the payload it reduced the question to
+`[o for o in options if o.startswith(payload["target_grapheme"])][0]`, so §9's
+"the answer key never leaves the server" (DEVIATIONS 4.9) was false for every
+tap-a-word question. `cue_word` carries no such signal: it is chosen by
+`_cue_index` from the ALLOWED list and is explicitly excluded from the options,
+so it names the sound without naming the answer.
 
 Determinism: option order is a pure function of (seed, question type, option
 set). `random.Random` is seeded from a blake2b digest — stable across processes
@@ -45,6 +79,7 @@ from __future__ import annotations
 import hashlib
 import random
 from collections.abc import Iterable, Sequence
+from functools import lru_cache
 
 from pydantic import BaseModel, Field
 
@@ -60,6 +95,11 @@ from storyforge.decoder.tokenizer import tokenize
 from storyforge.llm.client import FAST_TIMEOUT_S, fast_model, get_client
 from storyforge.llm.generate import build_vocabulary_block
 from storyforge.llm.pricing import Usage, usage_from_response
+
+# The GPC instances §8 will actually CREDIT for a word, imported rather than
+# reimplemented: the question generator has to target exactly what the grader
+# counts, and two copies of that definition would drift.
+from storyforge.mastery import word_gpc_ids as graded_gpc_ids
 from storyforge.pipeline import passes_gate
 
 # §7: one generation plus two retries. Never raised to make a question pass.
@@ -172,6 +212,13 @@ class SoundTarget(BaseModel):
     cue: str
     onset_words: list[str]
     clean_words: list[str]
+    #: The stage at which this grapheme is first taught (§4's cumulative ladder).
+    stage: int = 0
+    #: Which tier of the §8 evidence preference produced this target. See
+    #: `_prefer_current_stage`; `current_stage_word` is additionally ENFORCED in
+    #: `check_tap_word`, because a scope that only lives in the prompt is a
+    #: suggestion, not a guarantee.
+    scope: str = "older_stage_fallback"
 
 
 class GeneratedQuestion(BaseModel):
@@ -191,6 +238,12 @@ class QuestionSet(BaseModel):
     usage: Usage
     attempts: int = 0
     dropped: dict[str, list[str]] = Field(default_factory=dict)
+    #: §8/§14: which sound the tap-a-word question ended up practising, and which
+    #: tier of `_prefer_current_stage` produced it. Surfaced (rather than logged)
+    #: so the eval harness can measure how often the fallback fires — a high
+    #: `older_stage_fallback` rate at some stage is a finding about the ALLOWLIST,
+    #: not about this node.
+    tap_word_target: dict = Field(default_factory=dict)
 
 
 # --- pure helpers ------------------------------------------------------------
@@ -229,6 +282,28 @@ def word_graphemes(word: str, mastered: frozenset[str]) -> list[str] | None:
     return [gid.split("|", 1)[0] for gid in report.alignment]
 
 
+@lru_cache(maxsize=16)
+def stage_gpc_ids(stage_id: int) -> frozenset[str]:
+    """The GPC ids INTRODUCED at this stage — §8's promotion denominator.
+
+    `mastered_ids` is cumulative (everything up to and including the stage);
+    this is the thin slice the stage actually teaches, which is what promotion
+    is measured over.
+    """
+    return frozenset(g.id for g in load_gpcs() if g.stage == stage_id)
+
+
+def uses_stage_gpc(word: str, stage_id: int) -> bool:
+    """Would answering about this word earn evidence toward promotion (§8)?
+
+    True when sounding the word out at `stage_id` requires at least one GPC that
+    `stage_id` introduces. `graded_gpc_ids` is `mastery.word_gpc_ids` — the same
+    function `POST /api/readings/{id}/answers` uses to award the credit, so this
+    cannot target something the grader would not count.
+    """
+    return bool(stage_gpc_ids(stage_id).intersection(graded_gpc_ids(word, stage_id)))
+
+
 def story_word_tokens(story_text: str) -> list[str]:
     return [t.text for t in tokenize(story_text) if t.is_word]
 
@@ -265,12 +340,14 @@ def sound_targets(
     story_words: Iterable[str] = (),
     limit: int = MAX_SOUND_TARGETS,
 ) -> list[SoundTarget]:
-    """Every tap-a-word question this story can legally ask, newest sound first.
+    """Every tap-a-word question this story can legally ask, best sound first.
 
     A sound qualifies only when the story contains a word that STARTS with it
     and at least two words that never use it — otherwise "exactly one correct
     answer" cannot be guaranteed. Sight and story words are excluded: the child
     has not sounded them out, so they carry no evidence about a grapheme.
+
+    "Best" is §8's evidence rule, not recency alone — see `_prefer_current_stage`.
     """
     mastered = mastered_ids(stage_id)
     sight, story = _sets(sight_words, story_words)
@@ -304,17 +381,60 @@ def sound_targets(
             SoundTarget(
                 grapheme=grapheme,
                 cue=cue,
-                onset_words=onset[:MAX_OFFERED_WORDS],
-                # Truncation is safe: verification tests the grapheme, not list
-                # membership, so a shorter offer only narrows the model's menu.
-                clean_words=clean[:MAX_OFFERED_WORDS],
+                onset_words=onset,
+                clean_words=clean,
+                stage=stage_of.get(grapheme, 0),
             )
         )
 
     # Most recently taught sound first — that is the one worth practising —
     # with an alphabetical tiebreak so the list is reproducible.
-    targets.sort(key=lambda t: (-stage_of.get(t.grapheme, 0), t.grapheme))
-    return targets[:limit]
+    targets.sort(key=lambda t: (-t.stage, t.grapheme))
+    return [
+        # Truncation is safe: verification tests the grapheme, not list
+        # membership, so a shorter offer only narrows the model's menu. It
+        # happens AFTER tiering so a stage-bearing word cannot be cut first.
+        target.model_copy(
+            update={
+                "onset_words": target.onset_words[:MAX_OFFERED_WORDS],
+                "clean_words": target.clean_words[:MAX_OFFERED_WORDS],
+            }
+        )
+        for target in _prefer_current_stage(targets, stage_id)[:limit]
+    ]
+
+
+def _prefer_current_stage(targets: Sequence[SoundTarget], stage_id: int) -> list[SoundTarget]:
+    """§8: prefer a question that practises a sound taught AT this stage.
+
+    Three tiers, first non-empty wins (see the module docstring). The tiers
+    NARROW the closed list rather than adding anything to it, so every guarantee
+    `check_tap_word` proves is untouched — a narrower menu cannot make a wrong
+    question right.
+
+    The fallback is deliberate. A stage whose story simply contains no
+    current-stage sound still gets a question about the newest sound available;
+    dropping the only phonics question would cost the child the whole screen and
+    §8 nothing it did not already lack.
+    """
+    onset_tier = [t for t in targets if t.stage == stage_id]
+    if onset_tier:
+        return [t.model_copy(update={"scope": "current_stage_onset"}) for t in onset_tier]
+
+    word_tier = []
+    for t in targets:
+        # Keep only the correct-answer candidates that would actually earn
+        # evidence. The distractors are irrelevant here: §8 credits the GPCs of
+        # the word the question was ABOUT.
+        earning = [w for w in t.onset_words if uses_stage_gpc(w, stage_id)]
+        if earning:
+            word_tier.append(
+                t.model_copy(update={"onset_words": earning, "scope": "current_stage_word"})
+            )
+    if word_tier:
+        return word_tier
+
+    return [t.model_copy(update={"scope": "older_stage_fallback"}) for t in targets]
 
 
 def _cue_index(
@@ -522,6 +642,17 @@ def check_tap_word(
             # Two options carrying the sound means two defensible answers.
             problems.append(f'"{option}" also uses {grapheme}, so it is not a wrong answer')
 
+    # §8: when the story CAN supply a correct word that uses a sound taught at
+    # this stage, it must. Otherwise the question is unimpeachable and still
+    # earns the child nothing toward promotion — the live stage-4/5 failure.
+    # Enforced, not merely offered: the model picks from the list, but nothing
+    # made it obey until this check existed.
+    if target.scope == "current_stage_word" and not uses_stage_gpc(correct, stage_id):
+        problems.append(
+            f'"{correct}" uses no sound taught at this stage, so answering it teaches '
+            f"nothing new — pick the answer from: {', '.join(target.onset_words)}"
+        )
+
     if not _length_balanced(options, single_word=True):
         problems.append("the three words must be close to the same length")
 
@@ -539,12 +670,13 @@ def check_tap_word(
         GeneratedQuestion(
             qtype="tap_word",
             prompt=prompt,
-            payload={
-                "options": ordered,
-                "target_grapheme": grapheme,
-                "cue_word": target.cue,
-            },
-            answer={"correct": correct, "index": index},
+            # Served to the client. `cue_word` names the sound; it is drawn from
+            # the allowed list and can never be one of the options, so it gives
+            # nothing away. The grapheme itself would (see the module docstring).
+            payload={"options": ordered, "cue_word": target.cue},
+            # Server-side only (§9, DEVIATIONS 4.9). `target_grapheme` rides with
+            # the key because it IS the key: exactly one option starts with it.
+            answer={"correct": correct, "index": index, "target_grapheme": grapheme},
         ),
         [],
     )
@@ -770,4 +902,34 @@ async def generate_questions(
         usage=total,
         attempts=attempts,
         dropped={k: v for k, v in dropped.items() if k not in accepted},
+        tap_word_target=describe_target(accepted.get("tap_word"), targets, stage_id),
     )
+
+
+def describe_target(
+    question: GeneratedQuestion | None, targets: Sequence[SoundTarget], stage_id: int
+) -> dict:
+    """What the tap-a-word question ended up practising (§8/§14).
+
+    Reported for every outcome, including the ones with no question, because
+    "this story could offer nothing at this stage" is the measurement that tells
+    an operator the allowlist — not the node — is the problem.
+    """
+    if question is None:
+        return {
+            "scope": "none_available" if not targets else "dropped",
+            "offered": len(targets),
+            "stage_id": stage_id,
+        }
+    grapheme = question.answer.get("target_grapheme")
+    target = next((t for t in targets if t.grapheme == grapheme), None)
+    return {
+        "grapheme": grapheme,
+        "stage": target.stage if target else None,
+        "scope": target.scope if target else "unknown",
+        "offered": len(targets),
+        "stage_id": stage_id,
+        # The decisive fact, computed from the answer rather than trusted:
+        # does the credited word carry a sound this stage teaches?
+        "earns_stage_evidence": uses_stage_gpc(question.answer.get("correct", ""), stage_id),
+    }

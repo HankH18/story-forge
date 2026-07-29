@@ -36,11 +36,18 @@ Rules, in priority order:
 2. Never inflect or modify a permitted word. If the list has "run" you may not
    write "running" unless "running" is itself listed.
 3. Use at most the story words you are given, and only those.
-4. Short sentences. Concrete actions. A beginning, a middle, and an end.
-5. This register sounds simple by design. "Sam sat. A cat sat on Sam." is
-   correct output, not a first draft to improve on.
+4. Every sentence must be correct English. Subject and verb agree, verb tense is
+   right, and no word is missing or left over. A small word list tempts you to
+   grab a listed word that fits the sounds but breaks the sentence:
+   "He did not came back." and "It had a got time." are both wrong.
+   Never do that. Change what happens in the story instead, so that a sentence
+   you can write correctly is enough to say it.
+5. Short sentences. Concrete actions. A beginning, a middle, and an end.
+6. This register sounds simple by design. "Sam sat. A cat sat on Sam." is
+   correct output, not a first draft to improve on. Simple is not the same as
+   broken: keep it plain AND grammatical.
 
-Write the story and nothing else."""
+Read every sentence back before you finish. Write the story and nothing else."""
 
 
 class StorySegment(BaseModel):

@@ -26,6 +26,13 @@
     );
   }
 
+  /* §02: never pure #000 or #FFF anywhere. `html` keeps the UA's black
+     otherwise — invisible in practice, but it is the one element that would
+     answer "is there pure black on this page?" with yes. */
+  html {
+    color: var(--sf-ink-900);
+  }
+
   body {
     font-family: var(--sf-font-ui);
     color: var(--sf-ink-900);
@@ -76,11 +83,188 @@
   text-decoration: line-through;
 }
 
+/* ---------------------------------------------------------------------------
+   Kid-mode primitives (style guide §04, §05, §07).
+
+   Same rule as the verdict block above: plain CSS, never inside
+   `@layer utilities`. Two independent reasons here.
+
+   1. `[data-state]` selectors and composed box-shadows are not expressible as
+      utilities without a plugin, and half-expressing them is how a rule ends up
+      silently dropped.
+   2. §11 says the gold focus ring is *added to* the ink-offset shadow, not
+      swapped for it. `box-shadow` is one property, so the focused variant has
+      to restate both — a utility class cannot, and the shadow would vanish on
+      focus exactly when a child most needs the button to look real.
+   --------------------------------------------------------------------------- */
+
+/* §04: the ink-offset shadow, and the §05 press (6px → 2px, translateY(4px),
+   90ms). Applied by Button/Card; also usable on any kid surface. */
+.sf-lift-kid {
+  box-shadow: var(--sf-lift-kid);
+}
+.sf-lift-kid:focus-visible {
+  box-shadow: var(--sf-focus-ring), var(--sf-lift-kid);
+}
+.sf-lift-kid:not(:disabled):active {
+  transform: translateY(4px);
+  box-shadow: var(--sf-lift-kid-down);
+}
+.sf-lift-kid:not(:disabled):active:focus-visible {
+  box-shadow: var(--sf-focus-ring), var(--sf-lift-kid-down);
+}
+.sf-lift-parent {
+  box-shadow: var(--sf-lift-parent);
+}
+.sf-lift-parent:focus-visible {
+  box-shadow: var(--sf-focus-ring), var(--sf-lift-parent);
+}
+
+/* §06: the striped asset fallback. Never a broken image, never an empty box. */
+.sf-stripes {
+  background-color: var(--sf-warm);
+  background-image: repeating-linear-gradient(
+    45deg, var(--sf-shade) 0 10px, var(--sf-rule) 10px 20px
+  );
+}
+
+/* §07 word token geometry — the reason this is CSS and not utilities.
+
+   `inline-block` is load-bearing. With an inline button, vertical padding paints
+   over the line above and does not grow the line box, so a 12px pad on 1.65
+   leading puts two tap targets on top of each other and a five-year-old aiming
+   at "ship" hits "shed" on the line above. As inline-block the button's MARGIN
+   box is what sizes the line box, so:
+
+     glyph box + 12px padding × 2  = 62px target   (§11: ≥48px)
+     + 5px margin × 2              = 72px line advance
+     → 10px clear between two stacked targets      (§11: ≥8px gap)
+
+   Measured live at 1024×768: 62px targets, 10px clear, and 8.4px at the worst
+   case — a story-word chip, which is 4px taller than a plain word.
+
+   The effective leading is therefore ~2.1 rather than §03's 1.65. That is a
+   deliberate trade, logged in DEVIATIONS: at 34px the two rules are
+   geometrically incompatible, and §11 is the non-negotiable one. Nothing is
+   scaled down to make it fit — §11 is explicit that word tokens get vertical
+   padding rather than a smaller font.
+
+   `min-width` matters as much as `min-height`: "a" and "I" are real words and
+   were measured at 35px wide before it was added, i.e. under the floor on the
+   axis nobody thinks to check. */
+.sf-word {
+  display: inline-block;
+  font: inherit;
+  line-height: 1;
+  color: var(--sf-ink-900);
+  /* Horizontal padding is kept tight: it is the gap a full stop sits across, and
+     it already supplies ~10px (0.29em at 34px) between two words — more than
+     §03's 0.16em word-spacing, which is therefore NOT also applied. Stacking
+     both would push the line past §03's 26–34 character measure. */
+  padding: 12px 5px;
+  margin: 5px 0;
+  min-height: var(--sf-tap-min);
+  min-width: var(--sf-tap-min);
+  border: 2px solid transparent;
+  border-radius: var(--sf-r-chip);
+  background: transparent;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color var(--sf-dur-tap) var(--sf-ease-pop),
+    transform var(--sf-dur-tap) var(--sf-ease-pop);
+}
+.sf-word:hover {
+  background: var(--sf-warm);
+}
+/* §05: gold-300 fill + scale 1.05 while speaking. */
+.sf-word[data-state='speaking'] {
+  background: var(--sf-gold-300);
+  transform: scale(1.05);
+}
+/* §07 "already heard" — a gold rule under the word. Not a colour change on the
+   word itself: ink-900 on paper is the 13.4:1 contrast §11 asks for and there
+   is nothing to spend. */
+.sf-word[data-state='heard'] {
+  border-bottom-color: var(--sf-gold-500);
+}
+
+/* §07 story-word chip. `inline-block` (not inline-flex) so the chip's baseline
+   is its word's baseline — an inline-flex box takes its baseline from its first
+   item, which would drop the picture onto the reading line and break it. */
+.sf-chip {
+  padding-left: 8px;
+  background: var(--sf-v-story-bg);
+  border-color: var(--sf-v-story);
+}
+.sf-chip:hover {
+  background: var(--sf-amber-100);
+}
+.sf-chip-art {
+  display: inline-block;
+  /* Sized so the chip's box matches a plain word token's. A taller cutout grows
+     the line box, and the chip then eats the clearance between its own line and
+     the line below — measured at 6.4px before this was tuned down, under §11's
+     8px floor. */
+  width: 24px;
+  height: 24px;
+  margin-right: 8px;
+  vertical-align: middle;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* §05 motion. Durations and curves come from the tokens; nothing loops while a
+   child is reading. */
+@keyframes sf-pop {
+  0% { transform: scale(0.2); opacity: 0; }
+  60% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.sf-star {
+  animation: sf-pop var(--sf-dur-pop) var(--sf-ease-pop) both;
+}
+
+@keyframes sf-page-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+.sf-page-in {
+  animation: sf-page-in var(--sf-dur-page) var(--sf-ease-page) both;
+}
+
+/* §05: the cold-generation wait — a gold pen stroke drawing and erasing. */
+@keyframes sf-pen {
+  0%   { transform: scaleX(0); transform-origin: left center; }
+  45%  { transform: scaleX(1); transform-origin: left center; }
+  55%  { transform: scaleX(1); transform-origin: right center; }
+  100% { transform: scaleX(0); transform-origin: right center; }
+}
+.sf-pen {
+  background: var(--sf-gold-500);
+  animation: sf-pen 1.8s var(--sf-ease-page) infinite;
+}
+
 /* §05: honour prefers-reduced-motion globally. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /* The word-tap highlight STAYS — §05 names it explicitly: it is feedback, not
+     decoration. Only the scale goes; the gold fill is the part that tells a
+     child their tap landed. */
+  .sf-word[data-state='speaking'] {
+    transform: none;
+  }
+
+  /* Collapsing the loop's duration would freeze the pen mid-stroke at
+     scaleX(0), i.e. an invisible loading indicator. Show a steady bar instead. */
+  .sf-pen {
+    animation: none !important;
+    transform: none;
+    opacity: 0.7;
   }
 }

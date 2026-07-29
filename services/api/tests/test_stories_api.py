@@ -124,12 +124,16 @@ async def test_dto_carries_assets_and_questions_when_present(client, session):
             )
         )
     ).scalar_one()
+    # The payload is written the way the OLD node wrote it — `target_grapheme`
+    # in the served payload. That is the shape 9 live rows had, and the DTO must
+    # strip it whatever the row holds.
     question_id = (
         await session.execute(
             text(
                 "INSERT INTO questions (story_id, segment_id, idx, qtype, prompt, payload, answer) "
                 "VALUES (:st, :sg, 0, 'tap_word', 'Tap the word that says /d/og.', "
-                """CAST('{"options": ["dog", "cat"]}' AS jsonb), """
+                """CAST('{"options": ["dog", "cat"], "cue_word": "did", """
+                """"target_grapheme": "d"}' AS jsonb), """
                 """CAST('{"correct": "dog"}' AS jsonb)) RETURNING id"""
             ),
             {"st": story_id, "sg": seg_id},
@@ -157,7 +161,15 @@ async def test_dto_carries_assets_and_questions_when_present(client, session):
         assert q["options"] == ["dog", "cat"]
         assert q["segment_id"] == seg_id
         # The answer key is graded server-side (§9) and never shipped to a kid.
+        # `target_grapheme` is part of that key — exactly one option starts with
+        # it by construction — and IS present on the row above, so this is a real
+        # test of the filter rather than of a field nobody inserted.
         assert "answer" not in q and "correct" not in q["payload"]
+        assert "target_grapheme" not in q["payload"]
+        assert q["payload"] == {"options": ["dog", "cat"], "cue_word": "did"}
+        # §11.3 picture chips: `mcq2` options may contain story words, which are
+        # by definition undecodable at this stage (Fix 5).
+        assert q["story_words"] == body["story_words"]
     finally:
         await session.execute(
             text("UPDATE story_segments SET asset_id = NULL WHERE id = :s"), {"s": seg_id}
@@ -165,6 +177,70 @@ async def test_dto_carries_assets_and_questions_when_present(client, session):
         await session.execute(text("DELETE FROM questions WHERE id = :q"), {"q": question_id})
         await session.execute(text("DELETE FROM assets WHERE id = :a"), {"a": asset_id})
         await session.commit()
+
+
+async def test_a_real_node_produced_question_never_ships_its_answer_key(client, session):
+    """The 4.9 claim, tested against rows the QUESTION_GEN node actually wrote.
+
+    The previous version of this assertion inserted its own payload and then
+    checked for a key it had never added — it could not have failed. This one
+    reads a real `tap_word` row, takes the real answer key from the database, and
+    proves the served DTO does not contain it. `target_grapheme` is the one that
+    mattered: `check_tap_word` guarantees exactly one option starts with it.
+    """
+    rows = (
+        await session.execute(
+            text(
+                "SELECT q.id, q.story_id, q.payload, q.answer FROM questions q "
+                "JOIN stories s ON s.id = q.story_id "
+                "WHERE q.qtype = 'tap_word' AND s.status IN ('warm', 'complete') "
+                "ORDER BY q.id"
+            )
+        )
+    ).all()
+    assert rows, "no node-produced tap_word rows — run `make warm` / `--backfill`"
+
+    for row in rows:
+        body = (await client.get(f"/api/stories/{row.story_id}")).json()
+        served = next(q for q in body["questions"] if q["id"] == row.id)
+        correct = row.answer["correct"]
+
+        assert set(served["payload"]) <= {"options", "cue_word"}, served["payload"]
+        for key in ("target_grapheme", "correct", "index", "answer"):
+            assert key not in served["payload"], f"question {row.id} leaks {key}"
+
+        # And the property behind the field name: nothing served singles out the
+        # correct option. `options` is exempt — it must contain the answer.
+        others = [o for o in served["options"] if o != correct]
+        for key, value in served["payload"].items():
+            if key == "options" or not isinstance(value, str):
+                continue
+            assert not (
+                correct.startswith(value) and not any(o.startswith(value) for o in others)
+            ), f"question {row.id}: payload[{key!r}]={value!r} identifies the answer"
+
+
+async def test_questions_carry_the_story_words_for_picture_chips(client, session):
+    """§4/§11.2: `mcq2` options are validated with the story-word exemption, so
+    they may contain words that are NOT decodable at this stage ("The rocket can
+    tap the moon." at stage 1). The story body chips those from
+    `StoryDTO.story_words`; the question screen needs the same list or it renders
+    an untaught word as plain text."""
+    story_id = (
+        await session.execute(
+            text(
+                "SELECT s.id FROM stories s JOIN questions q ON q.story_id = s.id "
+                "WHERE s.status IN ('warm', 'complete') AND cardinality(s.story_words) > 0 "
+                "ORDER BY s.id LIMIT 1"
+            )
+        )
+    ).scalar()
+    assert story_id, "needs a warm story with story words and questions"
+
+    body = (await client.get(f"/api/stories/{story_id}")).json()
+    assert body["questions"]
+    for q in body["questions"]:
+        assert q["story_words"] == body["story_words"]
 
 
 # --- warm-pool mechanics (§7) ------------------------------------------------

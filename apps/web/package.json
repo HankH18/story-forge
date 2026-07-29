@@ -10,13 +10,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource/andika": "^5.1.0",
+    "@fontsource/bree-serif": "^5.1.0",
+    "@fontsource/ibm-plex-mono": "^5.1.0",
+    "@fontsource/kalam": "^5.1.0",
+    "@fontsource/nunito": "^5.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "@fontsource/bree-serif": "^5.1.0",
-    "@fontsource/nunito": "^5.1.0",
-    "@fontsource/andika": "^5.1.0",
-    "@fontsource/ibm-plex-mono": "^5.1.0",
-    "@fontsource/kalam": "^5.1.0"
+    "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

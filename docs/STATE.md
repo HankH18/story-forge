@@ -15,7 +15,7 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 | 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` fills ≥3 per (stage,theme), idempotent. Moderation = free blocklist + Haiku judge. |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
 
-**251 tests green.** `make test` = pytest + web typecheck. Lint: `cd services/api && uv run ruff check storyforge tests`.
+**395 tests green, 1 skipped.** `make test` = pytest + web typecheck. Lint: `cd services/api && uv run ruff check storyforge tests`.
 
 ## Commands
 ```
@@ -52,19 +52,20 @@ cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 12. Async SQLAlchemy: never touch a lazy relationship (`story.segments`) —
     re-query instead, or it raises `MissingGreenlet`.
 
-## Known gap — untriaged, needs a decision
+| 5 kid mode + mastery | Full kid session live in a real browser (dev AND production bundle): theme picker → reading → questions → celebration, TTS, §11 floors verified by computed style. `readings`/`answers` APIs, `gpc_stats`, stage promotion proven at the 79/80% boundary. |
 
-**Nothing checks grammar** (DEVIATIONS 4.12). Live warm output includes
-*"He did not came back."* and *"The dragon had a got time."* — fully decodable,
-wrong English, and they would reach a child. The allowlist pushes the model
-toward words that fit phonically but not syntactically.
-
-Cheapest fixes in order: (a) a grammar line in `SYSTEM_RULES`; (b) a
-`well_formed: bool` on the moderation output schema, since that is already a
-Haiku call on the final text; (c) a dedicated node. **Do not lower the
-decodability gate to accommodate it.**
+## Recently closed
+- **Phase 4 adversarial audit** — 8 findings, all fixed (DEVIATIONS 5.12–5.16).
+  Question text bypassed every §13 layer; 9 of 20 servable stories were
+  unenriched and the failure was silent; the `tap_word` answer key shipped to
+  the client; enrichment cost (45–48% of the total) was discarded.
+- **Grammar** (DEVIATIONS 4.12): prevented in `SYSTEM_RULES`, detected via
+  `well_formed` on moderation. 20–27% → 0% ungrammatical, 0 false positives.
 
 ## Also outstanding
+- **`warm.py` aborts the whole run on `anthropic.APITimeoutError`** instead of
+  falling through. §7 maps `timeout` to a fallback like any other failure. Hit
+  once live on a stage-5 generation. Pre-existing; not yet fixed.
 - **Outside-voice / cross-model review never completed** (content-filter error on
   the subagent). Phases 2–4 shipped on single-model review.
 - **No git remote pushed** — GitLab project not created. `origin` is configured
@@ -73,7 +74,13 @@ decodability gate to accommodate it.**
   cosmetic.
 - Rate limiting is in-process only (DEVIATIONS 4.10).
 
-## Next: Phase 5 (§16)
+## Next: Phase 6 (§16)
+Clerk auth both sides, roles, parent home + kid CRUD, parent dashboard (tables).
+DoD: auth-scoped e2e — two parents cannot see each other's kids. Several Phase 5
+columns were reserved for this: `kids.parent_id` (5.1) needs its FK to `users`,
+and `GET /api/kids` currently returns every kid (5.9).
+
+## Superseded: Phase 5 (§16)
 Kid mode UI end-to-end: theme picker → read → branch → questions → celebration;
 TTS via browser `speechSynthesis`; `readings`/`answers` APIs; `gpc_stats` and
 stage promotion. **DoD: a full kid session on a tablet viewport, stats visibly
