@@ -26,7 +26,10 @@ def test_vendored_artifacts_match_their_pins():
     assert rows, "PINS.md has no artifact rows"
 
     for name, size, expected in rows:
-        blob = (DATA / name).read_bytes()
+        # A bare filename is decoder-owned; a path is repo-relative (the
+        # frequency list is precompute input and lives outside the package).
+        path = (REPO_ROOT / name) if "/" in name else (DATA / name)
+        blob = path.read_bytes()
         assert len(blob) == int(size.replace(",", "")), f"{name} size drifted"
         assert hashlib.sha256(blob).hexdigest() == expected, (
             f"{name} content drifted from its pin — the proof surface changed. "

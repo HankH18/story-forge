@@ -23,7 +23,10 @@ from storyforge.db import Base  # noqa: E402
 
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
-# Phase 1+ model modules must be imported here for autogenerate to see them.
+# Model modules must be imported for autogenerate to see them. Importing for the
+# side effect of registering tables on Base.metadata.
+from storyforge import models  # noqa: E402,F401
+
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

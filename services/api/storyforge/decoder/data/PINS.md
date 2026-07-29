@@ -16,3 +16,4 @@ silent change to the proof surface fails the suite.
 | `cmudict.phones` | 382 | `ffb588a5e55684723582c7256e1d2f9fadb130011392d9e59237c76e34c2cfd6` |
 | `cmudict.symbols` | 281 | `408ccaae803641c6d7b626b6299949320c2dbca96b2220fd3fb17887b023b027` |
 | `LICENSE` | 1,754 | `bd4ce8e44170a5f9f481310ca85c51de3c4f851a65e679b40e603b143bd3542a` |
+| `data/frequency-en.csv` | 398,644 | `da0f3d22b268ac78dec64063dae40f75b965e4dfc512e3414d24e03d90d0469e` |

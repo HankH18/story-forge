@@ -1,0 +1,73 @@
+# Deterministic child-appropriateness blocklist (§5.4, §6).
+#
+# Matched on the EXACT tokenized word, never as a substring. Substring matching
+# is the Scunthorpe problem: it silently deletes innocent vocabulary from a
+# child's allowlist and the loss is invisible in every metric we have. This
+# blocklist is one of three independent layers (§13) — allowlist-constrained
+# generation and the moderation node stand behind it — so it does not need to be
+# the paranoid one.
+#
+# LIMITATION: this is a seed list, not a vendored comprehensive one. §5.4 calls
+# for "vendored list + manual additions". Expand before any public deploy.
+
+# --- violence / weapons ---
+kill
+killed
+kills
+killing
+gun
+guns
+shot
+shoot
+shooting
+knife
+knives
+blood
+bloody
+dead
+death
+die
+died
+dying
+murder
+war
+weapon
+weapons
+attack
+violent
+violence
+hurt
+wound
+
+# --- adult / substances ---
+sex
+sexy
+drug
+drugs
+drunk
+beer
+wine
+alcohol
+cigarette
+smoking
+tobacco
+
+# --- distress ---
+suicide
+abuse
+hate
+kidnap
+victim
+corpse
+grave
+
+# --- proper-noun fragments that leak in from an adult corpus ---
+# Not inappropriate, just wrong: these are pieces of place and brand names
+# (e.g. "san" from San Francisco) that a frequency list surfaces as common words.
+san
+los
+las
+del
+inc
+llc
+ltd

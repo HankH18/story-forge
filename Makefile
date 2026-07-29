@@ -56,10 +56,10 @@ migrate: db ## Apply database migrations
 	cd $(API) && uv run alembic upgrade head
 
 seed: migrate ## Load stages, GPCs and sight words (§4, Appendix A)
-	@echo "make seed: not implemented until phase 1 (decoder + seed data)" >&2; exit 1
+	cd $(API) && uv run python -m storyforge.seed
 
 precompute: ## Build the allowed_words table (§5.4)
-	@echo "make precompute: not implemented until phase 2" >&2; exit 1
+	cd $(API) && uv run python -m storyforge.precompute
 
 warm: ## Pre-generate the warm story pool (§7)
 	@echo "make warm: not implemented until phase 3" >&2; exit 1

@@ -150,3 +150,49 @@ Known limitation: the ratchet does not cleanly separate good growth from bad. Th
 ten justified rows above moved it +8.8 points; the junk import moved it +14.2.
 The named list is the primary guard; the ratchet is a backstop for gross
 dissolution.
+
+---
+
+## Phase 2 — precompute
+
+**2.1 — Frequency list derived from `wordfreq`, not SUBTLEX-US.**
+§3 specifies SUBTLEX-US. Its canonical hosts returned 404/500 when this was
+built. `wordfreq` 3.1.1 is vendored to `data/frequency-en.csv` in the same shape
+and SHA-pinned alongside CMUdict, so swapping the source back means re-running
+`scripts/vendor-frequency.py` and reviewing the pin diff. Ranking will differ
+from the doc's stated source.
+
+**2.2 — Story-word bank and `themes` deferred to Phase 3.**
+§16 lists them under Phase 2, but the phase's own Definition of Done — "precompute
+runs all stages < 5 min; spot-check words sane" — does not mention them, and they
+are consumed only by generation. Authoring theme vocabulary before generation
+exists means writing content nothing can validate. Agreed at the phase-gate review.
+
+**2.3 — `allowed_words` rebuilt via staging table + single-transaction swap.**
+Readers must never observe a partial allowlist: a truncated list yields duller
+stories while every metric still reports success. Rows are computed and staged
+first, then swapped in one transaction, so a crash mid-computation leaves the
+previous allowlist untouched.
+
+**2.4 — Blocklist matches the exact tokenized word, never a substring.**
+Substring matching is the Scunthorpe problem — it silently removes legitimate
+vocabulary and the loss is invisible in every metric. The blocklist is one of
+three independent layers (§13); it does not need to be the paranoid one.
+`data/blocklist.txt` is a seed list, not the vendored comprehensive one §5.4 calls
+for. **Expand before any public deploy.**
+
+**2.5 — Precompute loops word-outer, stage-inner.**
+`build_lattice` is `lru_cache(maxsize=8192)` against ~19k candidates; stage-outer
+would evict every lattice between passes and rebuild each word twelve times.
+
+**2.6 — `syllable_count` lives in the decoder, not precompute.**
+It is a pure function of a CMUdict pronunciation, and §6 (stage-scaled length)
+and §14 (syllable metrics) both need it. Precompute would have been a second home
+for the same logic.
+
+**Measured, for the record:** precompute produces **64,841 rows across 12 stages
+in 1.6s** — 190x inside the 5-minute budget. Per-stage counts run 159 (stage 1) to
+9,426 (stage 12). The build doc expected 150–2,500; stages 3+ exceed the ceiling
+by up to 3.8x. This is the opposite of the feared starvation risk and is harmless:
+§6 caps the generation prompt at the top 400 by frequency, and the full table is
+the browsable §5.4 artifact. Stage 1 at 159 words is the genuinely tight one.
