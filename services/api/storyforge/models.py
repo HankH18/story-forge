@@ -206,3 +206,49 @@ class StorySegment(Base):
     asset_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     story: Mapped[Story] = relationship(back_populates="segments")
+
+
+class Asset(Base):
+    """Curated illustration (§12).
+
+    v1 is a hand-curated pool, ~8-12 images per theme, tagged from a CLOSED
+    vocabulary. The scene-tagging node picks tags from an enum in the JSON
+    schema, so the model cannot invent a tag that matches nothing.
+    `alt_text` is mandatory (style guide §06).
+    """
+
+    __tablename__ = "assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    theme_id: Mapped[int] = mapped_column(ForeignKey("themes.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(24), default="segment")
+    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    url: Mapped[str] = mapped_column(Text)
+    alt_text: Mapped[str] = mapped_column(Text)
+
+
+class Question(Base):
+    """Comprehension question (§8, §11).
+
+    Exactly two types (§11.3): `tap_word` ("tap the word that says /sh/ip") and
+    `mcq2` (two-choice story question). Both render as decodable text, so the
+    prompt and options are validated like any other child-facing string.
+    """
+
+    __tablename__ = "questions"
+    __table_args__ = (Index("ix_questions_story", "story_id", "idx"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    story_id: Mapped[int] = mapped_column(
+        ForeignKey("stories.id", ondelete="CASCADE"), index=True
+    )
+    segment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("story_segments.id", ondelete="CASCADE"), nullable=True
+    )
+    idx: Mapped[int] = mapped_column(Integer, default=0)
+    qtype: Mapped[str] = mapped_column(String(16))
+    prompt: Mapped[str] = mapped_column(Text)
+    # tap_word: {"options": [...]}; mcq2: {"options": [a, b]}
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # {"correct": "shed"} — never sent to kid mode unvalidated.
+    answer: Mapped[dict] = mapped_column(JSONB, default=dict)

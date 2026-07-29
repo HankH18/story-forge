@@ -1,0 +1,53 @@
+# Curated illustration pool (§12): ~8-12 images per theme, hand-tagged from the
+# CLOSED vocabulary in storyforge/llm/scene_tags.py. A tag outside that
+# vocabulary is a seed-time ERROR, not a warning — the scene-tagging node can
+# never emit it, so the asset would be permanently unreachable and every segment
+# that should have matched it would silently fall back to the placeholder.
+#
+# kind (style guide §06 ratios):
+#   segment = 4:3, 1200x900, sits above the story text
+#   cover   = 1:1, 800x800, one bold subject centred, must survive a circular crop
+#
+# `url` is the natural key and is what makes seeding idempotent. Real art is
+# generated offline against the §06 art-direction brief and dropped in at these
+# exact paths; until then the frontend serves the striped placeholder.
+#
+# alt_text is MANDATORY on every row (style guide §06). It is what a child using
+# a screen reader gets instead of the picture, so it describes the drawing —
+# not the story, not the file.
+#
+# tags are pipe-separated because the field itself lives in a CSV.
+theme,kind,tags,url,alt_text
+dragons,segment,dragon|cave|sleeping,/assets/dragons/cave-01.png,A green dragon curled up asleep on a heap of gold inside a dark cave.
+dragons,segment,dragon|cave|treasure,/assets/dragons/cave-02.png,A small dragon peeking over a pile of gold cups and coins in a cave.
+dragons,segment,dragon|flying|sky|day,/assets/dragons/sky-01.png,A dragon with wide orange wings flying across a pale blue daytime sky.
+dragons,segment,dragon|flying|night|moon,/assets/dragons/sky-02.png,A dragon gliding past a big round moon in a dark night sky.
+dragons,segment,castle|knight|day,/assets/dragons/castle-01.png,A knight in grey armour standing at the wooden gate of a stone castle.
+dragons,segment,castle|dragon|night|stars,/assets/dragons/castle-02.png,A dragon perched on a castle tower under a sky full of small stars.
+dragons,segment,dragon|fire|mountain,/assets/dragons/fire-01.png,A dragon breathing a warm curl of orange fire beside a rocky mountain.
+dragons,segment,dragon|knight|helping|meadow,/assets/dragons/meadow-01.png,A knight helping a small dragon untangle its wing in a green meadow.
+dragons,segment,dragon|forest|hiding,/assets/dragons/forest-01.png,A shy dragon hiding behind tall trees in a green forest.
+dragons,segment,knight|path|lost|forest,/assets/dragons/path-01.png,A knight standing at a fork in a forest path looking unsure which way to go.
+dragons,cover,dragon,/assets/dragons/cover.png,A friendly green dragon smiling in the middle of a gold circle.
+space,segment,spaceship|space|stars,/assets/space/rocket-01.png,A round-nosed rocket flying through dark space among small white stars.
+space,segment,spaceship|flying|sky|day,/assets/space/rocket-02.png,A rocket lifting off into a pale daytime sky above a green field.
+space,segment,moon|astronaut|space,/assets/space/moon-01.png,An astronaut in a white suit standing on the grey dusty surface of the moon.
+space,segment,moon|night|sky|village,/assets/space/moon-02.png,A big yellow moon rising over the rooftops of a small quiet village.
+space,segment,planet|space|stars,/assets/space/planet-01.png,A ringed orange planet floating in dark space surrounded by tiny stars.
+space,segment,planet|astronaut|friendly_creature,/assets/space/planet-02.png,An astronaut shaking hands with a small round friendly creature on a red planet.
+space,segment,stars|night|sky,/assets/space/stars-01.png,A wide night sky filled with soft white stars above a dark horizon.
+space,segment,astronaut|space|flying|spaceship,/assets/space/spacewalk-01.png,An astronaut floating on a tether beside a silver spaceship in space.
+space,segment,astronaut|spaceship|sleeping,/assets/space/sleep-01.png,An astronaut asleep in a bunk inside a small spaceship cabin.
+space,segment,astronaut|celebrating|found|planet,/assets/space/celebrate-01.png,Two astronauts cheering with their arms up beside a flag on a planet.
+space,cover,spaceship,/assets/space/cover.png,A red and cream rocket pointing upward in the middle of a gold circle.
+animals,segment,forest|fox|day,/assets/animals/forest-01.png,A red fox walking between tall green trees on a bright day.
+animals,segment,forest|rabbit|hiding,/assets/animals/forest-02.png,A brown rabbit hiding under a fern in a shady forest.
+animals,segment,rabbit|digging|meadow,/assets/animals/burrow-01.png,A rabbit digging a burrow at the edge of a grassy meadow.
+animals,segment,water|fish|swimming,/assets/animals/pond-01.png,Three orange fish swimming under the clear surface of a pond.
+animals,segment,bird|flying|sky|day,/assets/animals/bird-01.png,A small blue bird flying across a wide open daytime sky.
+animals,segment,bird|sleeping|forest,/assets/animals/nest-01.png,A bird asleep in a woven nest on a forest branch.
+animals,segment,cat|sleeping|night,/assets/animals/cat-01.png,A striped cat curled up asleep on a windowsill at night.
+animals,segment,dog|running|meadow,/assets/animals/dog-01.png,A brown dog running through long meadow grass with its ears flying.
+animals,segment,fox|snow|path,/assets/animals/snow-01.png,A red fox stepping carefully along a snowy path.
+animals,segment,dog|cat|helping|found,/assets/animals/help-01.png,A dog and a cat nose to nose after the dog found the cat.
+animals,cover,fox,/assets/animals/cover.png,A cheerful red fox sitting in the middle of a gold circle.

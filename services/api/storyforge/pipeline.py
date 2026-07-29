@@ -17,9 +17,12 @@ This is the subset of §7's state machine that eval-smoke needs. The full machin
 
 from __future__ import annotations
 
+from datetime import date
+
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from storyforge import obs
 from storyforge.decoder import TextReport, mastered_ids, validate_text
 from storyforge.llm.client import GENERATION_TIMEOUT_S, generation_model, get_client
 from storyforge.llm.generate import (
@@ -69,6 +72,9 @@ class PipelineResult(BaseModel):
     title: str = ""
     story_words: list[str] = Field(default_factory=list)
     moderation: ModerationResult | None = None
+    # §15: persisted on `stories.langfuse_trace_id`. None whenever tracing is off
+    # or failed — the run itself is unaffected either way.
+    langfuse_trace_id: str | None = None
 
     @property
     def rewrite_depth(self) -> int:
@@ -235,6 +241,29 @@ async def _call(vocab: Vocabulary, theme: str, user_block: str, effort: str):
     return response.parsed_output, usage_from_response(model, response.usage)
 
 
+def _trace_summary(result: PipelineResult) -> dict:
+    """The trace's output payload (§15). Must not raise — it is evaluated on the
+    generation path, so a telemetry-shaped failure here would fail the run."""
+    try:
+        cost = round(result.total_cost_usd(date.today()), 6)
+    except Exception:  # noqa: BLE001 — an unpriced model costs us a number, not a story
+        cost = None
+    return {
+        "passed": result.passed,
+        "title": result.title,
+        "text": result.final_text,
+        "decodability": result.final_report.decodability if result.final_report else None,
+        "rewrite_depth": result.rewrite_depth,
+        "story_words": result.story_words,
+        "cost_usd": cost,
+        "moderation": (
+            {"approved": result.moderation.approved, "layer": result.moderation.layer}
+            if result.moderation
+            else None
+        ),
+    }
+
+
 async def run_pipeline(
     session,
     stage_id: int,
@@ -250,39 +279,109 @@ async def run_pipeline(
     )
     kind = "generate"
 
-    for n in range(MAX_REWRITES + 1):
-        draft, usage = await _call(vocab, theme_slug, user_block, effort)
-        body = draft_text(draft)
-        report = validate_draft(vocab, body, draft.story_words_used)
+    # §15: one trace per pipeline run, one span per §7 node. `obs` is inert when
+    # Langfuse is unconfigured or broken, so this block behaves identically
+    # whether or not anyone is watching.
+    with obs.span(
+        obs.TRACE_NAME,
+        input={
+            "stage_id": stage_id,
+            "stage": vocab.stage_name,
+            "theme": theme_slug,
+            "effort": effort,
+        },
+        metadata={"stage_id": stage_id, "theme": theme_slug, "moderated": moderate_output},
+    ) as trace:
+        result.langfuse_trace_id = trace.trace_id
 
-        result.attempts.append(
-            Attempt(
-                n=n,
-                kind=kind,
-                text=body,
-                decodability=report.decodability,
-                violations=[w.word for w in report.violations],
-                usage=usage,
+        for n in range(MAX_REWRITES + 1):
+            with obs.generation(
+                "GENERATING" if kind == "generate" else "REWRITING",
+                input=user_block,
+                model=generation_model(),
+                model_parameters={"max_tokens": 8000, "effort": effort},
+                metadata={"attempt": n, "stage_id": stage_id, "theme": theme_slug},
+            ) as gen_span:
+                draft, usage = await _call(vocab, theme_slug, user_block, effort)
+                body = draft_text(draft)
+                gen_span.update(
+                    output={
+                        "title": draft.title,
+                        "text": body,
+                        "story_words_claimed": draft.story_words_used,
+                    },
+                    usage=usage,
+                )
+
+            with obs.span(
+                "VALIDATING",
+                input={"text": body, "story_words_claimed": draft.story_words_used},
+                metadata={"attempt": n, "stage_id": stage_id},
+            ) as val_span:
+                report = validate_draft(vocab, body, draft.story_words_used)
+                gate = passes_gate(report)
+                val_span.update(
+                    output={
+                        "decodability": report.decodability,
+                        "counts": report.counts,
+                        "violations": [w.word for w in report.violations],
+                        "distinct_story_words": report.distinct_story_words,
+                        "passes_gate": gate,
+                    },
+                    level=None if gate else "WARNING",
+                    status_message=None if gate else "below the gate — rewriting",
+                )
+
+            result.attempts.append(
+                Attempt(
+                    n=n,
+                    kind=kind,
+                    text=body,
+                    decodability=report.decodability,
+                    violations=[w.word for w in report.violations],
+                    usage=usage,
+                )
             )
+            result.final_text = body
+            result.final_report = report
+
+            if gate:
+                result.title = draft.title
+                result.story_words = report.distinct_story_words
+                if moderate_output:
+                    # §7: MODERATING sits between the validator passing and
+                    # PERSISTED. A story that clears the decodability gate but
+                    # fails moderation is rejected, not served.
+                    with obs.generation(
+                        "MODERATING",
+                        input=body,
+                        metadata={"attempt": n, "stage_id": stage_id},
+                    ) as mod_span:
+                        result.moderation = await moderate(body)
+                        result.passed = result.moderation.approved
+                        mod_span.update(
+                            output={
+                                "approved": result.moderation.approved,
+                                "layer": result.moderation.layer,
+                                "reason": result.moderation.reason,
+                                "blocked_words": result.moderation.blocked_words,
+                            },
+                            usage=result.moderation.usage,
+                            level=None if result.passed else "WARNING",
+                        )
+                else:
+                    result.passed = True
+                trace.update(output=_trace_summary(result))
+                return result
+
+            # §0: fix the prompt, never the gate.
+            user_block = build_rewrite_block(report, vocab, body)
+            kind = "rewrite"
+
+        # §7: budget_exhausted. Not an error — the warm pool takes over.
+        trace.update(
+            output=_trace_summary(result),
+            level="WARNING",
+            status_message="budget_exhausted",
         )
-        result.final_text = body
-        result.final_report = report
-
-        if passes_gate(report):
-            result.title = draft.title
-            result.story_words = report.distinct_story_words
-            if moderate_output:
-                # §7: MODERATING sits between the validator passing and
-                # PERSISTED. A story that clears the decodability gate but fails
-                # moderation is rejected, not served.
-                result.moderation = await moderate(body)
-                result.passed = result.moderation.approved
-            else:
-                result.passed = True
-            return result
-
-        # §0: fix the prompt, never the gate.
-        user_block = build_rewrite_block(report, vocab, body)
-        kind = "rewrite"
-
-    return result
+        return result

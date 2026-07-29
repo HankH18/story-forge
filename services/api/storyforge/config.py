@@ -7,6 +7,7 @@ without them.
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,7 +33,13 @@ class Settings(BaseSettings):
 
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
-    langfuse_host: str | None = None
+    # Langfuse's own docs and console use LANGFUSE_HOST in some places and
+    # LANGFUSE_BASE_URL in others. Accept either so a copy-paste from the
+    # console does not silently disable tracing.
+    langfuse_host: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LANGFUSE_HOST", "LANGFUSE_BASE_URL"),
+    )
 
     clerk_jwks_url: str | None = None
     clerk_secret_key: str | None = None

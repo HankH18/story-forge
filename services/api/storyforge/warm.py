@@ -21,11 +21,14 @@ import argparse
 import asyncio
 from datetime import date
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
+from storyforge import obs
 from storyforge.db import SessionLocal
-from storyforge.models import Story, StorySegment
-from storyforge.pipeline import PipelineResult, run_pipeline
+from storyforge.llm.questions import generate_questions
+from storyforge.llm.scene_tags import select_asset, tag_segments
+from storyforge.models import Asset, Question, Story, StorySegment
+from storyforge.pipeline import PipelineResult, load_vocabulary, run_pipeline
 
 TARGET_PER_PAIR = 3
 
@@ -56,6 +59,10 @@ async def persist(session, result: PipelineResult, theme_id: int, today: date) -
         title=result.title[:128],
         decodability=round(result.final_report.decodability, 4),
         story_words=result.story_words,
+        # §15: the row points at the trace that produced it, so any story in the
+        # pool can be opened in Langfuse. None when tracing is off — a story is
+        # never withheld because telemetry was unavailable.
+        langfuse_trace_id=result.langfuse_trace_id,
         gen_meta={
             "rewrite_depth": result.rewrite_depth,
             "cost_usd": round(result.total_cost_usd(today), 6),
@@ -87,6 +94,86 @@ async def persist(session, result: PipelineResult, theme_id: int, today: date) -
     for i, body in enumerate(_split_segments(result.final_text)):
         session.add(StorySegment(story_id=story.id, idx=i, body=body))
     return story
+
+
+async def enrich(session, story: Story, result: PipelineResult, theme_slug: str) -> dict:
+    """§7 ENRICHING — scene tags and comprehension questions, in parallel.
+
+    Runs only for stories that PASSED the gate and moderation. §7 places
+    ENRICHING after validation for a reason: a story that will never be served
+    must not cost Haiku calls.
+
+    Both nodes degrade rather than raise. A story with no picture renders the
+    §06 striped placeholder; a story with no questions still reads fine. Neither
+    is worth discarding a story that already cleared the decodability gate.
+    """
+    # Query segments explicitly rather than touching `story.segments`: the
+    # relationship is lazy, and on the async engine an implicit lazy load raises
+    # MissingGreenlet instead of quietly doing IO.
+    segments = list(
+        (
+            await session.execute(
+                select(StorySegment)
+                .where(StorySegment.story_id == story.id)
+                .order_by(StorySegment.idx)
+            )
+        ).scalars()
+    )
+    bodies = [seg.body for seg in segments]
+    vocab = await load_vocabulary(session, story.stage_id, theme_slug)
+
+    tagging, qset = await asyncio.gather(
+        tag_segments(segments=bodies, theme=theme_slug),
+        generate_questions(
+            stage_id=story.stage_id,
+            stage_name=vocab.stage_name,
+            story_title=story.title,
+            story_text=result.final_text,
+            allowed_words=vocab.allowed_words,
+            sight_words=vocab.sight_words,
+            story_words=result.story_words,
+            # Deterministic per story: the same story must always produce the
+            # same questions, or the eval harness cannot reproduce a run.
+            seed=story.id,
+        ),
+        return_exceptions=True,
+    )
+
+    meta: dict = {}
+
+    if isinstance(tagging, Exception):
+        meta["scene_tags_error"] = f"{type(tagging).__name__}: {tagging}"
+    else:
+        pool = (
+            await session.execute(
+                select(Asset).where(Asset.theme_id == story.theme_id)
+            )
+        ).scalars().all()
+        for seg, tags in zip(segments, tagging.tags, strict=False):
+            seg.scene_tags = list(tags)
+            chosen = select_asset(tags, pool)
+            seg.asset_id = chosen.id if chosen else None
+        meta["scene_tags_degraded"] = tagging.degraded
+        meta["segments_with_art"] = sum(1 for s_ in segments if s_.asset_id)
+
+    if isinstance(qset, Exception):
+        meta["questions_error"] = f"{type(qset).__name__}: {qset}"
+    else:
+        for q in qset.questions:
+            session.add(
+                Question(
+                    story_id=story.id,
+                    idx=q.idx,
+                    qtype=q.qtype,
+                    prompt=q.prompt,
+                    payload=q.payload,
+                    answer=q.answer,
+                )
+            )
+        meta["questions"] = len(qset.questions)
+        meta["questions_dropped"] = qset.dropped
+
+    return meta
 
 
 def _split_segments(body: str, max_segments: int = 7) -> list[str]:
@@ -132,13 +219,23 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
                 for _ in range(need):
                     result = await run_pipeline(session, stage, theme, effort=effort)
                     story = await persist(session, result, tid, today)
+                    if result.passed:
+                        story.gen_meta = {
+                            **story.gen_meta,
+                            "enrichment": await enrich(session, story, result, theme),
+                        }
                     await session.commit()
                     total_cost += result.total_cost_usd(today)
                     if result.passed:
                         made += 1
+                        trace = (
+                            f" [trace {result.langfuse_trace_id}]"
+                            if result.langfuse_trace_id
+                            else ""
+                        )
                         print(
                             f"    warm  #{story.id} {result.final_report.decodability:.0%} "
-                            f"{result.rewrite_depth} rewrite(s) — {result.title}"
+                            f"{result.rewrite_depth} rewrite(s) — {result.title}{trace}"
                         )
                     else:
                         rejected += 1
@@ -164,14 +261,22 @@ def main() -> None:
     p.add_argument("-n", "--target", type=int, default=TARGET_PER_PAIR)
     p.add_argument("--effort", default="medium")
     a = p.parse_args()
-    asyncio.run(
-        run_warm(
-            [int(x) for x in a.stages.split(",")],
-            a.themes.split(","),
-            a.target,
-            a.effort,
+    try:
+        asyncio.run(
+            run_warm(
+                [int(x) for x in a.stages.split(",")],
+                a.themes.split(","),
+                a.target,
+                a.effort,
+            )
         )
-    )
+    finally:
+        # §15: Langfuse batches exports on a background thread. A CLI that runs
+        # for seconds can exit with every span still queued — the integration
+        # then looks fine and records nothing. Flush explicitly, including on
+        # the `raise SystemExit` paths above. (`obs` also registers an atexit
+        # hook, so a hard exit elsewhere is still covered.)
+        obs.flush()
 
 
 if __name__ == "__main__":

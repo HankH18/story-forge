@@ -1,0 +1,669 @@
+"""Phase 4: the question-generation node (§11.3).
+
+Everything here is pure logic — prompt assembly, the closed sound list, the
+decoder-backed verification, the deterministic shuffle. The live path is proved
+by `make eval-smoke`; what these tests protect is the property that makes the
+node safe to ship: **a question the decoder rejects never becomes a question**,
+and the answer is never guessable from position or shape.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from storyforge.llm.pricing import Usage
+from storyforge.llm.questions import (
+    PROMPT_FRAMES,
+    QUESTION_RULES,
+    GeneratedQuestion,
+    Mcq2Draft,
+    Mcq2Only,
+    QuestionDraft,
+    TapWordDraft,
+    TapWordOnly,
+    build_question_request,
+    build_sound_block,
+    check_mcq2,
+    check_tap_word,
+    generate_questions,
+    readable_openers,
+    shuffle_options,
+    sound_targets,
+    story_supports,
+    tap_word_prompt,
+    word_graphemes,
+)
+
+# A real warm-pool story (stage 3, dragons theme) — the node's actual input.
+STORY = (
+    "A dragon was in a cave. It went up fast. Fire hit the hill. "
+    "A man ran back. He was glad. The dragon went into the cave."
+)
+TITLE = "The Dragon And Fire"
+STAGE = 3
+SIGHT = ["a", "go", "he", "i", "is", "me", "no", "she", "the", "to", "was", "we"]
+STORY_WORDS = ["cave", "dragon", "fire"]
+# Frequency-ordered, as `allowed_words` arrives from the precompute table.
+ALLOWED = [
+    "the", "and", "had", "but", "for", "get", "with", "not", "him", "top",
+    "sit", "run", "big", "red", "dad", "van", "job", "let", "must", "camp",
+]
+
+
+def targets():
+    return sound_targets(
+        story_text=STORY,
+        stage_id=STAGE,
+        allowed_words=ALLOWED,
+        sight_words=SIGHT,
+        story_words=STORY_WORDS,
+    )
+
+
+def check_tap(draft, ts=None, stage_id=STAGE, story_text=STORY, seed=7):
+    return check_tap_word(
+        draft,
+        targets=targets() if ts is None else ts,
+        stage_id=stage_id,
+        story_text=story_text,
+        sight_words=SIGHT,
+        story_words=STORY_WORDS,
+        seed=seed,
+    )
+
+
+def check_two(draft, stage_id=STAGE, story_text=STORY, seed=7):
+    return check_mcq2(
+        draft,
+        stage_id=stage_id,
+        story_text=story_text,
+        sight_words=SIGHT,
+        story_words=STORY_WORDS,
+        seed=seed,
+    )
+
+
+GOOD_TAP = TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "man"])
+GOOD_MCQ = Mcq2Draft(
+    prompt="Did the man run?",
+    correct="The man ran back.",
+    incorrect="The man ran up.",
+)
+# The real per-stage list — "one" only becomes a sight word at stage 6.
+SIGHT_12 = [
+    "a", "again", "all", "are", "because", "come", "go", "he", "her", "i", "is",
+    "little", "me", "no", "oh", "one", "out", "people", "said", "she", "some",
+    "the", "there", "they", "thought", "through", "to", "was", "we", "what",
+    "when", "you", "your",
+]
+
+
+# --- prompt assembly ---------------------------------------------------------
+def test_question_rules_are_frozen_of_request_detail():
+    """Anything per-request in the rules invalidates the cached prefix on every
+    call, silently destroying the per-stage cache (STATE invariant 9)."""
+    for leak in ("dragon", "Stage 3", "hit", "{", "}"):
+        assert leak not in QUESTION_RULES
+
+
+def test_sound_block_offers_the_words_and_the_cue():
+    block = build_sound_block(targets())
+    target = next(t for t in targets() if t.grapheme == "h")
+    assert f"as in {target.cue}" in block
+    for word in target.onset_words + target.clean_words:
+        assert word in block
+
+
+def test_sound_block_says_so_when_no_sound_qualifies():
+    """An empty list must read as "none", never as an empty menu the model
+    might fill in itself."""
+    assert "none" in build_sound_block([]).lower()
+
+
+def test_request_block_carries_the_story_and_the_title():
+    block = build_question_request(
+        story_title=TITLE, story_text=STORY, targets=targets(), needed=["tap_word", "mcq2"]
+    )
+    assert TITLE in block and "A dragon was in a cave." in block
+    assert "tap-a-word" in block and "two-choice" in block
+
+
+def test_request_block_asks_only_for_what_is_still_missing():
+    block = build_question_request(
+        story_title=TITLE, story_text=STORY, targets=targets(), needed=["mcq2"]
+    )
+    assert "two-choice" in block and "tap-a-word" not in block.split("Write ")[1]
+
+
+def test_only_readable_question_words_are_offered():
+    """Live-observed: Haiku burns the whole retry budget on "What did ...?"
+    because "what" is undecodable until stage 12. §0 says fix the prompt, not
+    the gate — so the openers are filtered by the gate itself."""
+    early = readable_openers(STAGE, SIGHT, STORY_WORDS)
+    assert "Did" in early and "What" not in early
+    assert "What" in readable_openers(12, SIGHT_12, STORY_WORDS)
+
+
+def test_the_request_block_lists_the_readable_openers():
+    block = build_question_request(
+        story_title=TITLE,
+        story_text=STORY,
+        targets=targets(),
+        needed=["mcq2"],
+        openers=readable_openers(STAGE, SIGHT, STORY_WORDS),
+    )
+    assert "Did" in block and "What" not in block
+
+
+def test_openers_are_omitted_when_only_tap_word_is_wanted():
+    block = build_question_request(
+        story_title=TITLE,
+        story_text=STORY,
+        targets=targets(),
+        needed=["tap_word"],
+        openers=["Did", "Was"],
+    )
+    assert "unreadable at this stage" not in block
+
+
+def test_a_rejection_names_the_word_that_failed():
+    """"try again" tells the model nothing it can act on (§6)."""
+    _, problems = check_two(
+        Mcq2Draft(
+            prompt="What did the man do?",
+            correct="The man ran back.",
+            incorrect="The man ran up.",
+        )
+    )
+    assert any("cannot read: " in p and "what" in p.split("cannot read: ")[1] for p in problems)
+
+
+def test_retry_block_names_the_specific_problem():
+    """§6's rewrite lesson: the model gets the violating detail, not "try again"."""
+    block = build_question_request(
+        story_title=TITLE,
+        story_text=STORY,
+        targets=targets(),
+        needed=["mcq2"],
+        problems=['"the sun was hot" is not what the story says'],
+    )
+    assert "is not what the story says" in block
+
+
+# --- the closed sound list ---------------------------------------------------
+def test_targets_are_derived_from_the_story():
+    found = {t.grapheme for t in targets()}
+    assert "h" in found  # "hit"/"hill"
+    for target in targets():
+        assert target.onset_words
+        assert len(target.clean_words) >= 2
+
+
+def test_every_onset_word_really_starts_with_the_sound():
+    from storyforge.decoder import mastered_ids
+
+    for target in targets():
+        for word in target.onset_words:
+            assert word_graphemes(word, mastered_ids(STAGE))[0] == target.grapheme
+
+
+def test_every_clean_word_really_avoids_the_sound():
+    """This is the property that makes "exactly one correct answer" true."""
+    from storyforge.decoder import mastered_ids
+
+    for target in targets():
+        for word in target.clean_words:
+            assert target.grapheme not in word_graphemes(word, mastered_ids(STAGE))
+
+
+def test_sight_and_story_words_are_never_offered():
+    """The child has not sounded them out, so they carry no evidence about a
+    grapheme — and a story word is not decodable by design (§5.5)."""
+    offered = {w for t in targets() for w in t.onset_words + t.clean_words}
+    assert not offered & set(SIGHT)
+    assert not offered & set(STORY_WORDS)
+
+
+def test_the_cue_word_is_never_one_of_the_story_words():
+    """If the cue could also be an option, the question answers itself."""
+    story_tokens = set(STORY.lower().replace(".", "").split())
+    for target in targets():
+        assert target.cue not in story_tokens
+
+
+def test_targets_are_deterministic():
+    assert [t.model_dump() for t in targets()] == [t.model_dump() for t in targets()]
+
+
+def test_a_story_with_no_usable_sound_offers_nothing():
+    """Then the node returns fewer questions rather than inventing one."""
+    assert (
+        sound_targets(
+            story_text="The dragon was in the cave.",
+            stage_id=STAGE,
+            allowed_words=ALLOWED,
+            sight_words=SIGHT,
+            story_words=STORY_WORDS,
+        )
+        == []
+    )
+
+
+# --- the prompt frame ladder -------------------------------------------------
+def test_the_richest_readable_frame_wins():
+    prompt = tap_word_prompt("had", 12, SIGHT_12, STORY_WORDS)
+    assert prompt is not None
+    assert prompt != PROMPT_FRAMES[-1].format(cue="had")
+    assert prompt in [f.format(cue="had") for f in PROMPT_FRAMES]
+
+
+def test_early_stages_fall_back_to_the_terse_frame():
+    """No English instruction is decodable at stage 1. The gate holds and the
+    sentence shortens — never the other way round."""
+    assert tap_word_prompt("sat", 1, ["a", "i", "the"]) == "Tap: sat."
+
+
+def test_an_unreadable_cue_yields_no_prompt_at_all():
+    assert tap_word_prompt("beautiful", 1, ["a", "i", "the"]) is None
+
+
+# --- tap_word verification ---------------------------------------------------
+def test_a_correct_tap_word_question_is_accepted():
+    question, problems = check_tap(GOOD_TAP)
+    assert problems == []
+    assert question.qtype == "tap_word"
+    assert sorted(question.payload["options"]) == ["hit", "man", "ran"]
+    assert question.answer["correct"] == "hit"
+    assert question.payload["options"][question.answer["index"]] == "hit"
+    assert question.payload["target_grapheme"] == "h"
+
+
+def test_a_claimed_answer_that_does_not_start_with_the_sound_is_rejected():
+    """The model saying so is not evidence — the GPC alignment is."""
+    question, problems = check_tap(
+        TapWordDraft(target_grapheme="h", correct_word="ran", other_words=["man", "it"])
+    )
+    assert question is None
+    assert any("does not start with h" in p for p in problems)
+
+
+def test_a_distractor_carrying_the_sound_is_rejected():
+    """Two options with /h/ means two defensible answers."""
+    question, problems = check_tap(
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["hill", "man"])
+    )
+    assert question is None
+    assert any("also uses h" in p for p in problems)
+
+
+def test_a_word_that_is_not_in_the_story_is_rejected():
+    """§11.3: the options are drawn from the story the child just read."""
+    question, problems = check_tap(
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "camp"])
+    )
+    assert question is None
+    assert any("not in the story" in p for p in problems)
+
+
+def test_repeated_options_are_rejected():
+    question, problems = check_tap(
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "ran"])
+    )
+    assert question is None
+    assert any("different" in p for p in problems)
+
+
+def test_an_undecodable_option_is_rejected():
+    """The gate is never lowered for a question (§0). "night" needs `igh`,
+    which is not taught at stage 3."""
+    story = STORY + " The man saw a night."
+    question, problems = check_tap(
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "night"]),
+        story_text=story,
+    )
+    assert question is None
+    assert any("not decodable" in p for p in problems)
+
+
+def test_a_sound_that_was_not_offered_is_rejected():
+    question, problems = check_tap(
+        TapWordDraft(target_grapheme="sh", correct_word="hit", other_words=["ran", "man"])
+    )
+    assert question is None
+    assert any("not one of the sounds offered" in p for p in problems)
+
+
+def test_the_cue_word_cannot_also_be_an_option():
+    target = next(t for t in targets() if t.grapheme == "h")
+    story = STORY + f" The man had a {target.cue}."
+    question, problems = check_tap(
+        TapWordDraft(
+            target_grapheme="h", correct_word="hit", other_words=["ran", target.cue]
+        ),
+        story_text=story,
+    )
+    assert question is None
+    assert any("example word" in p for p in problems)
+
+
+def test_an_option_that_stands_out_by_length_is_rejected():
+    """A child who spots the odd one out by shape has not read anything."""
+    story = "The man ran up the hill. He went to stand on it."
+    question, problems = check_tap(
+        TapWordDraft(target_grapheme="s", correct_word="stand", other_words=["up", "man"]),
+        ts=sound_targets(
+            story_text=story,
+            stage_id=STAGE,
+            allowed_words=ALLOWED,
+            sight_words=SIGHT,
+            story_words=STORY_WORDS,
+        ),
+        story_text=story,
+    )
+    assert question is None
+    assert any("same length" in p for p in problems)
+
+
+def test_a_multi_word_option_is_rejected():
+    question, problems = check_tap(
+        TapWordDraft(target_grapheme="h", correct_word="hit", other_words=["ran", "the man"])
+    )
+    assert question is None
+    assert any("single word" in p for p in problems)
+
+
+# --- mcq2 verification -------------------------------------------------------
+def test_a_correct_mcq2_is_accepted():
+    question, problems = check_two(GOOD_MCQ)
+    assert problems == []
+    assert question.qtype == "mcq2"
+    assert len(question.payload["options"]) == 2
+    assert question.answer["correct"] == "The man ran back."
+    assert question.payload["options"][question.answer["index"]] == "The man ran back."
+
+
+def test_story_supports_requires_every_word():
+    assert not story_supports("The man ran up the tree.", STORY)
+
+
+def test_story_supports_requires_the_story_order():
+    """Same words, different claim. This is what makes "correct" decidable."""
+    story = "Sam sat on the cat."
+    assert story_supports("Sam sat.", story)
+    assert not story_supports("The cat sat on Sam.", story)
+
+
+def test_an_unsupported_true_answer_is_rejected():
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run?",
+            correct="The man ran up the hill.",
+            incorrect="The man ran into it.",
+        )
+    )
+    assert question is None
+    assert any("is not what the story says" in p for p in problems)
+
+
+def test_a_false_answer_the_story_actually_says_is_rejected():
+    """If both options are supported, there is no wrong answer to pick."""
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run?",
+            correct="The man ran back.",
+            incorrect="The dragon went into the cave.",
+        )
+    )
+    assert question is None
+    assert any("also true in the story" in p for p in problems)
+
+
+def test_an_undecodable_option_fails_the_same_gate_as_the_story():
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run?",
+            correct="The man ran back.",
+            incorrect="The man ran at night.",
+        )
+    )
+    assert question is None
+    assert any("cannot read" in p for p in problems)
+
+
+def test_an_undecodable_prompt_is_rejected():
+    """The prompt is child-facing text too — it is validated like story text."""
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="What happened at night?",
+            correct="The man ran back.",
+            incorrect="The man ran into it.",
+        )
+    )
+    assert question is None
+    assert any("cannot read" in p for p in problems)
+
+
+def test_a_prompt_that_is_not_a_question_is_rejected():
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run",
+            correct="The man ran back.",
+            incorrect="The man ran into it.",
+        )
+    )
+    assert question is None
+    assert any("question mark" in p for p in problems)
+
+
+def test_identical_options_are_rejected():
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run?",
+            correct="The man ran back.",
+            incorrect="The man ran back.",
+        )
+    )
+    assert question is None
+    assert any("different" in p for p in problems)
+
+
+def test_an_mcq2_option_that_stands_out_by_length_is_rejected():
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run?",
+            correct="The man ran back.",
+            incorrect="It went up.",
+        )
+    )
+    assert question is None
+    assert any("same length" in p for p in problems)
+
+
+def test_a_false_answer_with_no_story_words_is_rejected():
+    """An option built from alien vocabulary is guessable without reading."""
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run?",
+            correct="The man ran back.",
+            incorrect="Sam had a big red van.",
+        )
+    )
+    assert question is None
+    assert any("shares no words" in p for p in problems)
+
+
+# --- deterministic shuffling -------------------------------------------------
+def test_shuffle_is_stable_for_a_seed():
+    a = shuffle_options(["hit", "ran", "man"], "hit", 42, "tap_word:h")
+    b = shuffle_options(["hit", "ran", "man"], "hit", 42, "tap_word:h")
+    assert a == b
+
+
+def test_shuffle_ignores_the_order_the_model_emitted():
+    """The model always lists the answer first. Sorting before the shuffle is
+    what stops that from surviving into the payload."""
+    a, _ = shuffle_options(["hit", "ran", "man"], "hit", 42, "tap_word:h")
+    b, _ = shuffle_options(["man", "hit", "ran"], "hit", 42, "tap_word:h")
+    assert a == b
+
+
+def test_shuffle_index_follows_the_correct_answer():
+    for seed in range(20):
+        options, index = shuffle_options(["hit", "ran", "man"], "hit", seed, "tap_word:h")
+        assert options[index] == "hit"
+
+
+def test_the_answer_does_not_sit_in_one_position():
+    """Position must carry no information across stories."""
+    positions = {
+        shuffle_options(["hit", "ran", "man"], "hit", seed, "tap_word:h")[1]
+        for seed in range(30)
+    }
+    assert len(positions) == 3
+
+
+def test_the_two_question_types_shuffle_independently():
+    """A shared seed must not correlate the two answers' positions."""
+    tap = {shuffle_options(["a1", "b1", "c1"], "a1", s, "tap_word:h")[1] for s in range(30)}
+    mcq = {shuffle_options(["a1", "b1"], "a1", s, "mcq2")[1] for s in range(30)}
+    assert len(tap) == 3 and len(mcq) == 2
+
+
+# --- the node's retry and drop policy ----------------------------------------
+def _stub(responses):
+    """Replace the API call with a scripted sequence of parsed outputs."""
+    calls = []
+
+    async def fake_call(**kwargs):
+        calls.append(kwargs)
+        parsed = responses[min(len(calls) - 1, len(responses) - 1)]
+        return parsed, Usage(model="claude-haiku-4-5", input_tokens=10, output_tokens=5), "end_turn"
+
+    return fake_call, calls
+
+
+async def _run(monkeypatch, responses, **overrides):
+    from storyforge.llm import questions as mod
+
+    fake_call, calls = _stub(responses)
+    monkeypatch.setattr(mod, "_call", fake_call)
+    kwargs = {
+        "stage_id": STAGE,
+        "stage_name": "Stage 3",
+        "story_title": TITLE,
+        "story_text": STORY,
+        "allowed_words": ALLOWED,
+        "sight_words": SIGHT,
+        "story_words": STORY_WORDS,
+        "seed": 7,
+    }
+    kwargs.update(overrides)
+    return await generate_questions(**kwargs), calls
+
+
+BAD_TAP = TapWordDraft(target_grapheme="h", correct_word="ran", other_words=["man", "it"])
+
+
+async def test_both_questions_pass_on_the_first_attempt(monkeypatch):
+    result, calls = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)])
+    assert result.attempts == 1 and len(calls) == 1
+    assert [q.qtype for q in result.questions] == ["tap_word", "mcq2"]
+    assert [q.idx for q in result.questions] == [0, 1]
+    assert result.dropped == {}
+
+
+async def test_a_question_that_never_validates_is_dropped(monkeypatch):
+    """Fewer questions beats a wrong one. Retries are bounded (§7)."""
+    result, calls = await _run(monkeypatch, [QuestionDraft(tap_word=BAD_TAP, mcq2=GOOD_MCQ)])
+    assert len(calls) == 3  # one generation plus two retries, then stop
+    assert [q.qtype for q in result.questions] == ["mcq2"]
+    assert result.questions[0].idx == 0
+    assert "tap_word" in result.dropped
+
+
+async def test_an_accepted_question_survives_the_retry(monkeypatch):
+    """The retry asks only for the failing type, and does not re-litigate the
+    one that already passed."""
+    result, calls = await _run(
+        monkeypatch,
+        [
+            QuestionDraft(tap_word=BAD_TAP, mcq2=GOOD_MCQ),
+            TapWordOnly(tap_word=GOOD_TAP),
+        ],
+    )
+    assert len(calls) == 2
+    assert calls[1]["schema"] is TapWordOnly
+    assert [q.qtype for q in result.questions] == ["tap_word", "mcq2"]
+
+
+async def test_the_retry_prompt_carries_the_rejection_reason(monkeypatch):
+    _, calls = await _run(
+        monkeypatch,
+        [QuestionDraft(tap_word=BAD_TAP, mcq2=GOOD_MCQ), TapWordOnly(tap_word=GOOD_TAP)],
+    )
+    assert "does not start with h" in calls[1]["user_block"]
+
+
+async def test_a_story_with_no_usable_sound_skips_tap_word_entirely(monkeypatch):
+    """No wasted API attempt on a question that cannot exist."""
+    plain = "The dragon was in the cave."
+    only = Mcq2Only(
+        mcq2=Mcq2Draft(
+            prompt="Was it in the cave?",
+            correct="The dragon was in the cave.",
+            incorrect="The cave was in the dragon.",
+        )
+    )
+    result, calls = await _run(monkeypatch, [only], story_text=plain)
+    assert calls[0]["schema"] is Mcq2Only
+    assert "tap_word" in result.dropped
+    assert [q.qtype for q in result.questions] == ["mcq2"]
+
+
+async def test_usage_is_summed_across_attempts(monkeypatch):
+    result, _ = await _run(monkeypatch, [QuestionDraft(tap_word=BAD_TAP, mcq2=GOOD_MCQ)])
+    assert result.usage.input_tokens == 30  # 3 attempts x 10
+    assert result.usage.output_tokens == 15
+
+
+async def test_an_unparseable_response_fails_closed(monkeypatch):
+    """§7: a schema-parse failure is an api_fail, never a silent pass."""
+    result, _ = await _run(monkeypatch, [None])
+    assert result.questions == []
+    assert set(result.dropped) == {"tap_word", "mcq2"}
+
+
+async def test_the_node_is_reproducible_for_a_seed(monkeypatch):
+    first, _ = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)])
+    second, _ = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)])
+    assert [q.model_dump() for q in first.questions] == [q.model_dump() for q in second.questions]
+
+
+async def test_a_different_seed_reorders_the_options(monkeypatch):
+    seen = set()
+    for seed in range(12):
+        result, _ = await _run(
+            monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)], seed=seed
+        )
+        seen.add(tuple(result.questions[0].payload["options"]))
+    assert len(seen) > 1
+
+
+def test_generated_question_shape_matches_the_questions_table():
+    """models.Question stores prompt / payload / answer as written here."""
+    question, _ = check_tap(GOOD_TAP)
+    assert isinstance(question, GeneratedQuestion)
+    assert set(question.payload) == {"options", "target_grapheme", "cue_word"}
+    assert set(question.answer) == {"correct", "index"}
+
+
+@pytest.mark.parametrize("qtype", ["tap_word", "mcq2"])
+def test_every_option_would_pass_the_pipeline_gate(qtype):
+    """The invariant in one assertion: nothing ships that the story validator
+    would have rejected."""
+    from storyforge.llm.questions import readable
+    from storyforge.pipeline import passes_gate
+
+    question, _ = check_tap(GOOD_TAP) if qtype == "tap_word" else check_two(GOOD_MCQ)
+    for text in [question.prompt, *question.payload["options"]]:
+        assert passes_gate(readable(text, STAGE, SIGHT, STORY_WORDS))

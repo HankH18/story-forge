@@ -287,3 +287,122 @@ that has never once been observed working — exactly the false green this proje
 avoids elsewhere. `stories.langfuse_trace_id` is reserved and `gen_meta` already
 carries per-attempt tokens, cost, rewrite depth and the moderation verdict, so
 §14's metrics are available without it. **Outstanding for Phase 7.**
+
+---
+
+## Phase 4 — enrichment and the story API
+
+**4.1 — `select_asset` filters by `Asset.kind`, defaulting to `"segment"`.**
+§12 specifies only "most tag overlap, deterministic tiebreak by asset id". But
+style guide §06 defines three distinct ratios — segment art 4:3, theme cover 1:1,
+story-word cutout 1:1 transparent — so dropping a square cover into the 4:3
+segment frame is a real layout defect, not a cosmetic one. `kind=None` restores
+§12's literal behaviour.
+
+**4.2 — Story-word cutouts are not in the asset pool yet.**
+§06's third asset kind keys off story *words*, not scene tags — a different
+lookup than the tagging node performs. `Asset.kind` accommodates them when the
+picture-chip UI lands in Phase 5.
+
+**4.3 — A closed tag vocabulary maps unmatched concepts to a near neighbour.**
+Observed live: the segment "Dan sat amid the sand" has no legal tag (neither
+`beach` nor `sand` is in the enum), so the model chose the nearest legal tag,
+`meadow`, and the segment received a plausible-but-wrong illustration. This is
+the closed vocabulary working exactly as §12 specifies — the model *cannot*
+invent a tag — but it is the tradeoff: an unmatched concept lands on a
+near-neighbour rather than falling through to the striped placeholder. Widening
+the vocabulary is a one-line change if it recurs. Worth watching in eval.
+
+**4.4 — Scene tagging degrades rather than raising.**
+An unparseable tagging response returns empty tags and `degraded=True`. §12's
+illustration layer is decorative; a story that already cleared the decodability
+gate and moderation must not be discarded over a missing picture. The UI renders
+the §06 striped placeholder, which is a defined state, not an error.
+
+**4.5 — Tag realignment is keyed on the echoed segment index.**
+A hallucinated or out-of-range index is dropped rather than applied, and a
+skipped segment gets `[]`. Silently shifting tags by one would give every
+subsequent screen the wrong picture — a failure that looks like bad art rather
+than a bug.
+
+**4.6 — The warm-pool fallback ladder never climbs to a higher stage.**
+When a (stage, theme) pair is empty, the served story is chosen by
+`stage_id DESC, (theme_id = requested) DESC, last_served_at ASC NULLS FIRST`
+under a hard `stage_id <= requested` filter.
+
+The filter is the safety property. A *higher*-stage story can contain GPCs the
+reader was never taught, which breaks the decodability guarantee outright — the
+child would meet letter-sounds nobody has shown them. A *lower*-stage story is
+always safe, because the GPC inventory and sight-word lists are cumulative
+(§4, and §5.7c's monotonicity property). So theme is a preference and stage is a
+safety constraint, and stage wins every time.
+
+**4.7 — Request body is `{stage_id, theme_id_or_slug}`, not §9's `{kid_id, theme_id}`.**
+`kids` lands in Phase 5 with Clerk. The stage is passed directly until a kid row
+can supply it.
+
+**4.8 — Serving does NOT flip `status` to `complete`.**
+Only `last_served_at` is stamped. §8 defines `complete` as "a kid read it", which
+belongs to `POST /api/readings`. Flipping on serve would drain the warm pool on
+admin previews and make `make warm` churn regenerating stories nobody read.
+
+**4.9 — Question answer keys are excluded from the StoryDTO.**
+Grading happens server-side at `POST /api/readings/{id}/answers` (§9), which is
+also what writes `answers` and `gpc_stats`. Shipping the key to the client would
+save no round trip and would make the mastery signal forgeable — §8's promotion
+rule depends on those counts being honest. Asserted by a test.
+
+**4.10 — Rate limiting is in-process (§9: 10/min).**
+Correct for a single worker; behind N workers the effective limit is 10N/min.
+Keyed on client IP until Clerk lands (Phase 6), and it counts requests rather
+than successes, so a 404 still consumes a token. A shared counter (Redis or
+Postgres) is the Phase 7 fix.
+
+**4.11 — Errors vs the never-an-error invariant.**
+§7's "the kid never sees an error" covers *pool exhaustion*, which the fallback
+ladder absorbs. It does not cover requests naming things that do not exist:
+unknown theme → 404, stage outside 1–12 → 422 (matching `validate.py`'s
+precedent), and a completely empty pool → 503 telling the operator to run
+`make warm`. None of those are reachable from kid mode, and fabricating a story
+would be worse than an honest error.
+
+**4.12 — Nothing in the pipeline checks GRAMMAR. Observed in live output.**
+The validator proves *decodability*; moderation judges *safety*. Neither looks at
+whether the sentence is well-formed. Live warm-pool output includes
+"He did not came back." and "The dragon had a got time." — both 100% decodable,
+both wrong English, and both would reach a child.
+
+This is a real quality gap, not a validator bug. The allowlist constrains the
+model to a small vocabulary, and under that pressure it reaches for a permitted
+word that fits phonically but not syntactically. Likely fixes, cheapest first:
+(a) add an explicit grammar instruction to `SYSTEM_RULES`; (b) extend the
+moderation node's schema with a `well_formed: bool` field, since it is already a
+Haiku call on the final text; (c) a dedicated grammar node. **Untriaged — the
+gate must not be lowered to accommodate it.**
+
+**4.13 — `_split_segments` breaks inside quoted dialogue.**
+`He said, "Stop. Give me the cave."` splits after `Stop.`, so one screen ends
+mid-quote. The split is lossless (verified: it round-trips), so no text is lost —
+it is a reading-experience wrinkle, not data loss. Fix is to avoid splitting when
+inside an unclosed quotation mark.
+
+**4.14 — Enrichment (§7 ENRICHING) runs only for stories that passed.**
+Scene tagging and question generation fire after the decodability gate AND
+moderation, in parallel via `asyncio.gather(..., return_exceptions=True)`. A
+story that will never be served must not cost Haiku calls, and neither node can
+fail the story: a tagging failure yields the §06 striped placeholder, a question
+failure yields a story with no questions. Both are recorded in
+`gen_meta.enrichment` rather than swallowed.
+
+**4.15 — Segments are re-queried rather than read off `story.segments`.**
+The relationship is lazy; on the async engine an implicit lazy load raises
+`MissingGreenlet` instead of quietly doing IO. Caught live on the first
+enrichment run.
+
+**4.16 — `tap_word` prompts use a decodable cue word, not a literal sound.**
+A literal `/sh/` cannot survive the decoder (61 of 78 inventory graphemes are OOV
+or a violation when tokenised), and the word "word" is undecodable at every
+stage. The target sound therefore rides in the payload as `target_grapheme` — kid
+mode renders the sound chip — while the prompt uses a decodable cue word chosen
+from a frame ladder, richest frame first. Below stage 7 that reduces to
+"Tap: hit." The gate held; the sentence got shorter.

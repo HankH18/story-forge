@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from storyforge.db import SessionLocal
 from storyforge.decoder import load_gpcs
-from storyforge.models import AllowedWord, Gpc, SightWord, Stage, StoryWord, Theme
+from storyforge.models import AllowedWord, Asset, Gpc, SightWord, Stage, StoryWord, Theme
 
 SEED_DIR = Path(__file__).resolve().parents[3] / "data/seed"
 
@@ -139,6 +139,71 @@ async def seed_story_words(session) -> int:
     return len(rows)
 
 
+async def seed_assets(session) -> int:
+    """Curated illustration pool (§12). Depends on themes, like story_words.
+
+    Two things are validated loudly before anything is written:
+
+    - **every tag is in the closed vocabulary** (§12). A typo'd tag cannot be
+      produced by the scene-tagging node, so the asset would never be selected
+      and every segment that should have matched it would quietly render the
+      placeholder instead. That is a bug that never raises — so it is caught here.
+    - **`alt_text` is present** (style guide §06: mandatory on every asset). A
+      blank one passes every test and fails exactly one user.
+
+    `assets` has no unique constraint on `url` (the Phase 4 migration mirrors
+    §8's schema, which has none), so idempotency is done by reading the existing
+    urls and splitting into update/insert rather than with ON CONFLICT. Deleting
+    and re-inserting would renumber ids and orphan `story_segments.asset_id`.
+    """
+    from storyforge.llm.scene_tags import TAG_VOCABULARY
+
+    theme_ids = {
+        slug: tid
+        for tid, slug in (await session.execute(select(Theme.id, Theme.slug))).all()
+    }
+
+    rows = []
+    for r in _rows("assets.csv"):
+        theme_id = theme_ids.get(r["theme"].strip())
+        if theme_id is None:
+            raise SystemExit(f"assets.csv references unknown theme {r['theme']!r}")
+        url = r["url"].strip()
+        tags = [t.strip() for t in r["tags"].split("|") if t.strip()]
+        unknown = sorted(set(tags) - TAG_VOCABULARY)
+        if unknown:
+            raise SystemExit(
+                f"assets.csv row {url!r} uses tags outside the closed §12 "
+                f"vocabulary: {', '.join(unknown)} — the tagging node can never "
+                "emit these, so the asset would be unreachable."
+            )
+        alt_text = r["alt_text"].strip()
+        if not alt_text:
+            raise SystemExit(f"assets.csv row {url!r} has no alt_text (style guide §06)")
+        rows.append(
+            {
+                "theme_id": theme_id,
+                "kind": r["kind"].strip(),
+                "tags": tags,
+                "url": url,
+                "alt_text": alt_text,
+            }
+        )
+
+    existing = {
+        url: aid for aid, url in (await session.execute(select(Asset.id, Asset.url))).all()
+    }
+    for row in rows:
+        asset_id = existing.get(row["url"])
+        if asset_id is None:
+            session.add(Asset(**row))
+        else:
+            await session.execute(
+                Asset.__table__.update().where(Asset.id == asset_id).values(**row)
+            )
+    return len(rows)
+
+
 async def run() -> dict[str, int]:
     async with SessionLocal() as session:
         counts = {
@@ -147,9 +212,10 @@ async def run() -> dict[str, int]:
             "sight_words": await seed_sight_words(session),
             "themes": await seed_themes(session),
         }
-        # story_words resolves theme slugs, so themes must be flushed first.
+        # story_words and assets resolve theme slugs, so themes must flush first.
         await session.flush()
         counts["story_words"] = await seed_story_words(session)
+        counts["assets"] = await seed_assets(session)
         await session.commit()
     return counts
 
