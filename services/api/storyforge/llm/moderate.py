@@ -106,6 +106,13 @@ the story is well-formed. When in doubt, well_formed = true: a wrongly rejected 
 story is thrown away and the child gets nothing in its place."""
 
 
+#: What `moderate()` prefixes a reason with when the story was judged SAFE and
+#: failed only on grammar. Named rather than inlined because it is the one thing
+#: that distinguishes "rejected on content" from "rejected on grammar" after the
+#: two halves are folded into a single `approved` — see `warm.run_grammar_backfill`.
+UNGRAMMATICAL_PREFIX = "ungrammatical: "
+
+
 class ModerationVerdict(BaseModel):
     approved: bool = Field(description="True only if the story is safe for ages 5-10.")
     reason: str = Field(description="One sentence. If rejecting, name the specific problem.")
@@ -192,7 +199,7 @@ async def moderate(body: str) -> ModerationResult:
     reason = verdict.reason
     if verdict.approved and not verdict.well_formed:
         note = verdict.grammar_note.strip() or "sentence is not well-formed English"
-        reason = f"ungrammatical: {note}"
+        reason = f"{UNGRAMMATICAL_PREFIX}{note}"
 
     return ModerationResult(
         approved=verdict.approved and verdict.well_formed,

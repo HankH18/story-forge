@@ -42,6 +42,9 @@ BODIES = ["Sam sat.", "The cat sat.", "Sam and the cat nap."]
 Q_USAGE = Usage(model="claude-haiku-4-5", input_tokens=400, output_tokens=80)
 TAG_USAGE = Usage(model="claude-haiku-4-5", input_tokens=300, output_tokens=40)
 MOD_USAGE = Usage(model="claude-haiku-4-5", input_tokens=90, output_tokens=12)
+# `kids.display_name` is constrained to a plain first name — no digits — so the
+# throwaway reader `_answer` creates is identified by a distinctive one.
+KID_NAME = "Enrichfixture"
 
 
 def questions() -> list[GeneratedQuestion]:
@@ -115,13 +118,15 @@ async def story(session):
     # the flush on commit inserts children for a story that no longer exists.
     await session.rollback()
     await session.execute(text("DELETE FROM stories WHERE id = :i"), {"i": story_id})
+    # `readings`/`answers` cascade off the story; the kid `_answer` made does not.
+    await session.execute(text("DELETE FROM kids WHERE display_name = :n"), {"n": KID_NAME})
     await session.commit()
 
 
 @pytest.fixture
 def nodes(monkeypatch):
     """Stub the three API calls enrichment makes. Returns a call log."""
-    calls: dict = {"moderated": []}
+    calls: dict = {"moderated": [], "question_calls": []}
 
     async def fake_tags(*, segments, theme):
         calls["tag_segments"] = {"segments": list(segments), "theme": theme}
@@ -132,6 +137,7 @@ def nodes(monkeypatch):
 
     async def fake_questions(**kwargs):
         calls["generate_questions"] = kwargs
+        calls["question_calls"].append(kwargs)
         result = calls.get("question_result", qset())
         if isinstance(result, BaseException):
             raise result
@@ -150,12 +156,64 @@ def nodes(monkeypatch):
 async def _questions_of(session, story_id: int) -> list[dict]:
     rows = await session.execute(
         text(
-            "SELECT qtype, prompt, payload, answer FROM questions "
+            "SELECT id, qtype, prompt, payload, answer FROM questions "
             "WHERE story_id = :i ORDER BY idx"
         ),
         {"i": story_id},
     )
     return [dict(r._mapping) for r in rows]
+
+
+#: `--backfill` selects on the ABSENCE of a §13 receipt, so these two helpers are
+#: how a test says "already judged" / "never judged" without reaching into
+#: `_UNENRICHED_SQL` and restating it.
+async def _mark_moderated(session, story_id: int) -> None:
+    await session.execute(
+        text(
+            "UPDATE stories SET gen_meta = coalesce(gen_meta, '{}'::jsonb) || "
+            """CAST('{"enrichment": {"questions_moderation": {"approved": true}}}' AS jsonb) """
+            "WHERE id = :i"
+        ),
+        {"i": story_id},
+    )
+
+
+async def _clear_moderation(session, story_id: int) -> None:
+    await session.execute(
+        text("UPDATE stories SET gen_meta = gen_meta #- '{enrichment,questions_moderation}' "
+             "WHERE id = :i"),
+        {"i": story_id},
+    )
+
+
+async def _answer(session, story, question_id: int) -> int:
+    """A real reading with a real answer row — the thing that must not be lost.
+
+    `answers.question_id` is ON DELETE CASCADE, so this is exactly the state in
+    which replacing a question row silently destroys §8 evidence.
+    """
+    kid_id = (
+        await session.execute(
+            text(
+                "INSERT INTO kids (display_name, stage_id) VALUES (:n, :st) RETURNING id"
+            ),
+            {"n": KID_NAME, "st": story.stage_id},
+        )
+    ).scalar_one()
+    reading_id = (
+        await session.execute(
+            text(
+                "INSERT INTO readings (kid_id, story_id, stage_id, path, completed_at) "
+                "VALUES (:k, :s, :st, CAST('{\"choices\": []}' AS jsonb), now()) RETURNING id"
+            ),
+            {"k": kid_id, "s": story.id, "st": story.stage_id},
+        )
+    ).scalar_one()
+    await session.execute(
+        text("INSERT INTO answers (reading_id, question_id, correct) VALUES (:r, :q, true)"),
+        {"r": reading_id, "q": question_id},
+    )
+    return kid_id
 
 
 async def _tags_of(session, story_id: int) -> list[list[str]]:
@@ -558,7 +616,14 @@ async def test_backfill_moves_a_legacy_answer_key_out_of_the_served_payload(
 ):
     """DEVIATIONS 4.9 for rows already in the database: `target_grapheme` used to
     be written into `payload`, from which the answer is
-    `[o for o in options if o.startswith(g)][0]`."""
+    `[o for o in options if o.startswith(g)][0]`.
+
+    The story is given a §13 receipt so `--backfill` does NOT select it for
+    replacement, which isolates the one statement under test. Without that this
+    went vacuous the moment the backfill learned to replace rows: the row it
+    inspected was then a freshly generated one, so both `target_grapheme`
+    assertions passed whether or not the repair statement had run at all.
+    """
     await session.execute(
         text(
             "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
@@ -568,12 +633,184 @@ async def test_backfill_moves_a_legacy_answer_key_out_of_the_served_payload(
         ),
         {"s": story.id},
     )
+    await _mark_moderated(session, story.id)
     await session.commit()
 
     await warm.run_backfill(only=[story.id])
 
     async with SessionLocal() as s:
-        row = (await _questions_of(s, story.id))[0]
+        rows = await _questions_of(s, story.id)
+    assert len(rows) == 1
+    row = rows[0]
     assert "target_grapheme" not in row["payload"]
     assert row["answer"]["target_grapheme"] == "s"
+    # Repaired IN PLACE — the legacy row is still the row, options untouched.
     assert row["payload"]["options"] == ["sat", "cat"]
+    assert row["prompt"] == "Tap: sit."
+
+
+async def test_backfill_re_derives_a_stale_tap_word_prompt_in_place(session, story, nodes):
+    """§11.3: the prompt is a pure function of (cue, stage), so a rebuilt frame
+    ladder reaches rows already in the pool WITHOUT regenerating them.
+
+    That is the only way it can reach a story a child has read: `answers`
+    cascades off `questions`, so those rows cannot be replaced (see below), and
+    19 of 28 live rows were still reading the bare cue `Tap: get.` after the
+    ladder was fixed. Nothing here calls an API.
+    """
+    await session.execute(
+        text(
+            "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+            "VALUES (:s, 0, 'tap_word', 'Tap: sat.', "
+            """CAST('{"options": ["cat", "sam", "sit"], "cue_word": "sat"}' AS jsonb), """
+            """CAST('{"correct": "sam", "index": 1}' AS jsonb))"""
+        ),
+        {"s": story.id},
+    )
+    await _mark_moderated(session, story.id)  # not a backfill candidate
+    await session.commit()
+
+    await warm.run_backfill(only=[story.id])
+
+    async with SessionLocal() as s:
+        rows = await _questions_of(s, story.id)
+        # Idempotent: the second run changes nothing.
+        again, skipped = await warm.refresh_tap_word_prompts(s, only=[story.id])
+    assert len(rows) == 1
+    assert rows[0]["prompt"] == "Tap it: sat.", "the stale frame survived the ladder rebuild"
+    assert rows[0]["payload"]["options"] == ["cat", "sam", "sit"], "the row was replaced"
+    assert (again, skipped) == (0, [])
+
+
+# --- the §13 question pass is not forward-only -------------------------------
+async def test_backfill_reaches_a_story_whose_questions_were_never_moderated(
+    session, story, nodes, capsys
+):
+    """The audit finding this exists for.
+
+    `_UNENRICHED_SQL` used to match only `NOT EXISTS (questions)`, which made
+    the §13 question-moderation fix FORWARD-ONLY: the servable stories that
+    already carried unmoderated questions were exactly the set every
+    `--backfill` run skipped, forever, and no other code path re-moderated a
+    question row. Nine of 28 were in that state; story 17 went on serving the
+    option that motivated the fix, "The man ran back stop."
+    """
+    await session.execute(
+        text(
+            "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+            "VALUES (:s, 0, 'mcq2', 'Did the man run back fast?', "
+            """CAST('{"options": ["The man ran back fast.", "The man ran back stop."]}' """
+            """AS jsonb), CAST('{"correct": "The man ran back fast.", "index": 0}' AS jsonb))"""
+        ),
+        {"s": story.id},
+    )
+    await session.commit()
+    assert len(await _questions_of(session, story.id)) == 1
+
+    await warm.run_backfill(only=[story.id])
+
+    async with SessionLocal() as s:
+        rows = await _questions_of(s, story.id)
+        meta = (
+            await s.execute(text("SELECT gen_meta FROM stories WHERE id = :i"), {"i": story.id})
+        ).scalar_one()
+
+    # Replaced, not appended: an append would have left the bad string fetchable.
+    assert [q["qtype"] for q in rows] == ["tap_word", "mcq2"]
+    served = [o for q in rows for o in q["payload"]["options"]]
+    assert "The man ran back stop." not in served
+    assert meta["enrichment"]["questions_replaced"] == 1
+    assert meta["enrichment"]["questions_moderation"]["approved"] is True
+    assert "1 servable story/stories with missing or unmoderated questions" in (
+        capsys.readouterr().out
+    )
+
+
+async def test_a_story_with_a_moderation_receipt_is_left_alone(session, story, nodes):
+    """Idempotence, and why the widened predicate is safe to sweep the whole
+    pool with: a story that HAS been judged is not judged again, so a repeat
+    `--backfill` does not spend a Haiku call per story per run."""
+    meta = await warm.enrich(session, story, THEME, story_text=" ".join(BODIES))
+    await warm._record_enrichment(session, story, meta, 0.01)
+    await session.commit()
+    before = [q["id"] for q in await _questions_of(session, story.id)]
+    judged = len(nodes["moderated"])
+
+    await warm.run_backfill(only=[story.id])
+
+    async with SessionLocal() as s:
+        assert [q["id"] for q in await _questions_of(s, story.id)] == before
+    assert len(nodes["moderated"]) == judged, "an already-judged story was judged again"
+
+
+async def test_an_answered_question_is_re_moderated_instead_of_regenerated(
+    session, story, nodes
+):
+    """§8 evidence outranks regeneration.
+
+    `answers.question_id` is ON DELETE CASCADE, so replacing a question a child
+    has already answered would silently take the answer row with it — and for a
+    `tap_word`, the evidence behind a promotion decision. QUESTION_GEN is
+    therefore not run at all for these stories; the text already in the table
+    goes through the same §13 path instead, so the receipt still gets written.
+    """
+    await warm.enrich(session, story, THEME, story_text=" ".join(BODIES))
+    await session.commit()
+    rows = await _questions_of(session, story.id)
+    tap = next(q for q in rows if q["qtype"] == "tap_word")
+    await _answer(session, story, tap["id"])
+    await _clear_moderation(session, story.id)
+    await session.commit()
+
+    generated = len(nodes["question_calls"])
+    await warm.run_backfill(only=[story.id])
+
+    async with SessionLocal() as s:
+        after = await _questions_of(s, story.id)
+        meta = (
+            await s.execute(text("SELECT gen_meta FROM stories WHERE id = :i"), {"i": story.id})
+        ).scalar_one()
+        kept = (
+            await s.execute(
+                text("SELECT count(*) FROM answers WHERE question_id = :q"), {"q": tap["id"]}
+            )
+        ).scalar_one()
+
+    assert len(nodes["question_calls"]) == generated, "QUESTION_GEN ran on an answered story"
+    assert [q["id"] for q in after] == [q["id"] for q in rows], "rows were replaced"
+    assert kept == 1, "the answer row was destroyed"
+    assert meta["enrichment"]["questions_moderation"]["approved"] is True
+    assert meta["enrichment"]["questions_source"].startswith("existing rows")
+
+
+async def test_a_rejected_answered_mastery_question_is_kept_and_reported(
+    session, story, nodes
+):
+    """The one case this refuses to decide by itself.
+
+    A `tap_word` row carrying an answer is §8 evidence (`MASTERY_QTYPES`), so a
+    §13 rejection cannot remove it. The hazard is NAMED and the run fails,
+    rather than either destroying the evidence or quietly going on serving text
+    the judge rejected.
+    """
+    await warm.enrich(session, story, THEME, story_text=" ".join(BODIES))
+    await session.commit()
+    rows = await _questions_of(session, story.id)
+    tap = next(q for q in rows if q["qtype"] == "tap_word")
+    await _answer(session, story, tap["id"])
+    await _clear_moderation(session, story.id)
+    await session.commit()
+
+    # A blocklist verdict is the unattributable one: normally nothing survives it.
+    nodes["verdict"] = ModerationResult(
+        approved=False, reason="blocklisted", layer="blocklist", blocked_words=["x"]
+    )
+    meta = await warm.enrich(session, story, THEME, story_text=" ".join(BODIES))
+    await session.commit()
+
+    assert meta["questions_unremovable"] == [tap["id"]]
+    assert any("cascade §8 mastery evidence" in p for p in warm.enrichment_problems(meta))
+    async with SessionLocal() as s:
+        left = await _questions_of(s, story.id)
+    # The answered tap_word survives; the unanswered mcq2 does not.
+    assert [q["id"] for q in left] == [tap["id"]]

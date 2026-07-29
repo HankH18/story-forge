@@ -1,0 +1,74 @@
+# Docker build context filter for the repo root.
+#
+# There is exactly ONE Dockerfile in this repo (services/api/Dockerfile) and it
+# is built with the REPO ROOT as its context — `storyforge.seed` and
+# `storyforge.precompute` resolve `data/` as `Path(__file__).parents[3]/data`,
+# and `data/seed/gpcs.csv` is a relative symlink into the decoder package
+# (DEVIATIONS 1.4), so both trees have to be in one context. The web app is a
+# DO static site built from source (docs/DEPLOY.md), so it has no image and
+# therefore no ignore file of its own.
+#
+# Verify this file by inspecting a real context, never by reading it — export
+# what the builder actually received and look at it:
+#   printf 'FROM scratch\nCOPY . /\n' | \
+#     docker build --no-cache -f - -o type=local,dest=/tmp/ctx .
+#   find /tmp/ctx \( -name '.env' -o -name node_modules -o -name .venv \)
+
+# --- secrets. First, loudest, and never conditional. -------------------------
+# `services/api/.env` (mode 600) holds ANTHROPIC_API_KEY, CLERK_SECRET_KEY and
+# LANGFUSE_SECRET_KEY. Nothing in an image may ever read it; production values
+# arrive as SECRET env vars from the platform (.do/app.yaml).
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+**/secrets/
+
+# --- version control and agent/editor state ----------------------------------
+.git
+.git/**
+.gitignore
+.gitattributes
+.github/
+.context/
+.gstack/
+.gstack-worktrees/
+.claude/
+**/.DS_Store
+
+# --- language runtimes that must be rebuilt, never copied --------------------
+# A host .venv is macOS/arm64 with absolute paths baked into pyvenv.cfg; copying
+# it into a linux image produces an interpreter that cannot start. The image
+# builds its own from uv.lock.
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/node_modules
+**/dist
+**/.vite
+**/*.tsbuildinfo
+
+# --- test and dev material ---------------------------------------------------
+# Tests are not shipped: they pull pytest/hypothesis/cmudict/wordfreq, none of
+# which are runtime dependencies, and `make test` runs from a checkout.
+services/api/tests/
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/.hypothesis
+**/.coverage
+**/htmlcov
+reports/
+
+# --- everything the API image has no use for ---------------------------------
+apps/
+packages/
+docs/
+scripts/
+README.md
+Makefile
+docker-compose.yml
+.do/

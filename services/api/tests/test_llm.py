@@ -12,6 +12,7 @@ from datetime import date
 import pytest
 
 from storyforge.llm.generate import (
+    PRACTICE_HEADER,
     SYSTEM_RULES,
     build_request_block,
     build_vocabulary_block,
@@ -50,6 +51,18 @@ def test_system_rules_are_frozen_of_request_detail():
     every call, silently destroying the per-stage cache."""
     for leak in ("dragon", "Stage 3", "30-60", "{", "}"):
         assert leak not in SYSTEM_RULES
+
+
+def test_request_block_stays_free_of_stage_material():
+    """The other half of the cache argument (DEVIATIONS 5.17). The stage's
+    newly-taught words are identical for every story at a stage, so they belong
+    in the cached vocabulary block; put here they would be re-sent as fresh
+    input on every request and on every rewrite for no benefit at all.
+    `tests/test_stage_coverage.py` holds the positive side of this."""
+    block = build_request_block("dragons", {"dragon": "a big lizard"}, 30, 60)
+    assert PRACTICE_HEADER not in block
+    for leak in ("PERMITTED WORDS", "SIGHT WORDS", "letter-sound"):
+        assert leak not in block
 
 
 # --- cost accounting ---------------------------------------------------------

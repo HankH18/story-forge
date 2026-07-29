@@ -9,7 +9,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from storyforge.api import health, readings, stories, validate
+from storyforge.api import health, kids, readings, stories, validate
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +40,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(validate.router)
     app.include_router(stories.router)
+    app.include_router(kids.router)
     app.include_router(readings.router)
     return app
 

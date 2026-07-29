@@ -165,11 +165,18 @@ export default function Celebration({
         {story.story_words.length ? (
           <Card surface="kid" className="w-full p-6">
             <h2 className="text-center font-display text-[24px] text-ink-900">New words</h2>
-            <p className="mt-3 text-center font-read text-read text-ink-900">
+            {/* A flex row with an explicit gap, NOT a paragraph. `.sf-word`
+                carries no horizontal margin — its 5px/8px padding is inside the
+                border box — and adjacent JSX siblings emit no whitespace text
+                node, so chips rendered straight into a <p> shared edges: three
+                62px targets with a 0px gap at every viewport, against §11's 8px
+                floor. The seals row above already had it right. */}
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-3
+                            font-read text-read text-ink-900">
               {story.story_words.map((word) => (
                 <StoryWordChip key={word} word={word} onSpeak={(w) => speak(w)} />
               ))}
-            </p>
+            </div>
           </Card>
         ) : null}
       </section>

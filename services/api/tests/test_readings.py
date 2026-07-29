@@ -115,6 +115,77 @@ async def tap_question(session, story_at_stage_1):
         await session.commit()
 
 
+@pytest.fixture
+async def distinct_stories(session):
+    """`STORIES_REQUIRED_AT_STAGE + 1` DIFFERENT stage-1 stories, each with a
+    tap_word question carrying the same hand-checked answer key.
+
+    This fixture exists because the promotion tests below were wrong, and they
+    were wrong in the way that matters: they read ONE story five times and
+    asserted §8's "≥5 stories completed at current stage" was satisfied. It was
+    — `_STORIES_AT_STAGE_SQL` counted readings, not stories — so the tests
+    pinned the defect as the contract. Live, a stage-5 kid was promoted to
+    stage 6 having read one story and answered one question about one word ten
+    times, in 31 HTTP calls. `MIN_GPC_OBSERVATIONS = 10` (DEVIATIONS 5.5), the
+    floor that exists so a single lucky tap cannot promote, was cleared by
+    replaying that single lucky tap.
+
+    The stories are created here rather than drawn from the warm pool because
+    the pool currently holds four servable stage-1 stories and the rule needs
+    five. A test of the promotion rule must not be silently satisfiable by pool
+    depth in either direction, so it brings its own.
+    """
+    theme_id = (
+        await session.execute(text("SELECT id FROM themes ORDER BY id LIMIT 1"))
+    ).scalar_one()
+
+    readables = []
+    for n in range(STORIES_REQUIRED_AT_STAGE + 1):
+        story_id = (
+            await session.execute(
+                text(
+                    "INSERT INTO stories (stage_id, theme_id, status, title, decodability, "
+                    "story_words, gen_meta) VALUES (:s, :t, 'warm', :title, 1.0, "
+                    "CAST('{}' AS text[]), CAST('{}' AS jsonb)) RETURNING id"
+                ),
+                {"s": TAP_STAGE, "t": theme_id, "title": f"Distinct {n}"},
+            )
+        ).scalar_one()
+        await session.execute(
+            text(
+                "INSERT INTO story_segments (story_id, idx, body, scene_tags) "
+                "VALUES (:st, 0, 'Sam sat.', CAST('{}' AS text[]))"
+            ),
+            {"st": story_id},
+        )
+        qid = (
+            await session.execute(
+                text(
+                    "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+                    "VALUES (:st, 99, 'tap_word', 'Tap: sit.', "
+                    "CAST(:payload AS jsonb), CAST(:answer AS jsonb)) RETURNING id"
+                ),
+                {
+                    "st": story_id,
+                    "payload": '{"options": ["sit", "map", "bed"], "target_grapheme": "s"}',
+                    "answer": '{"index": 0, "correct": "sit"}',
+                },
+            )
+        ).scalar_one()
+        readables.append((story_id, qid))
+    await session.commit()
+
+    try:
+        yield readables
+    finally:
+        # `story_segments`, `questions` and `readings` all cascade from stories.
+        await session.execute(
+            text("DELETE FROM stories WHERE id = ANY(CAST(:ids AS int[]))"),
+            {"ids": [s for s, _ in readables]},
+        )
+        await session.commit()
+
+
 async def _new_kid(client, sandbox, stage_id=TAP_STAGE, name="Testkid") -> int:
     resp = await client.post("/api/kids", json={"display_name": name, "stage_id": stage_id})
     assert resp.status_code == 201, resp.text
@@ -745,15 +816,21 @@ async def test_only_tap_word_questions_move_the_counters(
 
 # --- promotion (§8) ----------------------------------------------------------
 async def test_five_clean_readings_promote_the_kid(
-    client, sandbox, session, story_at_stage_1, tap_question
+    client, sandbox, session, distinct_stories
 ):
-    """§8's rule end to end: 5 stories at stage 1, 15 GPC observations, 100%."""
+    """§8's rule end to end: 5 stories at stage 1, 15 GPC observations, 100%.
+
+    CORRECTED: this read one story five times and called it five stories. §8
+    says "≥5 stories completed at current stage"; `distinct_stories` now
+    supplies five different ones, so the docstring and the test agree.
+    """
     kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
     per_reading = len(word_gpc_ids(TAP_WORD, TAP_STAGE))
     assert per_reading * STORIES_REQUIRED_AT_STAGE >= MIN_GPC_OBSERVATIONS
 
     for n in range(1, STORIES_REQUIRED_AT_STAGE + 1):
-        body = await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=True)
+        story_id, question_id = distinct_stories[n - 1]
+        body = await _read_once(client, kid_id, story_id, question_id, correct=True)
         assert body["promotion"]["stories_completed"] == n
         if n < STORIES_REQUIRED_AT_STAGE:
             assert body["promoted"] is False, f"promoted after only {n} stories"
@@ -771,15 +848,14 @@ async def test_five_clean_readings_promote_the_kid(
 
 
 async def test_promotion_stops_below_the_accuracy_threshold(
-    client, sandbox, session, story_at_stage_1, tap_question
+    client, sandbox, session, distinct_stories
 ):
     """Five stories, plenty of evidence, 60% correct — no promotion, and the
     dashboard is told which clause failed."""
     kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
     for n in range(STORIES_REQUIRED_AT_STAGE):
-        body = await _read_once(
-            client, kid_id, story_at_stage_1, tap_question, correct=n < 3
-        )
+        story_id, question_id = distinct_stories[n]
+        body = await _read_once(client, kid_id, story_id, question_id, correct=n < 3)
 
     assert body["promoted"] is False
     assert body["promotion"]["stories_completed"] == STORIES_REQUIRED_AT_STAGE
@@ -795,13 +871,20 @@ async def test_promotion_stops_below_the_accuracy_threshold(
 
 
 async def test_promotion_needs_evidence_not_just_finished_stories(
-    client, sandbox, session, story_at_stage_1
+    client, sandbox, session, distinct_stories
 ):
-    """Five readings with no questions answered is five stories and no proof."""
+    """Five DIFFERENT stories with no questions answered is no proof either.
+
+    The distinctness matters to what this test proves. Five replays of one
+    story would fail the story criterion as well, so the test would pass while
+    demonstrating the wrong clause.
+    """
     kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
-    for _ in range(STORIES_REQUIRED_AT_STAGE):
-        reading_id = await _start(client, kid_id, story_at_stage_1)
+    for n in range(STORIES_REQUIRED_AT_STAGE):
+        reading_id = await _start(client, kid_id, distinct_stories[n][0])
         body = (await client.post(f"/api/readings/{reading_id}/complete")).json()
+
+    assert body["promotion"]["stories_completed"] == STORIES_REQUIRED_AT_STAGE
 
     assert body["promoted"] is False
     assert body["promotion"]["accuracy"] is None
@@ -810,29 +893,93 @@ async def test_promotion_needs_evidence_not_just_finished_stories(
 
 
 async def test_promotion_resets_the_story_count_at_the_new_stage(
-    client, sandbox, story_at_stage_1, tap_question
+    client, sandbox, distinct_stories
 ):
     """`readings.stage_id` is the kid's stage at the time, so the count for the
     stage just left does not carry into the next one."""
     kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
-    for _ in range(STORIES_REQUIRED_AT_STAGE):
-        body = await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=True)
+    for n in range(STORIES_REQUIRED_AT_STAGE):
+        story_id, question_id = distinct_stories[n]
+        body = await _read_once(client, kid_id, story_id, question_id, correct=True)
     assert body["promoted"] is True
 
-    after = await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=True)
+    sixth_story, sixth_question = distinct_stories[STORIES_REQUIRED_AT_STAGE]
+    after = await _read_once(client, kid_id, sixth_story, sixth_question, correct=True)
     assert after["promotion"]["from_stage"] == 2
     assert after["promotion"]["stories_completed"] == 1, "the counter is per stage"
     assert after["promoted"] is False
 
 
+async def test_replaying_one_story_never_promotes(
+    client, sandbox, session, story_at_stage_1, tap_question
+):
+    """The forged promotion, as an attack. §8's counts must be unforgeable.
+
+    Live before the fix: a stage-5 kid reached stage 6 having read ONE story and
+    answered ONE question about ONE word ten times — 31 HTTP calls — because
+    `_STORIES_AT_STAGE_SQL` counted readings and every replay re-credited the
+    same GPC instances, clearing `MIN_GPC_OBSERVATIONS` (DEVIATIONS 5.5) with
+    the single lucky tap that floor exists to reject.
+
+    Ten replays here. Twice `STORIES_REQUIRED_AT_STAGE`, five times the evidence
+    floor, 100% accurate — and still one story, so still no promotion.
+    """
+    kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
+
+    for i in range(10):
+        body = await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=True)
+        assert body["newly_completed"] is True, "each replay is a real, separate reading"
+        assert body["promotion"]["stories_completed"] == 1, (
+            f"replay {i + 1} counted as story {body['promotion']['stories_completed']}"
+        )
+        assert body["promoted"] is False
+
+    # The evidence counters saw the word once, not ten times.
+    rows = {
+        r.gpc_id: (r.n_seen, r.n_correct)
+        for r in await session.execute(
+            text("SELECT gpc_id, n_seen, n_correct FROM gpc_stats WHERE kid_id = :k"),
+            {"k": kid_id},
+        )
+    }
+    assert rows == {gpc: (1, 1) for gpc in word_gpc_ids(TAP_WORD, TAP_STAGE)}
+
+    stage = (
+        await session.execute(text("SELECT stage_id FROM kids WHERE id = :k"), {"k": kid_id})
+    ).scalar_one()
+    assert stage == TAP_STAGE, "ten replays of one story promoted the kid"
+
+
+async def test_a_repeat_reading_completes_but_says_it_added_nothing(
+    client, sandbox, story_at_stage_1, tap_question
+):
+    """Re-reading is normal and allowed — a thin warm pool hands the same story
+    back, and children re-read favourites. It just is not new evidence.
+
+    `repeat_reading` is on the DTO because an empty `gpc_updates` is otherwise
+    ambiguous: §11.4's celebration screen has to tell "you skipped the
+    questions" apart from "you have read this one before".
+    """
+    kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
+
+    first = await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=True)
+    assert first["repeat_reading"] is False
+    assert first["gpc_updates"]
+
+    second = await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=True)
+    assert second["newly_completed"] is True, "the reading itself still completes"
+    assert second["repeat_reading"] is True
+    assert second["gpc_updates"] == []
+
+
 # --- progress (§9, §11) ------------------------------------------------------
 async def test_progress_reports_the_rule_as_well_as_the_verdict(
-    client, sandbox, story_at_stage_1, tap_question
+    client, sandbox, distinct_stories
 ):
     """§8: "thresholds in config, shown on dashboard". Interpretable by design."""
     kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE, name="Maya")
-    await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=True)
-    await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=False)
+    await _read_once(client, kid_id, *distinct_stories[0], correct=True)
+    await _read_once(client, kid_id, *distinct_stories[1], correct=False)
 
     body = (await client.get(f"/api/kids/{kid_id}/progress")).json()
 
@@ -854,13 +1001,17 @@ async def test_progress_reports_the_rule_as_well_as_the_verdict(
 
 
 async def test_progress_shows_per_gpc_accuracy_including_never_practised_ones(
-    client, sandbox, story_at_stage_1, tap_question
+    client, sandbox, distinct_stories
 ):
     """§11's table. A zero row is information — "never practised" — so dropping
-    it would make the table look complete when it is not."""
+    it would make the table look complete when it is not.
+
+    Two DIFFERENT stories: re-reading one contributes no second observation
+    (§8, `complete_reading`), so the 1-of-2 arithmetic below needs two.
+    """
     kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
-    await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=True)
-    await _read_once(client, kid_id, story_at_stage_1, tap_question, correct=False)
+    await _read_once(client, kid_id, *distinct_stories[0], correct=True)
+    await _read_once(client, kid_id, *distinct_stories[1], correct=False)
 
     body = (await client.get(f"/api/kids/{kid_id}/progress")).json()
     rows = {r["gpc_id"]: r for r in body["gpc_accuracy"]}

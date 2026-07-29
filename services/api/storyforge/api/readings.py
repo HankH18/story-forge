@@ -1,4 +1,4 @@
-"""Kids, readings, answers and stage promotion (§9), the write side of §8.
+"""Readings, answers, progress and stage promotion (§9), the write side of §8.
 
 `api/stories.py` hands a child a story. This module records what happened next:
 which segments they chose (§10), which questions they got right, and — once the
@@ -21,11 +21,14 @@ transition — two concurrent completes, or a client that retries on a dropped
 response, cannot double-count `gpc_stats` or promote twice. A read-then-write
 would race; this cannot.
 
-**Kids have no auth identity and no PII.** §13: a row here is a first name and a
+**Kids have no auth identity and no PII.** §13: a kid row is a first name and a
 stage. There is no email, no date of birth, no free-text field a child types
-into, and `answers` stores a boolean rather than what the child tapped. Phase 6
-adds Clerk and scopes these endpoints to the parent that owns the kid; until
-then `GET /api/kids` returns every kid, which is stated rather than hidden.
+into, and `answers` stores a boolean rather than what the child tapped. A kid is
+therefore never a principal — every route below authenticates the *parent* and
+then reaches the kid through `auth.owned_kid` / `auth.owned_reading`, both of
+which filter on `kids.parent_id`. A kid or reading id belonging to another
+family is 404 here, not 403: the response must not confirm that the id exists.
+Kid creation and listing moved to `api/kids.py` when that ownership arrived.
 
 **Branching is schema-only.** §10's generator has not landed, so no story yet
 contains a branch point. `POST /api/readings/{id}/choice` is real anyway — it
@@ -46,7 +49,9 @@ from pydantic import BaseModel, Field, StringConstraints, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from storyforge.api.kids import KidDTO
 from storyforge.api.stories import SERVABLE_STATUSES
+from storyforge.auth import Principal, owned_kid, owned_reading, require_parent
 from storyforge.db import get_session
 from storyforge.mastery import (
     MASTERY_QTYPES,
@@ -64,16 +69,10 @@ router = APIRouter(tags=["readings"])
 
 #: §11's dashboard shows "recent readings", not all of them.
 RECENT_READINGS_LIMIT = 20
-#: A child's first name (§13). Long enough for a hyphenated name, short enough
-#: that the column is not a free-text field by accident.
-MAX_DISPLAY_NAME = 40
 #: A tapped option, not an essay. Bounds the grader's input at the edge.
 MAX_RESPONSE_CHARS = 256
 MAX_CHOICE_CHARS = 128
 
-DisplayName = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_DISPLAY_NAME)
-]
 BoundedResponse = Annotated[str, StringConstraints(max_length=MAX_RESPONSE_CHARS)]
 ChoiceLabel = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_CHOICE_CHARS)
@@ -81,32 +80,6 @@ ChoiceLabel = Annotated[
 
 
 # --- request bodies ----------------------------------------------------------
-class KidCreate(BaseModel):
-    """§9 `POST /api/kids {display_name, stage_id}`.
-
-    There is no third field, and that is the §13 posture in the type system: no
-    email, no date of birth, no year group, no nickname the child types in. A
-    parent supplies a first name and where the child is in the scope & sequence.
-    """
-
-    display_name: DisplayName
-    stage_id: int = Field(ge=1, le=12)
-
-    @field_validator("display_name")
-    @classmethod
-    def _no_contact_details(cls, value: str) -> str:
-        """Refuse the one PII shape a parent might paste into a name box.
-
-        No first name contains "@". §13 forbids collecting a child's email, and
-        the cheapest way for one to arrive anyway is a parent typing it here — a
-        constraint that never fires costs nothing and a missing one costs a
-        COPPA claim.
-        """
-        if "@" in value:
-            raise ValueError("display_name is a first name — no email addresses (§13)")
-        return value
-
-
 class ReadingCreate(BaseModel):
     """§9 `POST /api/readings {kid_id, story_id}`."""
 
@@ -153,13 +126,6 @@ class AnswerCreate(BaseModel):
 
 
 # --- DTOs --------------------------------------------------------------------
-class KidDTO(BaseModel):
-    id: int
-    display_name: str
-    stage_id: int
-    created_at: datetime
-
-
 class ChoiceDTO(BaseModel):
     """One entry of `readings.path` (§10)."""
 
@@ -229,6 +195,13 @@ class CompleteResultDTO(BaseModel):
     reading: ReadingDTO
     #: False on a replay. The counters below are then empty and nothing moved.
     newly_completed: bool
+    #: True when this kid had already completed THIS story at this stage. The
+    #: reading is real and counts as a reading; it just yields no new mastery
+    #: evidence (§8). Shipped rather than left implicit because otherwise an
+    #: empty `gpc_updates` is ambiguous — it would mean either "you skipped the
+    #: questions" or "you have read this one before", and §11.4's celebration
+    #: screen has to say something different in each case.
+    repeat_reading: bool = False
     #: What this reading added to `gpc_stats` — the celebration screen's deltas
     #: (§11.4: "GPC progress bar deltas").
     gpc_updates: list[GpcDeltaDTO] = Field(default_factory=list)
@@ -289,8 +262,6 @@ class ProgressDTO(BaseModel):
 
 
 # --- queries -----------------------------------------------------------------
-_KID_SQL = text("SELECT id, display_name, stage_id, created_at FROM kids WHERE id = :id")
-
 # The whole idempotency guarantee. One statement: the row that was NULL becomes
 # NOW() and returns; a second caller matches nothing and returns nothing.
 _COMPLETE_SQL = text(
@@ -355,10 +326,35 @@ _STAGE_EVIDENCE_SQL = text(
     """
 )
 
+# §8: "≥5 stories completed at current stage". DISTINCT story_id, because
+# `count(*)` counted READINGS — and re-reading one story five times is one story
+# completed five times, not five stories.
+#
+# This was not only forgeable, it was the DEFAULT. `POST /api/stories/request`
+# serves least-recently-served from the pool, so wherever a (stage, theme) pair
+# holds fewer than five stories a child pressing "read another" is handed the
+# same story back and promotes on it. Live: a stage-5 kid reached stage 6 having
+# read one story, answering one question about one word ten times, in 31 HTTP
+# calls. §8's rule is only worth anything if the count means what it says.
 _STORIES_AT_STAGE_SQL = text(
     """
-    SELECT count(*) FROM readings
+    SELECT count(DISTINCT story_id) FROM readings
     WHERE kid_id = :kid_id AND stage_id = :stage_id AND completed_at IS NOT NULL
+    """
+)
+
+# The other half of the same hole. The story count was the visible symptom; the
+# evidence counters were the deeper one, because `MIN_GPC_OBSERVATIONS = 10`
+# (DEVIATIONS 5.5) exists to stop promotion on a single lucky tap — and ten
+# replays of that single tap satisfied it exactly. A GPC instance is evidence
+# the first time a child meets it in a story; the second time they already know
+# what the answer was.
+_ALREADY_READ_SQL = text(
+    """
+    SELECT 1 FROM readings
+    WHERE kid_id = :kid_id AND story_id = :story_id AND stage_id = :stage_id
+      AND completed_at IS NOT NULL AND id <> :reading_id
+    LIMIT 1
     """
 )
 
@@ -452,28 +448,6 @@ def _promotion_dto(decision: PromotionDecision) -> PromotionDTO:
     )
 
 
-async def _load_kid(session: AsyncSession, kid_id: int) -> Any:
-    row = (await session.execute(_KID_SQL, {"id": kid_id})).first()
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"kid {kid_id} not found")
-    return row
-
-
-async def _load_reading(session: AsyncSession, reading_id: int) -> Any:
-    row = (
-        await session.execute(
-            text(
-                "SELECT id, kid_id, story_id, stage_id, path, started_at, completed_at "
-                "FROM readings WHERE id = :id"
-            ),
-            {"id": reading_id},
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"reading {reading_id} not found")
-    return row
-
-
 async def _standing(session: AsyncSession, kid_id: int, stage_id: int) -> PromotionDecision:
     """Where this kid stands against §8's rule right now. Read-only."""
     completed = (
@@ -491,63 +465,10 @@ async def _standing(session: AsyncSession, kid_id: int, stage_id: int) -> Promot
 
 
 # --- kids (§9) ---------------------------------------------------------------
-@router.post("/api/kids", response_model=KidDTO, status_code=201, tags=["kids"])
-async def create_kid(
-    body: KidCreate,
-    session: AsyncSession = Depends(get_session),
-) -> KidDTO:
-    """Create a reader (§9, §13).
-
-    `parent_id` is left NULL: it comes from the Clerk session in Phase 6, not
-    from the request body — a client-supplied owner id is not an owner claim.
-    """
-    if (
-        await session.execute(text("SELECT 1 FROM stages WHERE id = :s"), {"s": body.stage_id})
-    ).first() is None:
-        raise HTTPException(
-            status_code=404, detail=f"stage {body.stage_id} not seeded — run `make seed`"
-        )
-
-    row = (
-        await session.execute(
-            text(
-                "INSERT INTO kids (display_name, stage_id) VALUES (:name, :stage) "
-                "RETURNING id, display_name, stage_id, created_at"
-            ),
-            {"name": body.display_name, "stage": body.stage_id},
-        )
-    ).one()
-    await session.commit()
-    return KidDTO(
-        id=row.id,
-        display_name=row.display_name,
-        stage_id=row.stage_id,
-        created_at=row.created_at,
-    )
-
-
-@router.get("/api/kids", response_model=list[KidDTO], tags=["kids"])
-async def list_kids(session: AsyncSession = Depends(get_session)) -> list[KidDTO]:
-    """§9 scopes this to "parent → own kids only".
-
-    Clerk lands in Phase 6, so there is no parent to scope to and this returns
-    every kid. Stated, not hidden: the ownership column exists (`kids.parent_id`)
-    and this is the single line that changes when auth arrives.
-    """
-    rows = await session.execute(
-        text("SELECT id, display_name, stage_id, created_at FROM kids ORDER BY id")
-    )
-    return [
-        KidDTO(
-            id=r.id, display_name=r.display_name, stage_id=r.stage_id, created_at=r.created_at
-        )
-        for r in rows
-    ]
-
-
 @router.get("/api/kids/{kid_id}/progress", response_model=ProgressDTO, tags=["kids"])
 async def kid_progress(
     kid_id: int,
+    principal: Principal = Depends(require_parent),
     session: AsyncSession = Depends(get_session),
 ) -> ProgressDTO:
     """§9 → stage, gpc_stats, readings summary. The parent dashboard (§11).
@@ -556,8 +477,13 @@ async def kid_progress(
     thresholds, the counts, and a per-criterion reason — so the dashboard can
     explain *why* the child has not moved up rather than showing a bar that has
     not filled.
+
+    This is the richest kid-scoped read in the API — a name, a stage, every
+    grapheme the child has struggled with and their last twenty readings — so it
+    is also the one an ownership mistake would hurt most. `owned_kid` is the
+    only way in, and another parent's kid id is 404.
     """
-    kid = await _load_kid(session, kid_id)
+    kid = await owned_kid(session, principal, kid_id)
 
     stage = (
         await session.execute(
@@ -633,6 +559,7 @@ async def kid_progress(
 @router.post("/api/readings", response_model=ReadingDTO, status_code=201)
 async def start_reading(
     body: ReadingCreate,
+    principal: Principal = Depends(require_parent),
     session: AsyncSession = Depends(get_session),
 ) -> ReadingDTO:
     """Begin a reading (§9) → reading_id.
@@ -645,8 +572,14 @@ async def start_reading(
     A `rejected` story cannot be read. `api/stories.py` will not serve one by
     request or by id; this is the same invariant on the write path, so a stale
     or guessed id cannot get one in front of a child either.
+
+    `kid_id` arrives in the body, so this is the endpoint where a wrong-owner id
+    is cheapest to try. It is resolved through `owned_kid`, so a reading can
+    only ever be started against a kid the caller owns — and the refusal is the
+    same 404 an unknown kid gets, which is what stops the endpoint being used to
+    enumerate other families.
     """
-    kid = await _load_kid(session, body.kid_id)
+    kid = await owned_kid(session, principal, body.kid_id)
 
     story = (
         await session.execute(
@@ -674,6 +607,7 @@ async def start_reading(
 async def record_choice(
     reading_id: int,
     body: ChoiceCreate,
+    principal: Principal = Depends(require_parent),
     session: AsyncSession = Depends(get_session),
 ) -> ReadingDTO:
     """Record a branch choice (§9, §10) into `readings.path`.
@@ -683,9 +617,11 @@ async def record_choice(
     that is coming: the segment must belong to *this reading's* story, and if
     that segment does have children with labels, the choice must be one of them.
     A path entry naming a segment from another story would make the dashboard's
-    "Maya chose the cave path" a fiction.
+    "Maya chose the cave path" a fiction — and a path entry written by another
+    family would make it a lie, which is why the reading is resolved through
+    `owned_reading` before any of the segment checks run.
     """
-    reading = await _load_reading(session, reading_id)
+    reading = await owned_reading(session, principal, reading_id)
 
     segment = (
         await session.execute(
@@ -744,6 +680,7 @@ async def record_choice(
 async def record_answer(
     reading_id: int,
     body: AnswerCreate,
+    principal: Principal = Depends(require_parent),
     session: AsyncSession = Depends(get_session),
 ) -> AnswerResultDTO:
     """Grade one response server-side (§9) and record it (§8).
@@ -755,8 +692,12 @@ async def record_answer(
     First answer wins. The unique constraint plus `ON CONFLICT DO NOTHING` makes
     that atomic, so a client that retries a question until it guesses correctly
     changes the feedback it sees and not the mastery signal.
+
+    Ownership matters here for a second reason beyond privacy: this endpoint
+    *writes* the evidence §8 promotes on. Without `owned_reading`, a stranger
+    could push wrong answers into another child's record and hold them back.
     """
-    reading = await _load_reading(session, reading_id)
+    reading = await owned_reading(session, principal, reading_id)
     if reading.completed_at is not None:
         raise HTTPException(
             status_code=409,
@@ -832,6 +773,7 @@ async def record_answer(
 @router.post("/api/readings/{reading_id}/complete", response_model=CompleteResultDTO)
 async def complete_reading(
     reading_id: int,
+    principal: Principal = Depends(require_parent),
     session: AsyncSession = Depends(get_session),
 ) -> CompleteResultDTO:
     """Finish a reading: update `gpc_stats`, then evaluate promotion (§8).
@@ -845,12 +787,25 @@ async def complete_reading(
     Evidence comes from `tap_word` answers only (`mastery.MASTERY_QTYPES`), and
     each word's correspondences come from the decoder's own alignment at the
     STORY's stage — never from inspecting spelling here.
+
+    **Evidence is per distinct story, not per reading.** Re-reading a story the
+    kid has already finished at this stage completes normally and adds nothing
+    to `gpc_stats`, and `_STORIES_AT_STAGE_SQL` counts distinct stories. Both
+    are the same fix: §8's promotion rule says "5 stories", and a child who
+    reads one story five times has read one story. Left as it was, the mastery
+    signal was forgeable by anyone with a loop — and reachable by accident,
+    because a thin warm pool hands the same story back.
+
+    The ownership check runs BEFORE the latch, not after. This endpoint mutates
+    three tables and can promote a child a stage; refusing afterwards would 404
+    the attacker while leaving the damage done. `owned_reading` is a read, so
+    the cost of getting the order right is one indexed query.
     """
-    latched = (await session.execute(_COMPLETE_SQL, {"id": reading_id})).first()
+    reading = await owned_reading(session, principal, reading_id)
+    latched = (await session.execute(_COMPLETE_SQL, {"id": reading.id})).first()
 
     if latched is None:
-        reading = await _load_reading(session, reading_id)  # 404s if it never existed
-        kid = await _load_kid(session, reading.kid_id)
+        kid = await owned_kid(session, principal, reading.kid_id)
         return CompleteResultDTO(
             reading=_reading_dto(reading),
             newly_completed=False,
@@ -864,6 +819,27 @@ async def complete_reading(
             text("SELECT stage_id FROM stories WHERE id = :s"), {"s": latched.story_id}
         )
     ).scalar_one()
+
+    # A story this kid has already finished at this stage yields NO further
+    # evidence. The first pass is a child decoding a word; the second is a child
+    # remembering which of three options was green last time, and §8's counters
+    # cannot tell those apart. Without this, `MIN_GPC_OBSERVATIONS` (DEVIATIONS
+    # 5.5) — the floor that exists precisely so one lucky tap cannot promote —
+    # is cleared by replaying that one lucky tap ten times.
+    #
+    # The reading still completes, and still counts as a reading. It just stops
+    # being new proof, which is the honest reading of what a re-read is.
+    repeat = (
+        await session.execute(
+            _ALREADY_READ_SQL,
+            {
+                "kid_id": latched.kid_id,
+                "story_id": latched.story_id,
+                "stage_id": latched.stage_id,
+                "reading_id": latched.id,
+            },
+        )
+    ).first() is not None
 
     # §8: increment for every GPC instance in words the kid answered about.
     answers = await session.execute(_READING_ANSWERS_SQL, {"reading_id": reading_id})
@@ -879,7 +855,7 @@ async def complete_reading(
             WordEvidence(word=word, stage_id=int(story_stage), correct=bool(row.correct))
         )
 
-    deltas = gpc_increments(evidence)
+    deltas = [] if repeat else gpc_increments(evidence)
     updates: list[GpcDeltaDTO] = []
     if deltas:
         rows = await session.execute(
@@ -903,7 +879,7 @@ async def complete_reading(
         {"s": latched.story_id},
     )
 
-    kid = await _load_kid(session, latched.kid_id)
+    kid = await owned_kid(session, principal, latched.kid_id)
     decision = await _standing(session, kid.id, kid.stage_id)
 
     promoted = False
@@ -926,6 +902,7 @@ async def complete_reading(
     return CompleteResultDTO(
         reading=_reading_dto(latched),
         newly_completed=True,
+        repeat_reading=repeat,
         gpc_updates=updates,
         promotion=_promotion_dto(decision),
         promoted=promoted,

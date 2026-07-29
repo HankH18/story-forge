@@ -49,7 +49,9 @@ cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
     `system` (breakpoint after vocabulary), per-request material in `messages`.
 11. **Enrichment runs only after the gate AND moderation** — never spend Haiku
     calls on a story that will not be served. Both nodes degrade, never raise.
-12. Async SQLAlchemy: never touch a lazy relationship (`story.segments`) —
+12. **Tailwind CONFIG edits do not hot-reload dev** (6.5) — the inverse of 7.
+    Restart Vite after touching `tailwind.config.ts`; verify tokens in `dist/`.
+13. Async SQLAlchemy: never touch a lazy relationship (`story.segments`) —
     re-query instead, or it raises `MissingGreenlet`.
 
 | 5 kid mode + mastery | Full kid session live in a real browser (dev AND production bundle): theme picker → reading → questions → celebration, TTS, §11 floors verified by computed style. `readings`/`answers` APIs, `gpc_stats`, stage promotion proven at the 79/80% boundary. |
@@ -59,8 +61,21 @@ cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
   Question text bypassed every §13 layer; 9 of 20 servable stories were
   unenriched and the failure was silent; the `tap_word` answer key shipped to
   the client; enrichment cost (45–48% of the total) was discarded.
-- **Grammar** (DEVIATIONS 4.12): prevented in `SYSTEM_RULES`, detected via
-  `well_formed` on moderation. 20–27% → 0% ungrammatical, 0 false positives.
+- **Grammar** (DEVIATIONS 4.12, 6.24–6.27). **The earlier entry here claimed
+  "20–27% → 0% ungrammatical" and was wrong.** That number described new
+  generation measured in the eval harness; it never described the database.
+  `warm.persist()` wrote only three of the verdict's five fields, so
+  `well_formed` was discarded on write for EVERY story — including ones
+  generated after the fix. The check ran, passed, and was thrown away.
+  A backfill over the real pool found **4 of 28 servable stories (14%)
+  ungrammatical and still being served**, among them story 20 — the exact
+  `"He did not came back."` case 4.12 was written about. All four are now
+  `rejected`. Fixed at the source in `_body_verdict`, so the backlog cannot
+  regrow after the next `make warm`; the backfill is idempotent (verified: a
+  third run selected nothing and made no API call). Sweep cost $0.0468.
+  **Lesson worth keeping: a metric measured in the harness is not evidence about
+  production data.** Prevention is real (`SYSTEM_RULES`, 0 false positives);
+  the claim that the pool was clean was never tested until it was.
 
 ## Also outstanding
 - **`warm.py` aborts the whole run on `anthropic.APITimeoutError`** instead of

@@ -120,6 +120,76 @@
   box-shadow: var(--sf-focus-ring), var(--sf-lift-parent);
 }
 
+/* ---------------------------------------------------------------------------
+   Parent surface (style guide §08, §10, §11).
+
+   Same "plain CSS, never inside `@layer utilities`" rule as everything above,
+   and for the first of the two reasons: the band classes are chosen from data
+   (`BAND_CLASS[band]`), and a Tailwind-layered rule whose literal class name
+   never appears in a scanned file is purged from the production bundle. That is
+   invariant 7 in docs/STATE.md, and here it would purge the *pattern* off the
+   accuracy bars — leaving hue as the only difference between "mastered" and
+   "building", which is precisely the "colour alone" failure §11 forbids. The
+   class names are still written as literals in a Record in GpcBar.tsx so the
+   two defences are independent.
+   --------------------------------------------------------------------------- */
+
+/* §08's three bands. Each is a hue AND a fill pattern; the row also prints the
+   band's name in words, so the signal survives both a purge and a reader who
+   cannot separate green from gold. */
+.sf-band-mastered {
+  background-color: var(--sf-leaf-500);
+}
+.sf-band-practising {
+  background-color: var(--sf-gold-500);
+  /* Diagonal hatch — visible at 12px tall, and it reads as "in progress" the
+     way a solid fill reads as "done". */
+  background-image: repeating-linear-gradient(
+    45deg, rgba(253, 246, 231, 0.55) 0 3px, transparent 3px 7px
+  );
+}
+.sf-band-building {
+  background-color: var(--sf-ink-300);
+  /* Dotted, i.e. sparse — the same visual idea as "we do not have much
+     evidence yet", which is what this band actually means. */
+  background-image: repeating-linear-gradient(
+    90deg, rgba(253, 246, 231, 0.6) 0 2px, transparent 2px 6px
+  );
+}
+
+/* The legend swatch mirrors the bar exactly, so the key and the thing it keys
+   cannot drift apart. */
+.sf-band-swatch {
+  display: inline-block;
+  width: 22px;
+  height: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--sf-rule);
+}
+
+/* §10: "single column stack under 768px — the table becomes stacked rows, never
+   a horizontal scroll."
+
+   A CSS grid on `<tr>` is what makes both halves true at once. Above the md
+   breakpoint the four columns line up as a report card; below it every cell
+   stacks and the row grows taller instead of the table growing wider. The
+   explicit `role` attributes in GpcTable.tsx are what keep it a table to a
+   screen reader — `display: grid` on a `<tr>` drops the native table role, and
+   restoring it by hand is the price of not shipping a horizontal scrollbar to a
+   parent on a phone. */
+.sf-gpc-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px 0;
+  align-items: center;
+}
+@media (min-width: 768px) {
+  .sf-gpc-row {
+    grid-template-columns: 0.8fr 1.5fr 1.7fr 0.5fr;
+    gap: 0 16px;
+  }
+}
+
 /* §06: the striped asset fallback. Never a broken image, never an empty box. */
 .sf-stripes {
   background-color: var(--sf-warm);

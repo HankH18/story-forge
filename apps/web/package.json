@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@clerk/clerk-react": "^5.61.3",
     "@fontsource/andika": "^5.1.0",
     "@fontsource/bree-serif": "^5.1.0",
     "@fontsource/ibm-plex-mono": "^5.1.0",

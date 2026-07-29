@@ -27,6 +27,7 @@ from storyforge.llm.questions import (
     check_mcq2,
     check_tap_word,
     generate_questions,
+    readable,
     readable_openers,
     shuffle_options,
     sound_targets,
@@ -35,6 +36,7 @@ from storyforge.llm.questions import (
     uses_stage_gpc,
     word_graphemes,
 )
+from storyforge.pipeline import passes_gate
 
 # A real warm-pool story (stage 3, dragons theme) — the node's actual input.
 STORY = (
@@ -389,8 +391,74 @@ def test_the_richest_readable_frame_wins():
 
 def test_early_stages_fall_back_to_the_terse_frame():
     """No English instruction is decodable at stage 1. The gate holds and the
-    sentence shortens — never the other way round."""
-    assert tap_word_prompt("sat", 1, ["a", "i", "the"]) == "Tap: sat."
+    sentence shortens — never the other way round.
+
+    The literal used to be `"Tap: sat."` — `PROMPT_FRAMES[-1]`. That pinned the
+    ladder's CONTENTS, which the §11.3 fix necessarily changes, and it never
+    asserted the docstring's actual claim: that the shortening is FORCED by the
+    decoder rather than chosen. Both are asserted now, and the second one is
+    what a future edit must not be able to sneak past — lowering the gate to let
+    a richer frame through at stage 1 would fail here even if the floor string
+    were updated to match.
+    """
+    stage_one = ["a", "i", "the"]
+    assert tap_word_prompt("sat", 1, stage_one) == "Tap it: sat."
+
+    chosen = tap_word_prompt("sat", 1, stage_one)
+    richer = PROMPT_FRAMES[: [f.format(cue="sat") for f in PROMPT_FRAMES].index(chosen)]
+    assert richer, "the stage-1 floor must not be the richest frame"
+    for frame in richer:
+        text = frame.format(cue="sat")
+        assert not passes_gate(readable(text, 1, stage_one)), (
+            f"{text!r} is claimed unreadable at stage 1 but passes the gate — "
+            "either the ladder or the gate moved"
+        )
+
+
+def test_every_frame_in_the_ladder_is_reachable_at_some_stage():
+    """A frame no stage can read is dead code, and dead code is how all 28 live
+    prompts ended up as the bare cue `Tap: get.` — three of the four rungs
+    contained "word" or "one", which are undecodable/not-yet-sight-words at
+    every stage the ladder is used at, so only the floor ever fired.
+
+    Reachability is checked against the REAL sight-word ladder, cumulative per
+    stage, with a cue that is decodable everywhere.
+    """
+    sight_by_stage = {
+        1: ["a", "i", "the"], 2: ["go", "is", "no", "to"], 3: ["he", "me", "she", "was", "we"],
+        4: ["said", "they", "you"], 5: ["all", "are", "her"], 6: ["come", "some", "there"],
+        7: ["little", "one", "when"], 8: ["oh", "out", "what"], 9: ["people", "your"],
+        10: ["again", "because"], 11: ["thought", "through"], 12: [],
+    }
+    # `sat` is decodable at stage 1 and, the inventory being cumulative, at every
+    # stage above it — so a rung that never fires here is unreachable for a
+    # reason that has nothing to do with the cue.
+    cue = "sat"
+    reached = set()
+    cumulative: list[str] = []
+    for stage in range(1, 13):
+        cumulative += sight_by_stage[stage]
+        prompt = tap_word_prompt(cue, stage, list(cumulative))
+        assert prompt is not None, f"stage {stage} can ask nothing at all"
+        reached.add(next(f for f in PROMPT_FRAMES if f.format(cue=cue) == prompt))
+
+    unreachable = [f for f in PROMPT_FRAMES if f not in reached]
+    # The floor is allowed to be unreachable: it exists for the cue word that
+    # breaks the rung above it, not for a stage.
+    assert unreachable in ([], [PROMPT_FRAMES[-1]]), (
+        f"dead rungs — no stage 1-12 can read {unreachable}"
+    )
+    # And the ladder must really be a ladder: more than one rung actually fires.
+    assert len(reached) >= 4, f"only {len(reached)} distinct prompt(s) across 12 stages"
+
+
+def test_the_ladder_names_the_cue_and_never_the_answer():
+    """Every rung is a fixed frame plus the cue word, which `_cue_index` draws
+    from the ALLOWED list and `check_tap_word` forbids as an option. A rung that
+    mentioned the target grapheme would ship the answer key (DEVIATIONS 4.9)."""
+    for frame in PROMPT_FRAMES:
+        assert frame.count("{cue}") >= 1
+        assert "{" not in frame.replace("{cue}", ""), f"{frame!r} interpolates something else"
 
 
 def test_an_unreadable_cue_yields_no_prompt_at_all():

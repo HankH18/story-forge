@@ -4,13 +4,22 @@
  * Minimal by design: display headline, the one-sentence thesis, a single berry
  * CTA, and one honest artifact. No feature grid, no testimonials, no pricing.
  *
- * Unchanged from phase 0 apart from the CTA, which now goes somewhere: `/read/1`
- * is the kid session (§11 routes). The kid id is a placeholder until the `kids`
- * table lands with auth in phase 6 — see KidSession for how a stage is resolved
- * without one.
+ * The CTA is the only berry control §10 allows on this page, so it is the *same*
+ * control in both session states and only its destination changes: signed in it
+ * opens the reader list, signed out it opens sign-in — which is the same
+ * journey, one step longer. Everything else about the session lives in the top
+ * rail, where "Sign in" and "Create an account" are quiet links rather than a
+ * second competing CTA.
+ *
+ * This is also where a signed-out child lands: `/read/:kidId` redirects here
+ * rather than to a login form (§01, DEVIATIONS 6.18). Nothing on this page is an
+ * error, which is what makes it a safe place to send them — the grown-up who
+ * reads it is the one who can act.
  */
 
+import { SignedIn, SignedOut, UserButton } from '@clerk/clerk-react'
 import { Link } from 'react-router-dom'
+import { AFTER_SIGN_IN_PATH, SIGN_IN_PATH, SIGN_UP_PATH } from '../lib/authPaths'
 
 type Verdict = 'decodable' | 'sight' | 'story' | 'violation'
 
@@ -53,10 +62,54 @@ const LEGEND: { verdict: Verdict; label: string }[] = [
   { verdict: 'violation', label: 'violation' },
 ]
 
+/**
+ * §10's single berry CTA, written once so the two session states cannot drift
+ * into two different-looking buttons.
+ */
+function CtaLink({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className="sf-lift-kid inline-flex min-h-tap-kid items-center justify-center
+                 rounded-btn border-[3px] border-ink-900 bg-berry-500 px-8
+                 font-ui text-[17px] font-bold text-paper-page
+                 transition-transform duration-[90ms] ease-out"
+    >
+      {children}
+    </Link>
+  )
+}
+
 export default function Landing() {
   return (
     <main className="min-h-screen bg-paper-page px-6 py-16">
       <div className="mx-auto flex max-w-[720px] flex-col gap-10">
+        {/* The session rail. Quiet by construction — §10 gives this page one
+            berry CTA and it is the one at the bottom. */}
+        <div className="flex min-h-tap items-center justify-end gap-3">
+          <SignedOut>
+            <Link
+              to={SIGN_UP_PATH}
+              className="inline-flex min-h-tap items-center justify-center rounded-btn px-3
+                         font-ui text-[16px] text-ink-700 underline underline-offset-4"
+            >
+              Create an account
+            </Link>
+            <Link
+              to={SIGN_IN_PATH}
+              className="sf-lift-parent inline-flex min-h-tap min-w-tap items-center justify-center
+                         rounded-btn border-2 border-paper-rule bg-paper-card px-5 font-ui
+                         text-[16px] font-bold text-ink-900 transition-transform duration-[90ms]
+                         ease-out"
+            >
+              Sign in
+            </Link>
+          </SignedOut>
+          <SignedIn>
+            <UserButton />
+          </SignedIn>
+        </div>
+
         <header className="flex flex-col gap-5">
           <p className="font-mono text-[13px] uppercase tracking-[0.16em] text-ink-500">
             Story Forge · stage 3 · digraphs
@@ -103,15 +156,21 @@ export default function Landing() {
         </section>
 
         <div>
-          <Link
-            to="/read/1"
-            className="sf-lift-kid inline-flex min-h-tap-kid items-center justify-center
-                       rounded-btn border-[3px] border-ink-900 bg-berry-500 px-8
-                       font-ui text-[17px] font-bold text-paper-page
-                       transition-transform duration-[90ms] ease-out"
-          >
-            Read a story
-          </Link>
+          {/* §10 allows exactly one berry CTA here, so it points at the app's
+              real entrance rather than at a hard-coded kid id. A landing page is
+              read by a parent — the child never navigates to one — and the
+              parent's first screen is their list of readers.
+
+              Signed out it goes to `/sign-in` instead of to `/app`. Both work —
+              the guard on `/app` would bounce them — but a CTA that visibly
+              lands somewhere else is a CTA that looks broken, and the redirect
+              would drop the deep link for nothing. */}
+          <SignedIn>
+            <CtaLink to={AFTER_SIGN_IN_PATH}>Open Story Forge</CtaLink>
+          </SignedIn>
+          <SignedOut>
+            <CtaLink to={SIGN_IN_PATH}>Open Story Forge</CtaLink>
+          </SignedOut>
         </div>
       </div>
     </main>

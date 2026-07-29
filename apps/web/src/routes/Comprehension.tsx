@@ -21,7 +21,7 @@
  *      wrong on no evidence is the one outcome worth avoiding at any cost.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { postAnswer, type Question } from '../lib/api'
 import { localGrade } from '../lib/grade'
 import { speak } from '../lib/speech'
@@ -57,6 +57,48 @@ export default function Comprehension({
   const [busy, setBusy] = useState(false)
 
   const question = questions[index]
+
+  /**
+   * §07: the prompt is read aloud when the question appears.
+   *
+   * Every choice card has carried a speak button since this screen existed; the
+   * prompt — the one string that says what to DO — had none, so it was the only
+   * text on the screen a child could not hear. That gap is widest exactly where
+   * the words are weakest: below stage 4 the prompt is "Tap it. Hint: win.",
+   * because every similarity word a child could decode (`as`, `like`, `same`,
+   * `alike`) is stage 4 or later, so the written sentence provably cannot say
+   * more (llm/questions.py). Speech is not bound by the decoder. Logged in
+   * DEVIATIONS 6.27, including what this does NOT fix.
+   *
+   * **One live utterance per question, and never zero.** The cleanup is the
+   * whole of the StrictMode handling, and it must CANCEL rather than suppress.
+   * React 18 double-invokes effects in dev (mount → cleanup → mount), so the
+   * engine sees speak → cancel → speak and exactly one utterance survives.
+   * `StoryWordChip` takes the other approach — a ref guard that is set and
+   * never cleared — and the documented cost there is that dev teardown cancels
+   * the first utterance while the guard refuses the second, so the chip is
+   * silent in `bun run dev`. That is tolerable for a word the child can also
+   * tap; it is not tolerable for the one string that explains the screen.
+   *
+   * The cleanup stops OUR utterance specifically — `speak()` returns a canceller
+   * that no-ops once anything else has taken the microphone — so advancing to
+   * the next question cannot cut off an option the child just asked to hear.
+   * Nothing is awaited: a child can tap the instant the screen paints, and if
+   * `speechSynthesis` is missing `speak()` degrades to silence rather than an
+   * error (§01: kid mode has no error surface).
+   *
+   * Measured in a headed browser against a live story, not assumed: one
+   * `speak()` without StrictMode, zero on re-render, one surviving utterance
+   * with it, a real `start` event 2ms in and ~1.8s of `speechSynthesis.speaking`.
+   */
+  const prompt = question?.prompt ?? ''
+  const questionId = question?.id ?? null
+
+  useEffect(() => {
+    if (questionId === null || !prompt) return
+    return speak(prompt)
+  }, [questionId, prompt])
+
   if (!question) return null
 
   /**

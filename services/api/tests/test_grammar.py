@@ -30,15 +30,22 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 
+from storyforge import warm
+from storyforge.api.stories import SERVABLE_STATUSES
+from storyforge.db import SessionLocal
 from storyforge.llm import moderate as mod_mod
 from storyforge.llm.generate import SYSTEM_RULES
 from storyforge.llm.moderate import (
     MODERATION_SYSTEM,
+    ModerationResult,
     ModerationVerdict,
     blocklist_check,
     moderate,
 )
+from storyforge.llm.pricing import Usage
+from storyforge.models import Question, Story, StorySegment
 from storyforge.pipeline import DECODABILITY_GATE
 
 
@@ -276,6 +283,281 @@ def test_grammar_did_not_lower_the_decodability_gate():
     let the model use more words. That is forbidden: an ungrammatical story is
     rejected and the warm pool absorbs it."""
     assert DECODABILITY_GATE == 0.95
+
+
+# --- the backfill: applying 4.12 backwards (DEVIATIONS 6.24-6.26) ------------
+# The detection above was forward-only. `gen_meta->'moderation'->>'well_formed'`
+# was NULL on all 28 stories already in the pool, because `warm.persist()` wrote
+# three of the verdict's five fields and dropped the grammar half entirely.
+#
+# Everything below runs against REAL rows in the real database and drives the
+# real `run_grammar_backfill`; only the Haiku call is stubbed, and it is stubbed
+# per-test so the verdict under test is the input, not the assertion.
+
+BF_KID_NAME = "Grammarfixture"
+BF_BODIES = ["A dragon sat in a cave.", "He did not came back.", "The end."]
+BF_USAGE = Usage(model="claude-haiku-4-5", input_tokens=120, output_tokens=20)
+
+BF_GOOD = ModerationResult(
+    approved=True, reason="fine", layer="model", usage=BF_USAGE, well_formed=True
+)
+BF_UNGRAMMATICAL = ModerationResult(
+    approved=False,
+    reason='ungrammatical: "He did not came back." (came -> come)',
+    layer="model",
+    usage=BF_USAGE,
+    well_formed=False,
+    grammar_note='"He did not came back." (came -> come)',
+)
+
+
+@pytest.fixture
+async def db():
+    async with SessionLocal() as s:
+        yield s
+
+
+@pytest.fixture
+async def pool_story(db):
+    """A throwaway servable story shaped exactly like a pre-4.12 pool row:
+    segments, a `tap_word` question, an answer against it, and a Phase 3
+    moderation receipt with no `well_formed` key."""
+    theme_id = (
+        await db.execute(text("SELECT id FROM themes WHERE slug = 'dragons'"))
+    ).scalar_one()
+    row = Story(
+        stage_id=1,
+        theme_id=theme_id,
+        status="warm",
+        title="The Dragon Fixture",
+        decodability=1.0,
+        story_words=["dragon"],
+        # The Phase 3 shape: three keys, no grammar verdict. This is the state
+        # every live pool row was in.
+        gen_meta={"cost_usd": 0.01, "moderation": {"approved": True, "layer": "model",
+                                                   "reason": "safe"}},
+    )
+    db.add(row)
+    await db.flush()
+    for i, body in enumerate(BF_BODIES):
+        db.add(StorySegment(story_id=row.id, idx=i, body=body))
+    question = Question(
+        story_id=row.id,
+        idx=0,
+        qtype="tap_word",  # the only §8 mastery-bearing type
+        prompt="Tap it: sat.",
+        payload={"options": ["sat", "dragon", "cave"], "cue_word": "sat"},
+        answer={"correct": "sat", "index": 0, "target_grapheme": "s"},
+    )
+    db.add(question)
+    await db.flush()
+
+    kid_id = (
+        await db.execute(
+            text("INSERT INTO kids (display_name, stage_id) VALUES (:n, 1) RETURNING id"),
+            {"n": BF_KID_NAME},
+        )
+    ).scalar_one()
+    reading_id = (
+        await db.execute(
+            text(
+                "INSERT INTO readings (kid_id, story_id, stage_id, path, completed_at) "
+                "VALUES (:k, :s, 1, CAST('{\"choices\": []}' AS jsonb), now()) RETURNING id"
+            ),
+            {"k": kid_id, "s": row.id},
+        )
+    ).scalar_one()
+    await db.execute(
+        text("INSERT INTO answers (reading_id, question_id, correct) VALUES (:r, :q, true)"),
+        {"r": reading_id, "q": question.id},
+    )
+    await db.commit()
+
+    story_id, question_id = row.id, question.id
+    yield SimpleNamespace(id=story_id, question_id=question_id, kid_id=kid_id)
+
+    await db.rollback()
+    await db.execute(text("DELETE FROM stories WHERE id = :i"), {"i": story_id})
+    await db.execute(text("DELETE FROM kids WHERE display_name = :n"), {"n": BF_KID_NAME})
+    await db.commit()
+
+
+def _stub_body_moderation(monkeypatch, verdict: ModerationResult) -> list[str]:
+    """Replace the Haiku call `run_grammar_backfill` makes. Returns a call log,
+    so "spent nothing on the second run" is counted rather than asserted."""
+    seen: list[str] = []
+
+    async def fake(body: str) -> ModerationResult:
+        seen.append(body)
+        return verdict
+
+    monkeypatch.setattr(warm, "moderate", fake)
+    return seen
+
+
+async def _row(db, story_id: int) -> Story:
+    db.expire_all()
+    return await db.get(Story, story_id)
+
+
+async def test_a_freshly_persisted_story_is_never_selected_by_the_backfill(db, pool_story):
+    """DEVIATIONS 6.24, stated as the property that matters: once `persist()`
+    records the grammar half, the sweep is a ONE-TIME repair. If the receipt were
+    still three keys wide, every `make warm` would re-create the backlog."""
+    selectable = lambda: db.execute(  # noqa: E731
+        warm._UNGRADED_BODY_SQL,
+        {"statuses": list(SERVABLE_STATUSES), "only": [pool_story.id]},
+    )
+    assert [r.id for r in (await selectable()).all()] == [pool_story.id]
+
+    story = await _row(db, pool_story.id)
+    story.gen_meta = {**story.gen_meta, "moderation": warm._body_verdict(BF_GOOD)}
+    await db.commit()
+
+    assert (await selectable()).all() == []
+
+
+async def test_backfill_rejects_an_ungrammatical_body_and_records_the_sentence(
+    db, pool_story, monkeypatch
+):
+    seen = _stub_body_moderation(monkeypatch, BF_UNGRAMMATICAL)
+    await warm.run_grammar_backfill(only=[pool_story.id])
+
+    # The text judged is the reconstructed body, not a fixture the test invented.
+    assert seen == [" ".join(BF_BODIES)]
+
+    story = await _row(db, pool_story.id)
+    assert story.status == "rejected"
+    assert story.status not in SERVABLE_STATUSES
+    verdict = story.gen_meta["moderation"]
+    assert verdict["well_formed"] is False
+    # The offending sentence is named. Without this the rejection is unfalsifiable.
+    assert "came back" in verdict["grammar_note"]
+    assert verdict["source"] == "grammar-backfill"
+    # The Phase 3 receipt is preserved, not overwritten.
+    assert verdict["generation"] == {"approved": True, "layer": "model", "reason": "safe"}
+
+
+async def test_backfill_never_deletes_mastery_evidence(db, pool_story, monkeypatch):
+    """DEVIATIONS 6.26. `answers.question_id` is ON DELETE CASCADE and
+    `questions.story_id` is too, so a DELETE here would take §8's only evidence
+    with it. Rejecting the story must remove it from rotation and nothing else."""
+    _stub_body_moderation(monkeypatch, BF_UNGRAMMATICAL)
+    await warm.run_grammar_backfill(only=[pool_story.id])
+
+    counts = (
+        await db.execute(
+            text(
+                "SELECT (SELECT count(*) FROM questions WHERE story_id = :s), "
+                "       (SELECT count(*) FROM answers WHERE question_id = :q), "
+                "       (SELECT count(*) FROM readings WHERE story_id = :s)"
+            ),
+            {"s": pool_story.id, "q": pool_story.question_id},
+        )
+    ).first()
+    assert tuple(counts) == (1, 1, 1)
+
+
+async def test_a_rejected_body_stops_being_served(db, pool_story, monkeypatch, client):
+    """The mechanism, exercised through the API rather than asserted about the
+    column: `SERVABLE_STATUSES` is what `api/stories.py` filters on, so flipping
+    `status` is the whole of "stop serving this story"."""
+    assert (await client.get(f"/api/stories/{pool_story.id}")).status_code == 200
+
+    _stub_body_moderation(monkeypatch, BF_UNGRAMMATICAL)
+    await warm.run_grammar_backfill(only=[pool_story.id])
+
+    assert (await client.get(f"/api/stories/{pool_story.id}")).status_code == 404
+    # And a reading of it cannot be started either.
+    resp = await client.post(
+        "/api/readings", json={"kid_id": pool_story.kid_id, "story_id": pool_story.id}
+    )
+    assert resp.status_code == 404
+
+
+async def test_a_well_formed_body_keeps_its_place_in_the_pool(db, pool_story, monkeypatch):
+    _stub_body_moderation(monkeypatch, BF_GOOD)
+    await warm.run_grammar_backfill(only=[pool_story.id])
+
+    story = await _row(db, pool_story.id)
+    assert story.status == "warm"
+    assert story.gen_meta["moderation"]["well_formed"] is True
+
+
+async def test_the_backfill_is_idempotent_and_re_spends_nothing(db, pool_story, monkeypatch):
+    """Re-running must be a no-op. The selection predicate is `well_formed IS
+    NULL`, so a judged story — approved or rejected — is out of the set."""
+    first = _stub_body_moderation(monkeypatch, BF_GOOD)
+    await warm.run_grammar_backfill(only=[pool_story.id])
+    assert len(first) == 1
+
+    second = _stub_body_moderation(monkeypatch, BF_GOOD)
+    await warm.run_grammar_backfill(only=[pool_story.id])
+    assert second == [], "the second run judged a story again — that is real money"
+
+
+async def test_a_story_that_fails_both_halves_still_counts_as_a_grammar_failure(monkeypatch):
+    """Observed on the live sweep: stories #11 and #20 came back with
+    `approved=False` for a CONTENT reason and `well_formed=False` at the same
+    time. `moderate()` folds both into one boolean and keeps the safety text in
+    `reason`, so counting failures off `reason` would have reported "0
+    ungrammatical" for a pool containing "He did not came back." — the exact
+    sentence DEVIATIONS 4.12 exists because of."""
+    both = ModerationVerdict(
+        approved=False,
+        reason="The man is hit with fire, which means he is injured.",
+        well_formed=False,
+        grammar_note='"He did not came back." (came -> come)',
+    )
+    _stub(monkeypatch, both)
+    result = await moderate("He did not came back. The dragon gave him fire.")
+
+    assert result.well_formed is False, "the grammar failure must survive the safety one"
+    assert "came" in result.grammar_note
+    assert warm._rejected_on_content(result) is True
+    assert warm._grammar_note(result) == '"He did not came back." (came -> come)'
+
+
+async def test_a_grammar_only_failure_is_not_counted_as_a_content_failure(monkeypatch):
+    """The other direction: the model approved the CONTENT and only grammar
+    failed. Reporting that as unsafe would misattribute why a story was pulled."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="A gentle dragon story.",
+            well_formed=False,
+            grammar_note='"A dragon sit in a cave." (sit -> sits)',
+        ),
+    )
+    result = await moderate("A dragon sit in a cave.")
+
+    assert result.approved is False and result.well_formed is False
+    assert warm._rejected_on_content(result) is False
+
+
+async def test_story_body_round_trips_through_the_segment_split(db):
+    """DEVIATIONS 6.25's losslessness claim, measured over the REAL pool rather
+    than a fixture. `stories` never persisted `final_text`, so re-moderation has
+    to rebuild the body from segments — and the rebuild is only trustworthy if
+    re-splitting it returns the segments a child actually reads."""
+    ids = (
+        await db.execute(
+            text("SELECT id FROM stories WHERE status = ANY(:st) ORDER BY id"),
+            {"st": list(SERVABLE_STATUSES)},
+        )
+    ).scalars().all()
+    assert ids, "no servable stories — run `make warm`"
+
+    for story_id in ids:
+        segments = (
+            await db.execute(
+                text("SELECT body FROM story_segments WHERE story_id = :i ORDER BY idx"),
+                {"i": story_id},
+            )
+        ).scalars().all()
+        body = await warm.story_body(db, story_id)
+        assert warm._split_segments(body) == [s.strip() for s in segments], story_id
 
 
 # --- the live fixture: both directions, per DEVIATIONS 3.10 ------------------

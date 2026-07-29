@@ -1,0 +1,236 @@
+# Story Forge — DigitalOcean App Platform spec (§3 "static site + service +
+# managed PG", §16 phase 7).
+#
+#   doctl apps spec validate .do/app.yaml --schema-only   # offline, no account
+#   doctl apps create --spec .do/app.yaml                 # the user's call, not an agent's
+#
+# NO SECRET VALUE APPEARS IN THIS FILE, and none ever may. Every credential is
+# `type: SECRET` with the placeholder REPLACE_IN_DO_DASHBOARD; the real value is
+# pasted into the App Platform console (or `doctl apps update --spec`), where DO
+# encrypts it to an `EV[1:...]` blob. `services/api/.env` stays on the laptop.
+# Non-credentials (model aliases, a public JWKS URL, a Clerk *publishable* key)
+# are `GENERAL` on purpose — calling a public value secret teaches the next
+# reader that the distinction does not matter.
+#
+# THREE THINGS THAT LOOK LIKE DETAILS AND ARE NOT:
+#
+#   1. `preserve_path_prefix: true` on the api rule. App Platform strips the
+#      matched prefix by default, so without it FastAPI would be asked for
+#      `/health` and answer 404 for every route in §9.
+#   2. `ENVIRONMENT: production`. This is a tripwire, not decoration:
+#      `auth.py::deployment_signals` reads it, and §18's `DEMO_BYPASS_AUTH`
+#      refuses to boot next to it. See the comment on the api service.
+#   3. The `migrate` PRE_DEPLOY job. The API image does not migrate at start —
+#      N instances would race `alembic upgrade head`. This runs it exactly once,
+#      and a failed migration aborts the deploy before the new code is live.
+
+name: story-forge
+region: nyc
+
+alerts:
+  - rule: DEPLOYMENT_FAILED
+  - rule: DOMAIN_FAILED
+
+# --- Postgres 16, managed (§3) ------------------------------------------------
+databases:
+  - name: db
+    engine: PG
+    version: "16"
+    # `false` provisions a shared dev database, which is cheaper and adequate for
+    # the §17 demo. `true` is a dedicated cluster. Both terminate TLS and both
+    # expose the same ${db.*} bindings, so flipping this changes cost, not code.
+    production: true
+    cluster_name: storyforge-pg
+    db_name: storyforge
+    db_user: storyforge
+
+# --- routing: one origin, two components -------------------------------------
+# `apps/web/src/lib/api.ts` fetches RELATIVE paths ("/api/..."), deliberately —
+# no origin is baked into the bundle. Serving both components under one app
+# domain is what makes that true in production: no CORS, no VITE_API_URL, and
+# `main.py`'s dev-only CORS allowlist stays dev-only.
+ingress:
+  rules:
+    - match:
+        path:
+          prefix: /api
+      component:
+        name: api
+        # Without this, DO forwards `/health` instead of `/api/health`.
+        preserve_path_prefix: true
+    - match:
+        path:
+          prefix: /
+      component:
+        name: web
+
+services:
+  - name: api
+    # Build context is the REPO ROOT (source_dir: /), not services/api: the
+    # image needs both `data/` and `services/api/` under one root, because
+    # storyforge.seed resolves data as parents[3]/data and data/seed/gpcs.csv is
+    # a relative symlink into the decoder package (DEVIATIONS 1.4).
+    source_dir: /
+    dockerfile_path: services/api/Dockerfile
+
+    # App Platform builds from GitHub, gitlab.com, Bitbucket or a container
+    # registry. This project's canonical remote is a SELF-HOSTED GitLab
+    # (labs.gauntletai.com), which App Platform cannot reach — see docs/DEPLOY.md
+    # for the two supported paths. The GitHub mirror is the simpler one.
+    github:
+      repo: HankH18/story-forge
+      branch: main
+      deploy_on_push: true
+
+    http_port: 8080
+    # ONE instance, ONE worker (see the Dockerfile CMD). `stories.limiter` is
+    # in-process, so §9's "10 story requests per minute" silently becomes
+    # 10 x workers x instances the moment this scales out. Raising either number
+    # requires the shared counter DEVIATIONS 4.10 defers to this phase.
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+
+    health_check:
+      http_path: /api/health
+      # Cold start pays for a 126k-entry CMUdict parse in `_check_decoder`.
+      initial_delay_seconds: 25
+      period_seconds: 15
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 5
+
+    envs:
+      # The composed URL, not ${db.DATABASE_URL}. DO hands out a bare
+      # `postgresql://` URL, and `create_async_engine` resolves that to psycopg2
+      # (sync, not installed) and raises. `+psycopg` names the async driver the
+      # rest of the codebase assumes. `sslmode=require` is verified to reach
+      # libpq through SQLAlchemy's async psycopg3 dialect.
+      #
+      # GENERAL, not SECRET: what is committed here is a template. DO resolves
+      # ${db.*} at deploy time and the password never enters this file.
+      #
+      # RUN_TIME, never RUN_AND_BUILD_TIME. App Platform passes BUILD_TIME
+      # variables to a Dockerfile build as build args, and a build arg is
+      # recoverable from image history the moment someone adds a matching ARG.
+      # Nothing in the build needs a database.
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        value: postgresql+psycopg://${db.USERNAME}:${db.PASSWORD}@${db.HOSTNAME}:${db.PORT}/${db.DATABASE}?sslmode=require
+
+      # §18 TRIPWIRE — do not remove to make something work.
+      # `auth.py::deployment_signals` treats ENVIRONMENT=production as proof this
+      # is not a laptop, so `DEMO_BYPASS_AUTH=true` here makes the container die
+      # at import instead of serving every request as a fixed unauthenticated
+      # parent. DO also injects APP_URL/APP_DOMAIN, which trip the same guard
+      # independently; this variable means the guard does not depend on a
+      # platform behaviour that could change.
+      #
+      # DEMO_BYPASS_AUTH is deliberately ABSENT rather than set to "false". It
+      # defaults to false in config.py, and a variable that is already listed in
+      # the dashboard is one toggle away from being true.
+      - key: ENVIRONMENT
+        scope: RUN_TIME
+        value: production
+
+      # §3: model IDs live in env, never hardcoded. Bare aliases — never
+      # date-suffixed (DEVIATIONS 3.2).
+      - key: ANTHROPIC_MODEL_GENERATE
+        scope: RUN_TIME
+        value: claude-sonnet-5
+      - key: ANTHROPIC_MODEL_FAST
+        scope: RUN_TIME
+        value: claude-haiku-4-5
+
+      - key: ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_DO_DASHBOARD
+
+      # Public document, fetched by anyone; `auth.py` derives CLERK_ISSUER from
+      # its origin, so a real deployment sets this and nothing else.
+      - key: CLERK_JWKS_URL
+        scope: RUN_TIME
+        value: https://REPLACE_WITH_YOUR_CLERK_SUBDOMAIN.clerk.accounts.dev/.well-known/jwks.json
+      - key: CLERK_SECRET_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_DO_DASHBOARD
+
+      # §15 tracing. Absent/blank keys are a supported no-op (DEVIATIONS 4.17):
+      # generation runs and langfuse_trace_id stays NULL.
+      - key: LANGFUSE_HOST
+        scope: RUN_TIME
+        value: https://cloud.langfuse.com
+      - key: LANGFUSE_PUBLIC_KEY
+        scope: RUN_TIME
+        value: REPLACE_WITH_LANGFUSE_PUBLIC_KEY
+      - key: LANGFUSE_SECRET_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_DO_DASHBOARD
+
+# --- the SPA: a static site, not a container ---------------------------------
+# §2: "Frontend is a static SPA. All state and secrets live behind FastAPI." A
+# Vite build is a directory of fingerprinted files with no server-side runtime,
+# so a container would add a web server process to patch and an instance to pay
+# for, and would buy nothing — there is no server-side rendering, no session and
+# no secret for it to hold. DO serves this from its edge instead.
+static_sites:
+  - name: web
+    source_dir: apps/web
+    github:
+      repo: HankH18/story-forge
+      branch: main
+      deploy_on_push: true
+
+    environment_slug: node-js
+    # bun with the COMMITTED lockfile, matching the local toolchain. The Node
+    # buildpack runs its own `npm install` first (there is no package-lock.json
+    # for it to honour); `--frozen-lockfile` then reconciles node_modules to
+    # apps/web/bun.lock exactly and fails rather than re-resolving. `bun run
+    # build` is `tsc --noEmit && vite build`, so a type error fails the deploy.
+    build_command: |
+      npm install --global bun@1.3.13
+      bun install --frozen-lockfile
+      bun run build
+    output_dir: dist
+
+    index_document: index.html
+    # react-router owns /read/:kidId, /dashboard/:kidId, /sign-in. Without this,
+    # a deep link or a refresh is a 404 from the CDN before React ever loads.
+    catchall_document: index.html
+
+    envs:
+      # The ONLY key the SPA may ever hold (§2, §13). Clerk publishes it in every
+      # frontend bundle by design, so it is GENERAL, not SECRET — the moment it
+      # is treated as a secret, the fact that CLERK_SECRET_KEY is a real one gets
+      # quieter. BUILD_TIME because Vite inlines import.meta.env at build; it
+      # cannot be changed without a rebuild.
+      - key: VITE_CLERK_PUBLISHABLE_KEY
+        scope: BUILD_TIME
+        value: pk_test_REPLACE_WITH_YOUR_CLERK_PUBLISHABLE_KEY
+
+# --- migrations: once, before the new code goes live -------------------------
+jobs:
+  - name: migrate
+    kind: PRE_DEPLOY
+    # Same image as the service, by construction — a job built from a different
+    # Dockerfile is a second thing to keep in sync and the first to drift.
+    source_dir: /
+    dockerfile_path: services/api/Dockerfile
+    github:
+      repo: HankH18/story-forge
+      branch: main
+      deploy_on_push: true
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    # `cd` because alembic.ini's prepend_sys_path is relative to the working
+    # directory. Idempotent: at head it is a no-op, verified locally.
+    run_command: cd /app/services/api && alembic upgrade head
+    envs:
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        value: postgresql+psycopg://${db.USERNAME}:${db.PASSWORD}@${db.HOSTNAME}:${db.PORT}/${db.DATABASE}?sslmode=require
+      - key: ENVIRONMENT
+        scope: RUN_TIME
+        value: production

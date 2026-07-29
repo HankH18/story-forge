@@ -667,3 +667,528 @@ evidence requires the STORY to contain a suffixed word. Some stories contain
 none, and the fallback fires honestly. The allowlist offers 38 such words inside
 the prompt's top-400 window, so the fix belongs in §6's `SYSTEM_RULES` — ask the
 story to exercise the stage's newly-taught GPCs. Assigned to no one yet.
+
+---
+
+## Phase 6 — auth and the parent surface
+
+**6.1 — ARPABET is never rendered to a parent.**
+The API returns raw ARPABET (`AE`, `NG`). The dashboard shows a plain-language
+example word primary and IPA secondary: `sh · as in "ship" · /ʃ/`. Example words
+come from the `example` column of the decoder's own `gpcs.csv` — not invented —
+keyed on `grapheme|phonemes` rather than `gpc_id`, whose `Y UW`→`Y.UW` and
+`''`→`SIL` encoding is a serialization detail. That keying matters: the API
+returns `n` twice, and the table correctly renders `n /n/ "net"` and
+`n /ŋ/ "finger"` as separate rows. IPA is kept because an example word cannot
+disambiguate `th` in "thin" (/θ/) from `th` in "this" (/ð/) — both are rows.
+
+**6.2 — A promotion-rule panel sits between the stat cards and the GPC table.**
+§08 gives "Next up" one sentence, but §8's whole claim is an interpretable model
+a parent can recompute on paper, so the thresholds must be visible. The four
+stat cards stay exactly as specced. The criterion text is the SERVER's own
+string — rewriting it client-side would create two descriptions of one rule that
+could drift.
+
+**6.3 — "Few samples" means fewer than 5 answers, and the legend says so.**
+§08 says "few samples" without a number. Deliberately NOT
+`thresholds.min_observations` (10) — that is §8's aggregate floor across a whole
+stage; applied per row it would grey out nearly everything.
+
+**6.4 — Zero-evidence GPC rows are folded behind a counted toggle, never removed.**
+Hiding them would turn "not asked about yet" into "no trouble here", which is
+the opposite of what a parent needs to see.
+
+**6.5 — Tailwind CONFIG changes do not hot-reload a running Vite dev server.**
+Observed live: a new `borderRadius` token was present in `dist/` but computed
+`0px` in dev, silently squaring every avatar. This is the INVERSE of invariant 7
+(there, dev lies optimistically and prod purges; here dev lies pessimistically).
+Restart the dev server after editing `tailwind.config.ts`, and never conclude
+from dev alone.
+
+**6.6 — Concurrent agents must isolate the headless browser.**
+`browse` shares one daemon across processes; parallel UI work needs
+`BROWSE_SERVER_PORT` set per agent or sessions collide.
+
+**6.7 — CRITICAL, found by audit and fixed: the promotion signal was forgeable.**
+`_STORIES_AT_STAGE_SQL` counted READINGS, not distinct stories, and GPC evidence
+was re-credited on every replay — so `MIN_GPC_OBSERVATIONS = 10`, added
+specifically so promotion could not turn on one lucky tap, was satisfied by ten
+replays of that tap. Reproduced live: a child advanced stage 5 → 6 having read
+ONE story, answered ONE question, the same word, ten times, in 31 HTTP calls.
+
+It was also the DEFAULT behaviour, not merely an attack: `/api/stories/request`
+is round-robin, so where a (stage, theme) pair holds fewer than 5 stories a child
+pressing "Read another" gets the same story back.
+
+Fixed with `count(DISTINCT story_id)` plus skipping the `gpc_stats` upsert when
+the kid already completed that story at that stage. `repeat_reading` was added to
+the DTO so an empty `gpc_updates` is not ambiguous.
+**Unpapered consequence:** with `DISTINCT`, stages 1 and 3 currently hold only 4
+and 3 distinct servable stories, so promotion is unreachable there until the pool
+grows. The counter fix and the pool are one change.
+
+**6.8 — Six tests encoded the defect as the contract.**
+`test_five_clean_readings_promote_the_kid` was named and documented "5 stories at
+stage 1" while its fixture returned ONE story read five times; three siblings did
+the same. Fixing the SQL made them fail. The `justify-test-edit` gate was run and
+returned TEST IS WRONG — §8's wording plus a live reproduction of what the old
+behaviour permits. Corrected via a `distinct_stories` fixture, with the
+justification recorded at each site, plus two NEW tests that fail against the old
+behaviour (verified by sabotage).
+
+**6.9 — Wrong-owner returns 404, never 403.**
+A 403 confirms the resource exists. The body is byte-identical to a nonexistent
+id, across every route taking a kid or reading id.
+
+**6.10 — `require_parent` admits admins, but ownership is enforced separately.**
+An admin sees an empty kid list and gets 404 on another parent's kid. Role and
+ownership are independent checks; conflating them is how admin tooling
+accidentally becomes a bypass.
+
+**6.11 — `DEMO_BYPASS_ROLE` defaults to `parent` but is configurable.**
+§18 says the bypass renders "a fixed parent session", but §17's demo opens on two
+admin-only screens — so a literal parent-only bypass cannot survive the outage it
+exists for. The §18 startup guard refuses to boot when the bypass is set
+alongside any production signal (`ENVIRONMENT=production`, DO App Platform vars,
+a remote `DATABASE_URL`, or an `sk_live_` key), naming the signal it saw.
+
+**6.12 — `kids.display_name` is constrained on the COLUMN, not just the route.**
+DEVIATIONS 5.9's `@` check was a route validator; the live DB already contained
+`kid@example.com`, written by some other path. Now a CHECK constraint enforces a
+first name. Accepts `Maya`, `O'Brien`, `Ana-Sofia`, `Sofía`, `Zoë`, `李`; rejects
+addresses, emails, multi-name strings, script tags, digits and newlines. The
+migration repaired the existing row.
+
+**6.13 — RESOLVED: Clerk's role claim required a dashboard change, not a code change.**
+`auth.py` accepts `public_metadata.role` -> `user_public_metadata.role` ->
+`metadata.role` -> `role`, first match wins, unknown -> `parent`. Which key Clerk
+emits was unverifiable without a real signed session, so it was left open.
+
+Resolved by minting a real session token through the Clerk Backend API and
+decoding it. The finding: Clerk's DEFAULT session token carries NONE of the four
+spellings — only `exp, fva, iat, iss, nbf, sid, sts, sub, v` — even with
+`public_metadata = {"role":"admin"}` set on the user, and the instance had zero
+JWT templates. So every real session would have resolved to `parent` and both
+§17 demo screens would have 403'd. Setting the dashboard metadata field looks
+like it should be sufficient and is not.
+
+Fixed in the Clerk dashboard (Sessions -> customize session token) with
+`{"public_metadata": "{{user.public_metadata}}"}`, which is why `auth.py` needed
+no change: `public_metadata.role` was already the first spelling it walks.
+There is no Backend API for this — `/v1/instance` exposes no such field, so it
+cannot be scripted and must be redone by hand on any new Clerk instance.
+**DEPLOY NOTE: a fresh Clerk instance will silently downgrade every user to
+`parent` until this field is set.** `docs/DEPLOY.md` must say so.
+
+Verified end-to-end against a fresh API with `DEMO_BYPASS_AUTH=false`: no token
+-> 401; real RS256 token -> 200 on admin-only `/api/validate`. `/api/kids`
+returned `[]` for the admin while five kids exist, confirming 6.10 — role and
+ownership stay independent, and admin is not a data bypass. Test session revoked.
+
+**6.14 — Pre-existing, not yet fixed:** `tests/test_stories_api.py::_pool` filters
+`status='warm'` while `_SERVE_SQL` serves `warm|complete`, so
+`test_least_recently_served_rotation` breaks whenever a stage-1 story flips to
+`complete`. Currently green. Fix is `_pool` using `SERVABLE_STATUSES`.
+
+
+**6.15 — The blocklist was 52 words and 42 profanities were in `PERMITTED WORDS`.**
+Found incidentally by the stage-coverage agent (`shit` in the stage-3 shortlist).
+A sweep found `fuck`, `cunt`, `rape`, `porn`, `slut` and 37 others in the
+vocabulary handed to the model to write children's stories. §5.4 asked for a
+vendored list; Phase 2 shipped a seed list with a comment saying "expand before
+any public deploy", and that never happened. Now 240 entries.
+
+**The first fix was worse than the original.** `load_blocklist()` reads one word
+PER LINE; the replacement was written space-separated, so each category line
+became a single unmatchable 70-character entry — 22 effective words, fewer than
+the 52 it replaced. The only visible symptom was `allowed_words` growing by 274
+rows when blocking should shrink it. Caught by querying the table; `make
+precompute` exited 0 throughout. Verified after the real fix: 0 blocklisted words
+in `allowed_words`, no stage below §18's 150-word floor (stage 1 = 157).
+
+
+**6.16 — The SPA refuses to render without a USABLE `VITE_CLERK_PUBLISHABLE_KEY`.**
+`apps/web/.env.local` has carried the key since the phase started and *nothing
+read it*: there was no `@clerk/clerk-react`, no `ClerkProvider`, no `/sign-in`
+route and no `Authorization` header. The app looked signed-in because the API
+was running §18's `DEMO_BYPASS_AUTH`, so every screen worked and no layer said
+otherwise. That is the failure mode this entry exists to make impossible: a
+missing key now renders a full-screen message naming the variable, the file
+(`apps/web/.env.local`), the Clerk dashboard page it comes from and the fact that
+Vite only reads env at startup — and `<App/>` is never mounted. An
+unauthenticated app that renders is worse than an app that will not start,
+because only the second one is discovered before a demo.
+
+**Two failures, and the second was found in the browser, not reasoned about.** A
+*missing* key is the `if` in main.tsx. A *malformed* key sails past it and makes
+`<ClerkProvider>` throw during render, which React answers with an empty page
+and a stack trace nobody is looking at — the same blank div reached by a
+different road. This was observed live: a concurrent build had baked
+`pk_test_BUILD_PROBE` into `dist/`, and `vite preview` served a completely white
+page. `ClerkBootBoundary` now catches that throw and renders the same actionable
+screen, naming the key the build was given (a publishable key is public by
+construction — it ships in the bundle) and Clerk's own message. The boundary
+re-throws anything that does not mention Clerk or the key, because a boundary
+above every route that swallowed *all* render errors would relabel an ordinary
+component bug as an auth-configuration problem and send the reader to the wrong
+file.
+
+**6.17 — The token reaches `lib/api.ts` through a registered getter, set during
+render, not through a hook or a context.**
+`lib/api.ts` is plain async functions called from effects, event handlers and
+`lib/plan.ts` — none of which can call `useAuth()`. So `ClerkTokenBridge`
+(`lib/auth.tsx`) hands `getToken` to the module via `setAuthTokenGetter`.
+It does so in the component **body**, not in `useEffect`: React runs a child's
+effects before its ancestors', so a route component's first `fetch` fires before
+an ancestor bridge's effect would have registered anything — the first request of
+every page load would go out unauthenticated and 401. Assignment during render is
+idempotent and survives StrictMode's double render.
+
+**A null token is sent as no header, never as an error.** §18's bypass means the
+API may legitimately not need one, and `GET /api/themes`/`/api/stages` fall back
+to seed data on any failure. The client never decides that a request is
+pointless; the server decides.
+
+**6.18 — Kid mode has no sign-in wall: signed out, `/read/:kidId` redirects to `/`.**
+§01 is absolute that kid mode has no error state, and an auth surface is an error
+surface with a form on it — a five-year-old handed a tablet cannot type an email
+and password, and a child who is shown one has been told the app is broken.
+The parent routes get the opposite treatment (`/sign-in`, per §16). `/` is the
+parent's entrance, which is who has to act. While Clerk is still loading the kid
+route shows `PrinterWorking` — §07's only "wait" — rather than a blank div.
+
+**6.19 — There is no web-side `DEMO_BYPASS_AUTH`, so §18's bypass is now API-only.**
+The guards are unconditional: signed out, the parent routes redirect no matter
+what the API would have accepted. Stated plainly, because it is a real reduction
+in what §18 promised — with `DEMO_BYPASS_AUTH=true` the API still serves, but the
+SPA will not reach it without a Clerk session, and if Clerk's script cannot load
+at all the parent routes sit on "Checking your session…" indefinitely. The
+alternative is a second, client-side flag that renders the whole app
+unauthenticated whenever it is set, which is precisely 6.16's failure with an env
+var in front of it. If the demo needs the bypass end to end, the honest fix is a
+signed-in Clerk test account, not a client-side switch.
+
+**6.20 — A 403 on the parent surface names the missing `public_metadata` claim.**
+Verified empirically against the live instance (`still-vervet-33`): a REAL Clerk
+session token minted through the Backend API decodes to exactly
+`exp, fva, iat, iss, nbf, sid, sts, sub, v` — no `public_metadata`, no
+`user_public_metadata`, no `metadata`, no `role` — even though the user's
+`public_metadata` IS `{"role":"admin"}` server-side, and the instance has zero
+JWT templates. So `auth.py::role_from_claims` correctly resolves every real
+session to `parent`, and every `require_admin` route (`/api/validate`, the
+allowed-words browser) will 403 for everyone until a human customises the session
+token in the Clerk dashboard (Sessions → customize session token →
+`{"public_metadata": "{{user.public_metadata}}"}`). **This is not settable
+through the API — `/v1/instance` exposes no such field.**
+
+The fix is NOT to fetch the role from the backend or to trust a client-side
+value: `auth.py`'s docstring says roles come from the signed token and never from
+the database, so that the dashboard can revoke admin on the next request. What
+changes is legibility. `ParentError` now separates 403 from 401 — 401 is "sign in
+again" with a button that does it, 403 says the session token is missing the
+`public_metadata` claim and names the dashboard action. A generic "forbidden"
+would send whoever meets it looking through `auth.py` for a bug that is not
+there.
+
+**6.21 — Clerk's JS loads on every route, kid mode included.**
+DEVIATIONS 0.4 self-hosts fonts specifically so a child's browser makes no
+third-party request (§13). `<ClerkProvider>` fetches `clerk.browser.js` from
+`still-vervet-33.clerk.accounts.dev` at startup, so kid mode now does make one —
+to the identity provider, on every load. It is not avoidable while kid mode calls
+an authenticated API: `POST /api/stories/request` needs a bearer token, so the
+SDK has to be loaded before a story can be fetched. Mounting the provider only on
+parent routes would mean kid mode holds no session and cannot request a story at
+all. Recorded because it is a genuine narrowing of the §13 posture, not because
+there is a better option available this phase — the honest mitigation is that
+Clerk is the app's own identity provider, not an analytics vendor.
+
+**6.22 — `ParentShell`'s "Demo session" placeholder becomes a real account control.**
+The slot was deliberately an honest placeholder while there was no session to
+render. There is one now: signed in it is `<UserButton/>` (sized to §11's 48px
+floor by an appearance override, since Clerk's default trigger is 28px), signed
+out it is a "Sign in" link. Clerk's components are themed through `appearance`
+`variables` — berry primary, paper background, Nunito, the 16px `btn` radius —
+rather than restyled element by element, so an SDK update changes the widget's
+internals and not this app's palette.
+
+**6.23 — `/sign-in` carries the deep link back in `?redirect_url=`, validated.**
+A parent who opened `/dashboard/3` and got bounced should land back on
+`/dashboard/3`, not on `/app`. The parameter is only honoured when it starts with
+a single `/` — `//evil.example` and absolute URLs fall back to `/app` — because
+an unvalidated post-login redirect is an open redirect with a session attached.
+
+**6.24 — `persist()` never wrote the grammar half of the story-body verdict.**
+DEVIATIONS 4.12 added `well_formed` + `grammar_note` to `ModerationVerdict` and
+folded them into `approved`, so an ungrammatical story was *rejected* correctly
+from that moment on. But the receipt `warm.persist()` writes to
+`gen_meta.moderation` was still the three keys it had in Phase 3 — `approved`,
+`layer`, `reason` — so the grammar verdict was computed, acted on, and then
+thrown away. `gen_meta->'moderation'->>'well_formed'` was NULL on all 28 servable
+stories, and would have stayed NULL on every story generated after the fix too.
+The question-side receipt (`_record_verdict`) already recorded it; the body-side
+one did not, which is why the two disagreed 28/28 vs 0/28.
+
+Now `persist()` writes the same five keys `_record_verdict` writes. The
+consequence is that the backfill below is a **one-time repair**, not a sweep that
+has to be re-run after every `make warm`.
+
+**6.25 — `--grammar-backfill` re-moderates servable story BODIES, reconstructed
+from `story_segments`.**
+`stories` persists the segments, not `PipelineResult.final_text`, so the body
+that was judged in Phase 3 no longer exists as a single column. It is rebuilt as
+`" ".join(segment bodies)` — the exact reconstruction `enrich()` already uses on
+its own `--backfill` path, so the two repair paths cannot judge different text.
+`_split_segments` splits on `". "`/`"! "`/`"? "` and re-appends a terminal stop,
+so the join is the original modulo whitespace; a test asserts the round trip on
+every servable story rather than assuming it.
+
+The sweep runs the SAME `moderate()` the generation path runs — not a
+grammar-only variant — because §13 layer 3 is one call and re-judging safety on
+text that is years-old-in-model-terms is free information, not scope creep. The
+two halves are reported separately so "how much bad grammar is in the pool" stays
+a clean number.
+
+Idempotent by predicate, not by flag: the selection is
+`gen_meta->'moderation'->'well_formed' IS NULL`, which is exactly the set that
+has never been judged. A second run selects nothing and spends nothing.
+
+**6.26 — An ungrammatical body moves to `status='rejected'`. Nothing is deleted.**
+`SERVABLE_STATUSES = ("warm", "complete")` and `rejected` is the existing,
+already-enforced way a story leaves rotation (`api/stories.py` `_SERVE_SQL`, the
+by-id fetch, and `POST /api/readings`) — so taking a story out of the pool needs
+no new mechanism and no new column.
+
+Deliberately NOT a delete. `questions.story_id` is `ON DELETE CASCADE` and
+`answers.question_id` is too, so deleting one ungrammatical story would take
+every question row with it and every `answers` row hanging off those — including
+the `tap_word` answers that are §8's only mastery evidence
+(`mastery.MASTERY_QTYPES`). A prior agent lost an answer row exactly that way.
+Flipping `status` removes the story from every serving path while leaving
+`readings`, `answers` and `gpc_stats` untouched, so a promotion decision already
+made on that evidence stays reproducible. The receipt records why, so the row is
+eval evidence rather than a mystery — the same posture Phase 3 takes toward
+stories rejected at generation time.
+
+One consequence, stated rather than discovered later: the servable pool shrinks,
+and DEVIATIONS 6.7 already notes that stages 1 and 3 hold few enough distinct
+stories that promotion is unreachable there. Rejecting a body makes that worse
+before `make warm` makes it better. §0 is explicit that the gate is not weakened
+to make the pool look healthy.
+
+**6.26a — The sweep records `pulled_at`, and one Phase 3 test moves with it.**
+Found by `test_rejected_stories_are_kept_but_never_warm` (commit e0f3267) going
+red. It asserted that no `rejected` story carries a `last_served_at`, which was
+an exact statement of a child-safety property for as long as `persist()` was the
+only producer of `rejected`: such a story was never in the pool, so a serve stamp
+on one could only mean `_SERVE_SQL` had leaked a rejected row.
+
+6.26 creates the first rejected rows that were legitimately served — while they
+were still warm — so the assertion could no longer tell a leak from this feature
+working. `justify-test-edit` returned **CODE IS WRONG**, and it was right: the
+sweep was pulling stories out of rotation without recording *when*, which is
+precisely the fact that keeps the question answerable. The receipt now carries
+`pulled_at`, the original assertion is kept verbatim over the generation-time
+population it was written about, and the stronger claim — *a pulled story was
+never served AFTER it was pulled* — is asserted beside it. Both were
+sabotage-tested (backdate the pull, drop the field; each fails the right half).
+Nothing was loosened; the serving path itself is separately guarded by
+`test_stories_api.py::test_rejected_stories_are_never_served` and
+`test_readings.py::test_a_rejected_story_cannot_be_read`, both untouched.
+
+**6.27 — The `tap_word` prompt is spoken on mount; the options already were.**
+`Comprehension.tsx` wired `onSpeak` on every choice card and nothing on the
+prompt, so the one string that says what to DO was the only string a child could
+not hear. That matters most exactly where the text is weakest: at stages 2–3 the
+prompt is `Tap it. Hint: win.`, because every similarity word in English —
+`as`, `like`, `same`, `alike` — is stage 4 or later (`llm/questions.py`), so the
+written sentence provably cannot say more.
+
+**Honest limit: speaking it does not restore the missing instruction.** The
+spoken string is `question.prompt` verbatim, so at stage 2 a child now HEARS
+"Tap it. Hint: win." rather than reading it in silence. That is strictly better —
+audio is not bound by the decoder, and a pre-reader gets the cue at all — but the
+comparison clause is still absent. Synthesising a richer sentence for the audio
+channel was rejected: it would be child-facing text that never passed §13's
+layers and never passed the decoder, and the moment the sound chip becomes
+servable (DEVIATIONS 5.23) there would be two competing instructions.
+
+Implementation notes, because each is load-bearing:
+- The effect is keyed on `question.id` and its cleanup **cancels**; that is the
+  whole of the StrictMode handling and there is no ref guard. React 18
+  double-invokes effects in dev, so the engine sees speak → cancel → speak and
+  exactly ONE utterance survives. The tempting alternative is `StoryWordChip`'s
+  idiom — a ref set and never cleared — and it is wrong here: the teardown
+  cancels the first utterance while the guard refuses the second, so dev goes
+  silent. That is a documented, tolerable quirk for a word the child can also
+  tap; it is not tolerable for the one string that explains the screen. Both
+  were run: the shipped version nets one live utterance, the guard version nets
+  zero.
+- The cleanup calls the canceller `speak()` returned, not bare `cancelSpeech()`.
+  That canceller no-ops if anything else has since taken the microphone, so
+  advancing to the next question cannot cut off an option the child just tapped.
+- `speak()` never throws and degrades to a timer when `speechSynthesis` is absent
+  (`lib/speech.ts`), so §01 holds: no engine means no sound and a fully usable
+  screen, never an error surface. Nothing is awaited, so the first tap is
+  available immediately.
+
+**Verified in a headed browser against live API data, not asserted from a
+fixture.** The real component and the real `lib/speech.ts` were mounted with a
+real `StoryDTO` from `POST /api/stories/request`, with `speechSynthesis`
+instrumented: one `speak()` without StrictMode, zero on re-render, one surviving
+utterance with it, the text equal to `question.prompt` verbatim at rate 0.85, the
+next question's prompt spoken on advance, and — with real macOS voices — a
+genuine `start` event 2ms in followed by ~1.8s of `speechSynthesis.speaking`.
+Removing the effect flips six of the twelve checks red; adopting the guard idiom
+flips exactly the one that measures live utterances. What this does NOT cover:
+the route itself. `/read/:kidId` is behind a real Clerk session (6.18/6.19) and
+no account was created to get one, so `KidSession`'s transition into the
+questions phase was not driven end to end in this pass.
+
+---
+
+## Phase 7 — deployment artifacts (DigitalOcean App Platform)
+
+Artifacts: `services/api/Dockerfile`, `.dockerignore`, `.do/app.yaml`,
+`docs/DEPLOY.md`. **Nothing is deployed** — these are the build outputs; creating
+the DO resources is the operator's call.
+
+**7.1 — The SPA ships as a STATIC SITE component, not a container.**
+App Platform supports both, and the choice is not arbitrary. §2 states the
+frontend is "a static SPA. All state and secrets live behind FastAPI", and a Vite
+build is literally a directory of fingerprinted files: there is no SSR, no
+session, no server-side runtime and — critically — no secret for a server to
+hold. A container would therefore add an nginx or node process to patch, a second
+instance to pay for, and a second origin, and would buy nothing. The one thing
+given up is custom response headers (a CSP), which DO's static hosting does not
+expose; that is a real loss and is the only argument on the other side.
+
+Serving both components under **one app domain** (`/api` → service, `/` → static
+site) is what keeps `lib/api.ts`'s relative `fetch('/api/...')` honest in
+production: no CORS, no `VITE_API_URL` baked into the bundle, and `main.py`'s
+CORS allowlist stays dev-only exactly as its comment claims.
+
+**7.2 — The API build context is the REPO ROOT, and `storyforge` is on
+PYTHONPATH rather than installed.**
+`storyforge.seed` and `storyforge.precompute` resolve their data as
+`Path(__file__).resolve().parents[3] / "data"`, and `data/seed/gpcs.csv` is a
+*relative* symlink into the decoder package (1.4). Both facts force the image to
+reproduce the checkout's shape — `/app/data` and `/app/services/api` — rather than
+flatten it, so the Dockerfile is built with `-f services/api/Dockerfile .`.
+
+For the same reason `uv sync` runs with `--no-install-project` and the package is
+reached through `PYTHONPATH=/app/services/api`. A non-editable install would put
+`seed.py` at `…/.venv/lib/python3.12/site-packages/storyforge/seed.py`, whose
+`parents[3]` is `…/.venv/lib` — so `make seed` would fail looking for a `data/`
+directory that does not exist, in an image that otherwise starts and serves
+traffic perfectly. Verified in the built image: `SEED_DIR=/app/data/seed`, and the
+symlinked `gpcs.csv` resolves to the same 3,775 bytes the decoder loads.
+
+1.4's warning that "symlinks do not survive a build context" turns out to be
+half-true and worth correcting: BuildKit copies the symlink *as a symlink*, and
+because it is relative and both trees land under `/app`, it resolves. It would
+have broken had the two trees been copied to unrelated paths.
+
+**7.3 — `DATABASE_URL` is COMPOSED from `${db.*}`, not `${db.DATABASE_URL}`.**
+DO's own binding yields a bare `postgresql://…` URL. SQLAlchemy resolves that
+scheme to psycopg2 — not installed, and sync — so `create_async_engine` raises at
+import and the container never starts. The spec composes
+`postgresql+psycopg://${db.USERNAME}:${db.PASSWORD}@${db.HOSTNAME}:${db.PORT}/${db.DATABASE}?sslmode=require`
+instead, which needs no code change and keeps the password out of the file.
+
+`sslmode=require` was **proven, not assumed**, in both directions against the
+built image: with it, a Postgres that has SSL off fails with *"server does not
+support SSL, but SSL was required"* — libpq honouring the option, not SQLAlchemy
+discarding an unknown one; without it the same connection succeeds with
+`ssl = off`.
+
+Known sharp edge, not currently reachable: `alembic/env.py` feeds the URL through
+`Config.set_main_option`, which is ConfigParser interpolation, so a literal `%`
+in a password would raise. DO generates `AVNS_`+alphanumeric passwords, so this
+has no live failure — recorded because the symptom (a pre-deploy job dying on
+"interpolation syntax") names nothing that would lead anyone here.
+
+**7.4 — `ENVIRONMENT=production` is set in the spec ON PURPOSE, as a §18 tripwire.**
+The temptation with a startup guard is to keep the deployed environment quiet
+enough not to trip it. The opposite is wanted: the spec deliberately hands
+`auth.py::deployment_signals` an unambiguous production signal, so that anyone who
+later adds `DEMO_BYPASS_AUTH=true` gets a container that **refuses to boot**
+instead of one that serves every request as a fixed unauthenticated parent.
+
+Tested against the built image, three independent signals, each on its own:
+`ENVIRONMENT=production`; DO's injected `APP_URL`/`APP_DOMAIN`; and a remote
+`DATABASE_URL` host. All three refuse, naming the signal. The control — bypass
+off, every production signal present — boots clean. `DEMO_BYPASS_AUTH` is
+*absent* from the spec rather than set to `false`, because it already defaults to
+false in `config.py` and a variable listed in the dashboard is one toggle away
+from being true.
+
+**7.5 — The API image does NOT run migrations at start.**
+A `CMD` that ran `alembic upgrade head` before uvicorn would have every instance
+in a rolling deploy racing the same DDL, and the failure mode is a half-applied
+migration under load rather than a clean error. `alembic upgrade head` runs once,
+in a `PRE_DEPLOY` job built from the *same* Dockerfile — same image, so the
+migration can never run against a different dependency set than the code it is
+migrating for — and a failure there aborts the deploy before the new code sees
+traffic. Verified: the full six-migration chain applies to an empty database from
+the image, and a second run is a no-op.
+
+**7.6 — One instance, one uvicorn worker, deliberately.**
+`stories.limiter` is in-process (4.10), so §9's "10 story requests per minute"
+becomes 10 × workers × instances the moment this scales out. The honest
+configuration until a shared counter exists is `instance_count: 1` and
+`--workers 1`, both annotated at the point where someone would raise them.
+
+**7.7 — `preserve_path_prefix: true` on the `/api` ingress rule.**
+App Platform strips the matched prefix by default, so the service would be asked
+for `/health` and answer 404 for every route in §9 — with a green build, a green
+database and a health check failing for a reason that looks like the app.
+
+**7.8 — DO's health check cannot see what `/api/health` actually says.**
+The endpoint returns **HTTP 200 even when the database is down**; the verdict is
+in the body (`status: ok|pending|error`), which is correct for a report and wrong
+for a status-code-only probe. App Platform's `health_check` only reads the code,
+so a database outage would leave the component green. Not papered over: the
+Dockerfile's own `HEALTHCHECK` parses the body and fails on `error` (verified —
+the container reports `healthy` against a live Postgres), and `docs/DEPLOY.md`
+says to read the JSON rather than trust the dashboard. Making the endpoint return
+503 was rejected as out of scope for a deployment phase and a change to a §15
+contract other things read.
+
+**7.9 — `httpx` is a runtime import declared only in the dev dependency group.**
+`auth.py` imports `httpx` to fetch Clerk's JWKS — the module every authenticated
+request goes through — but `pyproject.toml` lists it under `[dependency-groups]
+dev`. The production image is built `--no-dev` and works anyway, because
+`anthropic` and `langfuse` both require it transitively (httpx 0.28.1 is present
+and importable in the built image, checked). That is a coincidence, not a
+guarantee: dropping or swapping the Anthropic SDK would break authentication in
+production while every local test stayed green. **Left unfixed here** — the fix is
+one line in `pyproject.toml` plus a `uv.lock` refresh, and `services/api/` is
+being edited by other agents this session. Flagged rather than silently absorbed.
+
+**7.10 — App Platform cannot build from this project's canonical remote.**
+`origin` is a self-hosted GitLab (`labs.gauntletai.com`); App Platform builds from
+GitHub, gitlab**.com**, Bitbucket or a container registry. So a deploy requires
+either the GitHub mirror (`HankH18/story-forge`, which the spec references) or
+pushing the image to a registry and swapping the `github:` blocks for `image:`.
+Cohort submission is unaffected — the mirror exists so DO can build, not to move
+where the work is submitted.
+
+**7.11 — What `doctl apps spec validate --schema-only` is and is not worth.**
+It ran clean on `.do/app.yaml` with no DO account, and it was sabotage-tested
+rather than trusted: a misspelled key (`prefixx`) is caught, but a nonsense
+`instance_size_slug` and a nonsense job `kind` both pass. So the spec is proven
+**structurally** valid — every field name is real and every block is in the right
+place — and the enum *values* (`apps-s-1vcpu-1gb`, `nyc`, `PRE_DEPLOY`) are
+unverified until a real `doctl apps create`. Stated because "the spec validates"
+would otherwise imply more than it does.
+
+**7.12 — `.dockerignore` is one file at the repo root, and it was verified by
+exporting a real context.**
+There is exactly one image in this project, so there is exactly one build context
+and one ignore file; a second one next to `services/api/Dockerfile` would be a
+copy to keep in sync. Reading it proves nothing, so the context BuildKit actually
+receives was exported (`FROM scratch` / `COPY . /` → `-o type=local`) and swept:
+the whole context is `data/`, `services/`, `.dockerignore`, `.gitkeep` — 5.2 MB,
+with no `.env`, no `.venv`, no `node_modules`, no `.git`, no `dist`, no
+`__pycache__` and no test tree. The finished image was swept again for
+secret-shaped strings and for any file named `.env`: both empty.

@@ -17,6 +17,9 @@
  *
  * Dev goes through Vite's `/api` proxy (vite.config.ts), so URLs stay relative
  * and no origin is baked into the bundle.
+ *
+ * Every request carries the Clerk session token when there is one — see
+ * `authHeader` below and `lib/auth.tsx` for how it gets here without a hook.
  */
 
 // --- DTOs, mirroring services/api/storyforge/api/stories.py ------------------
@@ -85,6 +88,7 @@ export interface Kid {
   id: number
   display_name: string
   stage_id: number
+  created_at?: string
 }
 
 /** One row of `GET /api/kids/{id}/progress` → `gpc_accuracy`. */
@@ -99,20 +103,79 @@ export interface GpcAccuracy {
   current_stage?: boolean
 }
 
+/** One clause of §8's promotion rule, with the server's own plain-English reason. */
+export interface Criterion {
+  name: string
+  met: boolean
+  detail: string
+}
+
+/**
+ * §8's rule, its inputs and its verdict.
+ *
+ * Every field here is shown somewhere on the dashboard. That is deliberate: §8
+ * is an *interpretable* model on purpose ("no BKT"), and a dashboard that
+ * renders only `promote` throws away the entire reason it was built that way.
+ */
 export interface Promotion {
   promote: boolean
   from_stage: number
   to_stage: number | null
   stories_completed: number
   stories_required: number
+  gpc_seen: number
+  gpc_correct: number
+  accuracy: number | null
+  accuracy_threshold: number
+  min_observations: number
+  criteria: Criterion[]
+}
+
+export interface Choice {
+  segment_id: number
+  choice: string
+  at: string
+}
+
+export interface RecentReading {
+  id: number
+  story_id: number
+  story_title: string
+  theme_slug: string
+  story_stage_id: number
+  stage_id: number
+  started_at: string
+  completed_at: string | null
+  questions_answered: number
+  questions_correct: number
+  choices: Choice[]
+}
+
+/** §8's thresholds, shipped so the dashboard can show the rule, not just a bar. */
+export interface Thresholds {
+  stories_required: number
+  accuracy_threshold: number
+  min_observations: number
+  max_stage: number
 }
 
 export interface Progress {
   kid: Kid
   stage_name: string
+  stage_description: string
+  readings_started: number
   readings_completed: number
-  promotion?: Promotion
+  readings_completed_at_stage: number
+  thresholds: Thresholds
+  promotion: Promotion
   gpc_accuracy: GpcAccuracy[]
+  recent_readings: RecentReading[]
+}
+
+export interface Stage {
+  id: number
+  name: string
+  description: string
 }
 
 /** What this reading changed — the deltas the celebration is allowed to show. */
@@ -142,6 +205,48 @@ class ApiError extends Error {
   }
 }
 
+/**
+ * §9: "Every `/api/*` route except `/api/health` requires a Clerk session
+ * token", verified RS256 over JWKS by `services/api/storyforge/auth.py`.
+ *
+ * This module is plain async functions — called from effects, event handlers
+ * and `lib/plan.ts` — so it cannot call `useAuth()`. `ClerkTokenBridge` in
+ * `lib/auth.tsx` registers Clerk's `getToken` here instead. See the note there
+ * for why the registration happens during render rather than in an effect: a
+ * child's effects run before its ancestors', so the first request of every page
+ * load would otherwise go out unauthenticated.
+ */
+type AuthTokenGetter = () => Promise<string | null>
+
+let authTokenGetter: AuthTokenGetter | null = null
+
+export function setAuthTokenGetter(getter: AuthTokenGetter | null): void {
+  authTokenGetter = getter
+}
+
+/**
+ * `Authorization: Bearer …`, or nothing at all.
+ *
+ * **A missing token is not an error here.** Three cases produce one and all
+ * three are legitimate: the API may be running §18's `DEMO_BYPASS_AUTH` and not
+ * want a token; Clerk may not have loaded yet; and the signed-out kid route
+ * bounces to `/` rather than blocking (DEVIATIONS 6.18) — in the moment before
+ * that redirect commits, a request may still be in flight. Refusing to send it
+ * would turn a 401 the caller already knows how to render into a client-side
+ * failure with no status at all, and would break the bypass outright. The
+ * server decides what an anonymous request is worth; this file does not.
+ */
+async function authHeader(): Promise<Record<string, string>> {
+  if (!authTokenGetter) return {}
+  try {
+    const token = await authTokenGetter()
+    return token ? { authorization: `Bearer ${token}` } : {}
+  } catch (err) {
+    if (import.meta.env.DEV) console.info('[api] no Clerk token available:', err)
+    return {}
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), TIMEOUT_MS)
@@ -149,7 +254,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(path, {
       ...init,
       signal: controller.signal,
-      headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
+      headers: {
+        'content-type': 'application/json',
+        ...(await authHeader()),
+        ...(init?.headers ?? {}),
+      },
     })
     if (!res.ok) throw new ApiError(`${init?.method ?? 'GET'} ${path} → ${res.status}`, res.status)
     if (res.status === 204) return undefined as T
@@ -229,6 +338,99 @@ export async function resolveKid(kidId: number): Promise<Kid | null> {
 
 export async function getProgress(kidId: number): Promise<Progress | null> {
   return optional<Progress>(`/api/kids/${kidId}/progress`)
+}
+
+// --- parent surface -----------------------------------------------------------
+
+/**
+ * The parent surface is the third case in this file's rule.
+ *
+ * Kid mode may never show an error (§01) and telemetry may never interrupt a
+ * session, so both of those swallow failures. A parent is a different reader
+ * with a different job: they came to find out how their child is doing, and a
+ * dashboard that renders "0 stories, 0 sounds" because the request 401'd has
+ * told them something false about their child. So parent reads return a result
+ * a caller must look at, and the routes render the failure as itself.
+ *
+ * This matters right now specifically because auth is landing in parallel: the
+ * one status these screens must survive is a 401 that appears mid-phase.
+ */
+export type Result<T> =
+  | { ok: true; data: T }
+  | { ok: false; status: number; message: string }
+
+async function attempt<T>(path: string, init?: RequestInit): Promise<Result<T>> {
+  try {
+    return { ok: true, data: await request<T>(path, init) }
+  } catch (err) {
+    if (err instanceof ApiError) {
+      return { ok: false, status: err.status, message: err.message }
+    }
+    // AbortError (the 20s timeout) or a dropped connection: status 0 means
+    // "never reached the server", which is a different sentence to a parent
+    // than "the server said no".
+    return { ok: false, status: 0, message: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+export function isUnauthorized(result: { ok: false; status: number }): boolean {
+  return result.status === 401 || result.status === 403
+}
+
+export async function fetchKids(): Promise<Result<Kid[]>> {
+  return attempt<Kid[]>('/api/kids')
+}
+
+export async function fetchProgress(kidId: number): Promise<Result<Progress>> {
+  return attempt<Progress>(`/api/kids/${kidId}/progress`)
+}
+
+/**
+ * §9 `POST /api/kids {display_name, stage_id}` — and there is no third field.
+ *
+ * §13 in the type system: no email, no date of birth, no photo. The server
+ * enforces the same shape (`KidCreate`), so a client that grew a field would be
+ * a 422 rather than a quiet leak.
+ */
+export async function createKid(displayName: string, stageId: number): Promise<Result<Kid>> {
+  return attempt<Kid>('/api/kids', {
+    method: 'POST',
+    body: JSON.stringify({ display_name: displayName, stage_id: stageId }),
+  })
+}
+
+// --- stages -------------------------------------------------------------------
+
+/**
+ * `GET /api/stages` is not routed (§9 does not list it). The add-kid form still
+ * has to name the twelve stages, and "Stage 7" alone is not a choice a parent
+ * can make — so the fallback is exactly `data/seed/stages.csv`, the same rows
+ * the server holds, in id order. Same pattern and same reasoning as
+ * SEEDED_THEMES above: mirror the seed, never invent.
+ */
+const SEEDED_STAGES: Stage[] = [
+  { id: 1, name: 'CVC', description: 'Single letters s a t p i n m d c — simple three-letter words' },
+  { id: 2, name: 'Doubles & x', description: 'Remaining single letters, doubled consonants (ck ss ll ff), and x' },
+  { id: 3, name: 'Digraphs', description: 'Two letters one sound: sh ch th ng qu, plus w x y z v j' },
+  { id: 4, name: 'Endings', description: 'Consonant clusters and the -s -es -ed -ing endings' },
+  { id: 5, name: 'Silent e', description: 'Split digraphs a_e i_e o_e u_e e_e, and silent final e' },
+  { id: 6, name: 'Vowel teams', description: 'ai ay ee ea oa ow igh, plus er and y as a vowel' },
+  { id: 7, name: 'R-controlled', description: 'ar or ir ur, and the wa pattern' },
+  { id: 8, name: 'Diphthongs', description: 'oi oy ou ow au aw oo' },
+  { id: 9, name: 'Soft & silent', description: 'Soft c and g, plus kn wr mb ph' },
+  { id: 10, name: 'Two syllables', description: 'The -le ending; schwa relaxation becomes explicit curriculum' },
+  { id: 11, name: 'Suffixes', description: 'tion ture sion' },
+  { id: 12, name: 'Review', description: 'Cumulative review; syllable cap lifted' },
+]
+
+export async function getStages(): Promise<Stage[]> {
+  const live = await optional<Stage[]>('/api/stages')
+  if (Array.isArray(live) && live.length) return live
+  return SEEDED_STAGES
+}
+
+export function stageName(stageId: number): string {
+  return SEEDED_STAGES.find((s) => s.id === stageId)?.name ?? `Stage ${stageId}`
 }
 
 export async function startReading(kidId: number, storyId: number): Promise<number | null> {

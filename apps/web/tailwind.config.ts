@@ -30,7 +30,11 @@ export default {
         read: ['34px', { lineHeight: '1.65', letterSpacing: '0.01em' }],
         'read-lg': ['40px', { lineHeight: '1.9', letterSpacing: '0.01em' }],
       },
-      borderRadius: { chip: '10px', btn: '16px', card: '22px' },
+      // §12 names five radii; `pill` was unused until the parent surface (kid
+      // avatars, accuracy bars) needed it. Tailwind's own `rounded-full` is
+      // 9999px, which is the same shape but not the same token — keeping the
+      // literal 999px is what stops utilities and tokens.css drifting.
+      borderRadius: { rule: '4px', chip: '10px', btn: '16px', card: '22px', pill: '999px' },
       boxShadow: {
         'lift-kid': '0 6px 0 #2B2118',
         'lift-kid-down': '0 2px 0 #2B2118',

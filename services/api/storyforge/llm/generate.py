@@ -13,14 +13,37 @@ render order is tools -> system -> messages, so the STABLE material goes in
     messages   theme + story words + length  per request (after the breakpoint)
 
 Generating N stories for one stage therefore pays the vocabulary cost once.
+
+**The story also has to contain the material the stage teaches** (DEVIATIONS
+5.17). §8 promotes on accuracy over the GPCs introduced AT the child's stage,
+and the only evidence source is a tap-a-word question — which can only ask about
+a grapheme the STORY contains. Stage 4 teaches nothing but word-final `-s -es
+-ed -ing`, so a story that happens to use no suffixed word leaves promotion
+unreachable however well the child reads it. The allowlist already holds the
+words that would fix that; the prompt simply never pointed at them.
+`practice_words` names them, inside the cached half of the prompt.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from pydantic import BaseModel, Field
 
+from storyforge.decoder import WordVerdict, load_gpcs, mastered_ids, validate_word
 from storyforge.llm.client import GENERATION_TIMEOUT_S, generation_model, get_client
 from storyforge.llm.pricing import Usage, usage_from_response
+
+# Imported, never reimplemented: the prompt must point at the words the GRADER
+# credits. A second copy of "which GPCs does this word use" would drift, and the
+# drift would be invisible — stories would look right and earn nothing.
+from storyforge.mastery import MAX_STAGE, MIN_STAGE, word_gpc_ids
+
+# §13's deterministic layer, the same list `llm/moderate.py` screens finished
+# stories with. A shortlist a story writer is told to PREFER has to clear it —
+# a word is far likelier to reach a child from a 24-word "use these" list than
+# from rank 300 of a flat 400-word allowlist.
+from storyforge.precompute import load_blocklist
 
 # Frozen. Any edit invalidates every cached prefix, so keep per-request detail out.
 SYSTEM_RULES = """You write decodable stories for children learning to read.
@@ -77,19 +100,161 @@ class GenerationResult(BaseModel):
     stop_reason: str | None = None
 
 
+# --- the stage's newly-taught sounds (DEVIATIONS 5.17) ------------------------
+#: How many practice words to name. Long enough that three themes can each find
+#: something usable, short enough that the list reads as a hint rather than as a
+#: second, narrower allowlist.
+PRACTICE_WORD_LIMIT = 24
+
+#: Above this share of the allowlist, the stage's new sounds are unavoidable —
+#: a stage-1 story cannot help but use stage-1 letters — and naming a sample of
+#: them would only shrink the vocabulary the model feels free to use. The whole
+#: point of the section is stages where the new material is SCARCE.
+PRACTICE_SATURATION = 0.5
+
+#: The section header. Named because the request block does not know the stage
+#: and so cannot reference it; the ask travels with the list instead.
+PRACTICE_HEADER = "NEW SOUNDS AT THIS STAGE"
+
+
+@lru_cache(maxsize=16)
+def _stage_gpc_ids(stage: int) -> frozenset[str]:
+    """The GPC ids INTRODUCED at `stage` — §8's promotion denominator.
+
+    `mastered_ids` is cumulative; this is the thin slice the stage teaches.
+    """
+    return frozenset(g.id for g in load_gpcs() if g.stage == stage)
+
+
+@lru_cache(maxsize=8192)
+def _first_decodable_stage(word: str) -> int | None:
+    """The earliest stage whose mastered set can sound `word` out, or None.
+
+    Decodability is monotone in stage (the inventory is cumulative), so this is
+    well defined, and it is exactly `precompute`'s `min_stage`.
+    """
+    for stage in range(MIN_STAGE, MAX_STAGE + 1):
+        if validate_word(word, mastered_ids(stage)).verdict is WordVerdict.DECODABLE:
+            return stage
+    return None
+
+
+def allowlist_stage(allowed_words: tuple[str, ...]) -> int | None:
+    """Which stage this allowlist belongs to, read off the allowlist itself.
+
+    `build_vocabulary_block` is handed a stage NAME, not a stage id, and it is
+    called from three places (here, the rewrite loop, the question node) that
+    would all have to change to pass one. It does not need to: the allowlist for
+    stage N is every word decodable at N, so the newest sound it represents IS N.
+
+    One honest limitation. Stage 12 introduces no GPCs at all — it lifts the
+    syllable cap and reviews — so its allowlist looks like stage 11's and this
+    returns 11. That is the right answer to the question the caller is really
+    asking ("what are the newest sounds in here?"), and §8 cannot promote out of
+    stage 12 anyway, so no evidence is owed at that stage.
+    """
+    stages = [s for s in (_first_decodable_stage(w) for w in allowed_words) if s is not None]
+    return max(stages) if stages else None
+
+
+@lru_cache(maxsize=32)
+def practice_words(
+    allowed_words: tuple[str, ...],
+    sight_words: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Allowlist words that need a GPC this stage is the first to teach.
+
+    These are the only words in the prompt that can earn a stage-4 reader a step
+    toward promotion, and `llm/questions.py` cannot conjure one the story never
+    used. Frequency order is inherited from `allowed_words`, so the head of the
+    list is the part a five-year-old story can actually carry.
+
+    Sight words are dropped: `questions.sound_targets` refuses them as tap-a-word
+    options (the child recognised the shape, they did not decode it), so a story
+    that satisfies the ask with "is" would satisfy nothing.
+
+    Blocklisted words are dropped too, and they still count in the denominator —
+    removing a word must never make the list look scarcer than the stage is.
+
+    Empty when the stage teaches nothing new, and empty when the new sounds
+    saturate the allowlist — see `PRACTICE_SATURATION`.
+    """
+    stage = allowlist_stage(allowed_words)
+    if stage is None:
+        return ()
+    introduced = _stage_gpc_ids(stage)
+    if not introduced:
+        return ()
+
+    blocked = load_blocklist()
+    candidates = 0
+    picked: list[str] = []
+    seen: set[str] = set()
+    for raw in allowed_words:
+        word = raw.strip().lower()
+        if not word or word in seen:
+            continue
+        seen.add(word)
+        if word in sight_words:
+            continue
+        candidates += 1
+        if word in blocked:
+            continue
+        if introduced & set(word_gpc_ids(word, stage)):
+            picked.append(word)
+
+    if not picked or len(picked) > candidates * PRACTICE_SATURATION:
+        return ()
+    return tuple(picked[:PRACTICE_WORD_LIMIT])
+
+
+def build_practice_block(allowed_words: list[str], sight_words: list[str]) -> str:
+    """The practice section, or "" when the stage has nothing scarce to practise.
+
+    A PREFERENCE, stated as one. A stage whose sounds genuinely cannot appear in
+    a 30-word story, or a story too short to fit one, must still be a valid story
+    — the gate is decodability (§0), never this.
+    """
+    practice = practice_words(
+        tuple(allowed_words),
+        frozenset(w.strip().lower() for w in sight_words if w and w.strip()),
+    )
+    if not practice:
+        return ""
+    return (
+        f"\n\n{PRACTICE_HEADER} ({len(practice)}) — permitted words that use a "
+        "letter-sound this stage is the first to teach:\n"
+        + ", ".join(practice)
+        + "\n\nThese are what the child is learning to sound out right now, so "
+        "prefer them where a sentence can carry one naturally. That is a "
+        "preference and never a licence to break a rule above: a correct, plain "
+        "sentence using none of them beats a bent sentence using three, and text "
+        "that happens to use none of them is still fine."
+    )
+
+
 def build_vocabulary_block(
     stage_name: str,
     allowed_words: list[str],
     sight_words: list[str],
 ) -> str:
     """The stage's vocabulary — stable across every story for a stage, so this is
-    the cached half of the prompt."""
+    the cached half of the prompt.
+
+    The practice section is stage-derived and therefore belongs HERE rather than
+    in the request block: it is byte-identical for every story at a stage, so it
+    is written to the prompt cache once and read back at 0.1x on every later
+    request. Putting it in `messages` would re-send it as fresh input every time
+    for no benefit, and putting it in `SYSTEM_RULES` would be worse still — that
+    prefix is frozen precisely so per-stage material cannot invalidate it.
+    """
     return (
         f"STAGE: {stage_name}\n\n"
         f"PERMITTED WORDS ({len(allowed_words)}), most common first:\n"
         + ", ".join(allowed_words)
         + f"\n\nSIGHT WORDS ({len(sight_words)}) — permitted, learned by sight:\n"
         + ", ".join(sorted(sight_words))
+        + build_practice_block(allowed_words, sight_words)
     )
 
 

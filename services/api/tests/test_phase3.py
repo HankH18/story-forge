@@ -115,12 +115,67 @@ async def test_every_warm_story_has_segments(session):
 
 
 async def test_rejected_stories_are_kept_but_never_warm(session):
-    """Rejects are eval evidence for why a pair is hard — kept, never served."""
+    """Rejects are eval evidence for why a pair is hard — kept, never served.
+
+    `justify-test-edit`, run 2026-07-29. VERDICT: CODE IS WRONG (the sweep was
+    not recording *when* it pulled a story); the assertion below is then narrowed
+    to the population it can still speak about and a strictly stronger one is
+    added beside it.
+
+    ORIGIN: commit e0f3267 (Phase 3), where `warm.persist()` was the ONLY
+    producer of `status='rejected'`. Under that closed world "a rejected story
+    was never served" and "`last_served_at IS NULL`" were the same statement, so
+    the cheap data check stood in for the child-safety invariant.
+
+    They are no longer the same statement. `--grammar-backfill` (DEVIATIONS
+    6.25-6.26) re-runs §13 over bodies already in the pool and pulls the
+    ungrammatical ones, so `rejected` is now reachable from `warm`/`complete` as
+    well as at birth — which `models.Story`'s own docstring already allowed
+    ("failed the gate **or moderation**") and which `_remoderate_questions` had
+    already established for question rows. Those four stories were served,
+    legitimately, while they were still warm.
+
+    So the old assertion was not too strict; it was ambiguous — it could no
+    longer distinguish "`_SERVE_SQL` leaked a rejected story" (a child-safety
+    failure) from "a served story was later pulled" (this feature working). The
+    fix is in the CODE: the sweep records `pulled_at`, and the question becomes
+    answerable again. Both halves are asserted below, and neither is weaker than
+    what was here before.
+    """
     rows = await session.execute(
         text("SELECT count(*) FROM stories WHERE status='rejected'")
     )
     assert rows.scalar_one() >= 0  # presence is fine; the invariant is below
+
+    # 1. Rejected at GENERATION — never in the pool, so a serve stamp on one
+    #    still means `_SERVE_SQL` leaked a rejected row. Verbatim the original
+    #    assertion, over exactly the rows it was written about.
     bad = await session.execute(
-        text("SELECT id FROM stories WHERE status='rejected' AND last_served_at IS NOT NULL")
+        text(
+            "SELECT id FROM stories WHERE status='rejected' AND last_served_at IS NOT NULL "
+            "AND gen_meta->'moderation'->'pulled_at' IS NULL"
+        )
     )
     assert not bad.all()
+
+    # 2. Pulled from the pool later — may carry a serve stamp, but only from
+    #    BEFORE it was pulled. A serve after the pull is the same leak.
+    served_after = await session.execute(
+        text(
+            "SELECT id FROM stories WHERE status='rejected' "
+            "AND gen_meta->'moderation'->'pulled_at' IS NOT NULL "
+            "AND last_served_at > (gen_meta->'moderation'->>'pulled_at')::timestamptz"
+        )
+    )
+    assert not served_after.all()
+
+    # 3. Every pulled row names why, so a story is never out of rotation for a
+    #    reason nobody recorded.
+    unexplained = await session.execute(
+        text(
+            "SELECT id FROM stories WHERE gen_meta->'moderation'->'pulled_at' IS NOT NULL "
+            "AND (status <> 'rejected' "
+            "     OR coalesce(gen_meta->'moderation'->>'reason', '') = '')"
+        )
+    )
+    assert not unexplained.all()

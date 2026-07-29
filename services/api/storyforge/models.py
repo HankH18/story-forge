@@ -3,6 +3,7 @@
 Tables land in the phase that actually exercises them — an empty table passing a
 phase gate is a false green. `eval_runs`/`eval_run_items` (§8) arrive with Phase 7.
 
+    users ──< kids
     stages ──< sight_words
        │   └──< allowed_words       (precompute output, §5.4)
        │   └──< kids ──< readings ──< answers >── questions
@@ -36,6 +37,22 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from storyforge.db import Base
+
+#: §13's "display-name only", as a Postgres CHECK. Kept beside the model so the
+#: constraint and the migration that installs it cannot drift; `kids.py` mirrors
+#: it in Python so a bad name is a 422 with a reason rather than a 500 from the
+#: database. Deliberately a denylist of ASCII rather than an allowlist of
+#: letters: `[[:alpha:]]` resolves against the server's locale, so an allowlist
+#: would accept `Sofía` on one database and reject it on another.
+DISPLAY_NAME_IS_A_FIRST_NAME = r"""
+    display_name = btrim(display_name)
+    AND char_length(display_name) BETWEEN 1 AND 40
+    AND display_name !~ '[[:cntrl:]]'
+    AND display_name !~ '[[:digit:]]'
+    AND display_name !~ $nm$[!"#$%&()*+,/:;<=>?@^_`{|}~\\\[\]]$nm$
+    AND display_name !~ '[[:space:]][[:space:]]'
+    AND display_name !~ '[[:space:]][^[:space:]]+[[:space:]]'
+"""
 
 
 class Stage(Base):
@@ -258,6 +275,45 @@ class Question(Base):
     answer: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class User(Base):
+    """A Clerk-authenticated adult (§8, §13). The only account in the system.
+
+    Kids deliberately have none — §13's COPPA posture is that a child has no
+    auth identity at all — so this table is the whole answer to "who is calling"
+    and `kids.parent_id` is the whole answer to "what may they reach".
+
+    `clerk_id` is the identity, not `email`. Clerk's `sub` (`user_…`) is stable
+    across an address change, and a parent who updates their email in Clerk must
+    not become a different user with no children. The email is stored for the
+    §11 dashboard only and is nullable, because a JWT template that does not
+    include the claim is a normal Clerk configuration, not an error.
+
+    `role` mirrors `public_metadata.role` (§13) and is refreshed from the token
+    on every request — the token is the source of truth, this column is a cache
+    for joins and for the admin list. The CHECK constraint is not decoration: it
+    is the last thing standing between a typo'd migration or a direct psql
+    session and a value that the role comparison would not recognise. A role
+    outside the enum can only ever be read back as the least privilege
+    (`auth.load_or_create_user`), and now cannot be written at all.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("role IN ('parent', 'admin')", name="ck_users_role"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Clerk's `sub`. Unique and indexed: it is the lookup on every single
+    # authenticated request, and the uniqueness is what makes the
+    # load-or-create upsert race-free.
+    clerk_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    role: Mapped[str] = mapped_column(String(16), default="parent", server_default="parent")
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class Kid(Base):
     """A reader (§8, §13).
 
@@ -267,18 +323,42 @@ class Kid(Base):
     deliberately no column a future feature could quietly fill with PII; adding
     one is a §13 decision, not a schema tweak.
 
-    `parent_id` is a plain nullable int rather than `fk users`, on the DEVIATIONS
-    3.9 precedent: `users` lands with Clerk in Phase 6, and a FK to a table that
-    does not exist cannot be created. Reserving the column now means Phase 6 adds
-    a constraint rather than a column — and the ownership shape §9 requires
-    ("parent → own kids only") is already in the schema.
+    `parent_id` became `fk users` in Phase 6, which is what DEVIATIONS 5.1
+    reserved the column for. It stays **nullable** rather than becoming NOT NULL:
+    rows created before auth existed have no owner, and the honest reading of
+    "owned by nobody" is "visible to nobody" — `auth.owned_kid` filters on
+    `parent_id = :caller`, so a NULL never matches any parent and the row is 404
+    everywhere. Backfilling those to some arbitrary parent would be worse: it
+    would hand one family another family's children.
+
+    `ondelete="CASCADE"`: deleting the parent account deletes the children, and
+    `readings`/`answers`/`gpc_stats` already cascade from here. §13 promises a
+    minimal record of a child; a delete that left orphaned rows behind would
+    make that promise false at exactly the moment it matters.
+
+    `display_name` carries §13 as a CHECK, not only as a Pydantic validator.
+    This column is rendered full-screen to a child by the theme picker and has
+    never been through any of §13's three layers, so "a first name" has to be
+    true of the column rather than of one endpoint — this database already held
+    `kid@example.com`, written by some path that was not `POST /api/kids`. No
+    digits (phone numbers, house numbers), no punctuation beyond apostrophe,
+    hyphen and full stop, at most two words, no control characters, no leading,
+    trailing or repeated whitespace. Non-ASCII passes: Sofía and Zoë are first
+    names, and `[[:alpha:]]` is locale-dependent, so an allowlist here would
+    mean different things on different servers. The API's validator narrows it
+    further with Unicode-aware `str.isalpha()`.
     """
 
     __tablename__ = "kids"
-    __table_args__ = (Index("ix_kids_parent", "parent_id"),)
+    __table_args__ = (
+        Index("ix_kids_parent", "parent_id"),
+        CheckConstraint(DISPLAY_NAME_IS_A_FIRST_NAME, name="ck_kids_display_name_is_a_first_name"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
     # First name only (§13). Bounded here as well as in the API so a direct
     # writer cannot store an essay.
     display_name: Mapped[str] = mapped_column(String(40))

@@ -4,7 +4,12 @@ Powers the admin playground's live highlighting and the §17 demo. A thin wrappe
 over ``validate_text`` — the decoder already returns exactly the shape §5.1
 specifies, so there is no translation layer to drift.
 
-Admin role-gating lands with Clerk in Phase 6; §9 marks this admin-only.
+**Admin only (§9).** Not because the decoder is secret — it is a pure function
+over a vendored dictionary and a published inventory — but because this is the
+one endpoint that takes arbitrary text, and §13's three child-safety layers do
+not apply to it: nothing here is blocklisted, allowlist-constrained or
+moderated. A parent session must not be able to point it anywhere, and 4000
+characters of unbounded input is not something to leave open either.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from storyforge.auth import Principal, require_admin
 from storyforge.db import get_session
 from storyforge.decoder import TextReport, mastered_ids, validate_text
 
@@ -40,6 +46,7 @@ async def _sight_words(session: AsyncSession, stage_id: int) -> frozenset[str]:
 @router.post("/api/validate", response_model=TextReport)
 async def validate(
     body: ValidateRequest,
+    principal: Principal = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> TextReport:
     stage_exists = await session.execute(

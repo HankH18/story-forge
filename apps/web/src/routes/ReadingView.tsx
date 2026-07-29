@@ -2,9 +2,16 @@
  * Reading view — "the whole product" (style guide §10), §11.2 step 2.
  *
  * Layout is the 1024×768 landscape tablet reference: art left 50%, text right
- * 50%, vertically centred; portrait stacks art on top at 4:3 with text below.
- * One segment per screen and no scrolling — §10 is blunt about the failure
- * mode: "if text overflows, generation length is wrong, not the layout."
+ * 50%; portrait stacks art on top at 4:3 with text below. One segment per
+ * screen and no scrolling — §10 is blunt about the failure mode: "if text
+ * overflows, generation length is wrong, not the layout."
+ *
+ * The two columns align to the TOP, not the middle. §10 asks for vertically
+ * centred, and that is what this was — but centring an overflowing grid row
+ * gives it a negative top offset, which put the art behind the story text at
+ * every portrait viewport (§06: "Never behind text") and pushed the tail of a
+ * long segment under the Next button with no scrollbar to reach it. Centred
+ * text that is unreadable is not the more faithful reading of §10.
  *
  * Chrome is exactly three things: back, progress dots, font-size toggle. No
  * settings gear, no share, no account, no home — §13's kid-mode surface is a
@@ -68,7 +75,7 @@ export default function ReadingView({
     // when a too-long segment does arrive (the warm pool has 200-character
     // ones), the chrome and the Next button must stay put. A page that scrolls
     // takes the only way forward off the bottom of the screen.
-    <div className="flex h-screen flex-col px-6 py-5">
+    <div className="flex h-screen flex-col gap-4 px-6 py-5">
       {/* §10 chrome. Nothing else may be added here. */}
       <header className="flex items-center justify-between gap-4">
         <Button
@@ -99,12 +106,45 @@ export default function ReadingView({
 
       {/* `key` on the segment id so the §05 page-in animation replays and the
           word-tap state resets when the page turns. */}
+      {/* PORTRAIT IS A FLEX COLUMN, LANDSCAPE IS THE GRID. It was a
+          one-column grid in portrait, and that is what put the illustration
+          behind the story text at every portrait viewport — §06 is explicit:
+          "Never behind text."
+
+          `SegmentArt` sizes itself with `aspect-ratio: 4/3` off a full-width
+          box. An `auto` grid row does NOT size to an aspect-ratio item's block
+          size — the inline size it would be derived from is what the track is
+          still resolving — so the art's row collapsed to its (empty) content
+          height and the 531px picture spilled out of a 251px track. Whichever
+          way `align-items` pointed, it spilled onto its neighbour: `items-center`
+          pushed it UP (measured artBox.y = -93.3 at 768x1024, off the top of a
+          scroll container and unreachable), `items-start` pushes it DOWN, onto
+          the first six lines of the paragraph. Alignment was never the fix.
+          Flex sizes the aspect-ratio box correctly, so art and text stack.
+
+          `min-h-0` — a flex child's `min-height` defaults to `auto`, so `flex-1`
+          alone cannot shrink `main` below its content and `overflow-y-auto`
+          never engages; the tail of a long segment then grows past the viewport
+          instead of scrolling inside it (DEVIATIONS 5.25).
+
+          `pb-8` plus the parent's `gap-4` keep the last line clear of the
+          footer, at the bottom of the scroll AND at the clip edge.
+
+          The scrollbar is styled rather than left to the platform: macOS paints
+          OVERLAY scrollbars, invisible until something is already scrolling
+          (measured `offsetWidth - clientWidth === 0`), so the only signal that
+          more words existed was a chip sliced in half at the bottom edge. */}
       <main
         key={segment.id}
-        className="sf-page-in mx-auto grid w-full max-w-[1024px] flex-1 grid-cols-1
-                   items-center gap-8 overflow-y-auto py-4 lg:grid-cols-2"
+        className="sf-page-in mx-auto flex w-full min-h-0 max-w-[1024px] flex-1 flex-col
+                   gap-8 overflow-y-auto py-4 pb-8
+                   [scrollbar-gutter:stable] [&::-webkit-scrollbar-thumb]:rounded-full
+                   [&::-webkit-scrollbar-thumb]:bg-ink-300 [&::-webkit-scrollbar]:w-3
+                   lg:grid lg:grid-cols-2 lg:content-start lg:items-start"
       >
-        <SegmentArt asset={segment.asset} className="w-full" />
+        {/* `shrink-0`: the 4:3 frame is §06's contract and must not be squashed
+            to make a long segment fit — that is what the scroll is for. */}
+        <SegmentArt asset={segment.asset} className="w-full shrink-0" />
         <StoryText
           text={segment.body}
           size={size}

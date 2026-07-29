@@ -37,10 +37,18 @@ failure at boot, not a state a kid can reach at runtime.
 by request. They failed the decodability gate or moderation and are retained only
 as eval evidence (§7, warm.py).
 
-Deviations from §9, both because their dependencies land later:
+Both endpoints require a verified Clerk parent session (§9). Note what that does
+and does not mean here: a story is a **pool** row, not a per-family artifact —
+the same warm story is served to every child at that stage — so there is no
+owner to scope `GET /api/stories/{id}` to beyond "is authenticated". §9's
+"owner-scoped" is satisfied by the routes that DO carry ownership: a story only
+enters a child's record through `POST /api/readings`, which resolves `kid_id`
+through `auth.owned_kid`. The `rejected` filter below is the real content
+boundary on this module and it is not a matter of who is asking.
+
+Deviation from §9, because its dependency landed later:
 - The body is `{stage_id, theme_id_or_slug}` rather than `{kid_id, theme_id}`;
-  `kids` arrives in Phase 5, at which point kid_id → stage_id is one lookup.
-- §9 marks `GET /api/stories/{id}` owner-scoped; Clerk lands in Phase 6.
+  the stage is passed directly rather than looked up from a kid (DEVIATIONS 4.7).
 """
 
 from __future__ import annotations
@@ -55,6 +63,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from storyforge.auth import Principal, require_parent
 from storyforge.db import get_session
 
 router = APIRouter(tags=["stories"])
@@ -116,15 +125,21 @@ class _SlidingWindowLimiter:
 limiter = _SlidingWindowLimiter(RATE_LIMIT_PER_MINUTE, RATE_LIMIT_WINDOW_S)
 
 
-def _rate_limit_key(request: Request) -> str:
+def _rate_limit_key(request: Request, principal: Principal) -> str:
     """Identify the caller.
 
-    §9 says per *user*; users arrive with Clerk in Phase 6 (§13). Until the JWT
-    dependency exists the closest honest stand-in is the client address, which
-    over-limits families behind one NAT and under-limits a client that rotates
-    addresses. Swap this for the Clerk user id, not the IP, the moment auth lands.
+    §9 says per *user*, and now that Clerk verifies one, this keys on the Clerk
+    id rather than the client address — which is what DEVIATIONS 4.10 said would
+    change when auth landed. The IP was both too coarse (a whole family behind
+    one NAT shared a budget) and too weak (rotating addresses reset it); a
+    `clerk_id` cannot be spoofed without a Clerk-signed token.
+
+    Still in-process, so behind N workers the effective limit remains 10N/min —
+    that half of DEVIATIONS 4.10 needs a shared counter and is Phase 7's.
     """
-    return request.client.host if request.client else "anonymous"
+    if principal.clerk_id:
+        return f"user:{principal.clerk_id}"
+    return f"ip:{request.client.host if request.client else 'anonymous'}"
 
 
 # --- DTOs (§11.2) ------------------------------------------------------------
@@ -411,6 +426,7 @@ def _fallback(dto: StoryDTO, stage_id: int, theme_id: int, theme_slug: str) -> F
 async def request_story(
     body: StoryRequest,
     request: Request,
+    principal: Principal = Depends(require_parent),
     session: AsyncSession = Depends(get_session),
 ) -> StoryDTO:
     """Serve a story for (stage, theme) from the warm pool (§7).
@@ -421,7 +437,7 @@ async def request_story(
     (Phase 5). Flipping it here would drain the warm pool on every request,
     including previews that no child ever sees, and make `make warm` churn.
     """
-    retry_after = limiter.hit(_rate_limit_key(request))
+    retry_after = limiter.hit(_rate_limit_key(request, principal))
     if retry_after is not None:
         raise HTTPException(
             status_code=429,
@@ -468,6 +484,7 @@ async def request_story(
 @router.get("/api/stories/{story_id}", response_model=StoryDTO)
 async def get_story(
     story_id: int,
+    principal: Principal = Depends(require_parent),
     session: AsyncSession = Depends(get_session),
 ) -> StoryDTO:
     """Re-fetch a story by id (§9). Same DTO; does not touch `last_served_at`."""

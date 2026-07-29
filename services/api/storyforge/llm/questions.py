@@ -51,11 +51,39 @@ achieve this: the tiers only NARROW the closed list the model may choose from.
 the sound ("/sh/"), but a bare grapheme is not a word: 61 of the inventory's 78
 graphemes are OOV or a violation when tokenised, so a literal "/sh/" fails the
 gate at every stage. The target is therefore carried as a decodable CUE WORD in
-the payload — kid mode renders the sound chip from `cue_word`. Even then, "word"
-is undecodable at every stage in this inventory, so `PROMPT_FRAMES` is tried
-richest-first and the first frame that PASSES the gate wins. Below stage 7 that
-is the terse frame. Honest consequence, logged in DEVIATIONS: the gate stays
-where it is and the sentence gets shorter, never the reverse.
+the payload — kid mode renders the sound chip from `cue_word`. `PROMPT_FRAMES`
+is tried richest-first and the first frame that PASSES the gate wins.
+
+*The ladder has to be built out of words the decoder actually passes, or it is
+not a ladder.* The first version was written from English rather than from the
+inventory, and every rung above the floor contained "word" or "one" — "word" is
+undecodable at every stage 1-12 and "one" is not a sight word until stage 12,
+so three of the four rungs were unreachable code and all 28 live prompts were
+the bare cue, `Tap: get.` That is worse than terse: `get` is chosen by
+`_cue_index` *specifically so it cannot be one of the options*, so the only
+sentence the child could read told them to tap a word that is not on the
+screen. Nothing else on the question screen says what to do (§11.3 wants "tap
+the word that says /sh/ip"; the sound chip is suppressed, DEVIATIONS 5.23).
+
+The rungs below are each the richest sentence writable from the CUMULATIVE
+inventory at the stage named beside them — every one measured against the gate,
+not guessed:
+
+    8-12  "Tap the one that starts with the same sound as {cue}."  ("sound" @8)
+    7     "Tap the one that starts like {cue}."                    ("one"/"starts" @7)
+    5-6   "Tap it if it begins like {cue}."                        ("like" @5)
+    4     "Tap it if it begins as {cue}."                          ("begins"/"as" @4)
+    2-3   "Tap it. Hint: {cue}."                                   ("hint" @2)
+    1     "Tap it: {cue}."
+
+Stages 2-3 get no comparison at all, and that is a fact about the inventory,
+not a choice: every similarity word in English that a child could read here —
+`as`, `like`, `same`, `alike` — is stage 4 or later, and the one stage-3
+candidate (`twin`) claims the options are IDENTICAL to the cue, which is a
+false instruction. `Hint:` at least labels the cue as a hint rather than as the
+target. Stage 1's inventory is nine consonants and one vowel; `Tap it:` is the
+whole of what it can say. Honest consequence, logged in DEVIATIONS: the gate
+stays where it is and the sentence gets shorter, never the reverse.
 
 **`target_grapheme` is answer-key material and lives in `answer`, never in
 `payload`.** `check_tap_word` guarantees that exactly one option starts with the
@@ -123,11 +151,20 @@ QUESTION_OPENERS = (
     "Did", "Was", "Is", "Can", "Will", "Who", "What", "Where", "When", "Why", "How",
 )
 
-# Tried in order; the first one that clears the gate at this stage is used.
+# Tried in order; the first one that clears the gate at this stage is used. Each
+# rung is the richest sentence the stage's own inventory can spell — see the
+# module docstring for which word gates which rung, and `test_questions.py`
+# for the assertion that every rung is reachable at some stage (a frame no
+# stage can read is dead code, which is exactly how this shipped last time).
 PROMPT_FRAMES = (
-    "Tap the word that starts like {cue}.",
+    "Tap the one that starts with the same sound as {cue}.",
     "Tap the one that starts like {cue}.",
-    "Tap the one like {cue}.",
+    "Tap it if it begins like {cue}.",
+    "Tap it if it begins as {cue}.",
+    "Tap it. Hint: {cue}.",
+    "Tap it: {cue}.",
+    # Last resort. Kept because a cue word is chosen per story and a frame that
+    # fails for one cue must not cost the child the whole phonics screen.
     "Tap: {cue}.",
 )
 

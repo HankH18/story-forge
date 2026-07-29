@@ -7,63 +7,262 @@
 # generation and the moderation node stand behind it — so it does not need to be
 # the paranoid one.
 #
-# LIMITATION: this is a seed list, not a vendored comprehensive one. §5.4 calls
-# for "vendored list + manual additions". Expand before any public deploy.
+# HISTORY: this began as a 56-word seed. A stage-coverage agent found `shit` in
+# PERMITTED WORDS; a sweep then found 42 profane or inappropriate words reaching
+# the generation prompt. §5.4's "expand before any public deploy" was not
+# optional. Categories below are deliberately over-inclusive: exact-match means
+# over-blocking costs a few innocent words (`crack` an egg, `hang` a coat),
+# while under-blocking puts them in a five-year-old's reading vocabulary. §6 is
+# explicit that those costs are not symmetric.
+
+# --- profanity ---
+fuck
+fucking
+fucked
+fucker
+shit
+shitty
+crap
+crappy
+piss
+pissed
+damn
+damned
+hell
+bloody
+bugger
+arse
+ass
+asshole
+bastard
+bitch
+bitchy
+cunt
+twat
+wanker
+prick
+dick
+cock
+knob
+git
+tosser
+bollocks
+
+# --- sexual ---
+sex
+sexy
+sexual
+nude
+naked
+porn
+porno
+erotic
+horny
+slut
+whore
+hooker
+breast
+breasts
+boob
+boobs
+tit
+tits
+nipple
+penis
+vagina
+anus
+genital
+sperm
+semen
+orgasm
+masturbate
+rape
+raped
+rapist
+molest
+incest
+pedophile
+
+# --- bodily ---
+poo
+poop
+pee
+piss
+fart
+farted
+farting
+turd
+snot
+puke
+puked
+vomit
+vomited
+barf
+barfed
+bum
+butt
+buttock
+arsehole
+diarrhea
+constipated
+urine
+feces
+
+# --- substances ---
+drug
+drugs
+drunk
+drunken
+booze
+beer
+wine
+vodka
+gin
+rum
+whisky
+whiskey
+alcohol
+cigarette
+cigarettes
+smoking
+tobacco
+vape
+weed
+pot
+dope
+crack
+meth
+cocaine
+coke
+heroin
+opium
+pill
+pills
+high
+stoned
+addict
+addiction
 
 # --- violence / weapons ---
 kill
 killed
 kills
 killing
+murder
+murdered
+murderer
 gun
 guns
-shot
 shoot
+shot
 shooting
 knife
 knives
+stab
+stabbed
+blade
+sword
+bomb
+bombed
+explode
 blood
 bloody
+wound
+wounded
+injure
+injured
+hurt
+beat
+beaten
+punch
+punched
+slap
+slapped
+kick
+kicked
+choke
+choked
+strangle
+hang
+hanged
+noose
 dead
 death
 die
 died
 dying
-murder
+corpse
+coffin
+grave
+bury
+buried
+funeral
 war
 weapon
 weapons
 attack
+attacked
 violent
 violence
-hurt
-wound
-
-# --- adult / substances ---
-sex
-sexy
-drug
-drugs
-drunk
-beer
-wine
-alcohol
-cigarette
-smoking
-tobacco
-
-# --- distress ---
-suicide
+fight
+fighting
+torture
 abuse
-hate
-kidnap
+abused
 victim
-corpse
-grave
+kidnap
+kidnapped
+hostage
+suicide
 
-# --- proper-noun fragments that leak in from an adult corpus ---
-# Not inappropriate, just wrong: these are pieces of place and brand names
-# (e.g. "san" from San Francisco) that a frequency list surfaces as common words.
+# --- cruelty and appearance-based insults ---
+hate
+hates
+hated
+stupid
+idiot
+idiotic
+dumb
+moron
+dummy
+loser
+freak
+ugly
+fat
+obese
+skinny
+weird
+creep
+creepy
+nasty
+evil
+cruel
+mean
+bully
+bullied
+bullying
+tease
+teased
+mock
+mocked
+shame
+ashamed
+worthless
+jerk
+jerks
+brat
+pig
+rat
+swine
+scum
+disgusting
+revolting
+repulsive
+pathetic
+
+# --- proper-noun fragments from an adult corpus ---
+# Not inappropriate, just wrong: pieces of place and brand names that a
+# frequency list surfaces as common words.
 san
 los
 las
@@ -71,3 +270,4 @@ del
 inc
 llc
 ltd
+corp
