@@ -280,13 +280,43 @@ cases, including the subtle "Sam ran and ran but the thing got Sam. The end."
 specifically that must not read as approval, so an unparseable verdict returns
 `approved=False`. The warm pool absorbs the rejection; a child sees nothing.
 
-**3.12 — Langfuse tracing is NOT implemented.**
-§15 requires a trace per pipeline run with a span per node. No Langfuse
-credentials were available, so building it would mean shipping an integration
-that has never once been observed working — exactly the false green this project
-avoids elsewhere. `stories.langfuse_trace_id` is reserved and `gen_meta` already
-carries per-attempt tokens, cost, rewrite depth and the moderation verdict, so
-§14's metrics are available without it. **Outstanding for Phase 7.**
+**3.12 — Langfuse tracing IS implemented (superseded).**
+This entry originally recorded Langfuse as deliberately unbuilt for want of
+credentials. Credentials arrived; §15 is now wired — see 4.17 below.
+
+**4.17 — Langfuse §15 tracing: one trace per run, one span per §7 node.**
+`storyforge/obs.py`. GENERATING / REWRITING / MODERATING are typed as
+generations (they carry model, usage and cost); VALIDATING is a plain span,
+because typing the pure validator as a generation would invent a $0 model call
+in every cost breakdown. `langfuse_trace_id` is persisted on the story row.
+
+Three properties were proven live rather than assumed:
+- **Traces were fetched back** through `client.api.trace.get`, not inferred from
+  the SDK not throwing. A rewrite trace shows the full ladder — GENERATING
+  $0.0061 → VALIDATING (WARNING, decodability 0.893, violations
+  `['liked','come','good']`) → REWRITING $0.0054 → VALIDATING → MODERATING.
+  That is §17 demo item 4, visible.
+- **The no-op path works**: with the keys blanked, generation runs normally and
+  `langfuse_trace_id` is NULL. The repo still works for anyone without Langfuse.
+- **Flush-on-exit works**: a subprocess that opens a span and exits without an
+  explicit flush still landed its trace. This is what covers short-lived CLIs
+  like `make eval-smoke`, and is the usual way this integration appears to work
+  while silently dropping everything.
+
+Tracing can never break generation: a hostile client that raises from every
+entry point is in the test suite, and the pipeline still returns a passing
+result. A genuine `ValueError` from the generation call still propagates —
+swallowing tracing failures must not swallow real ones.
+
+**Ingestion lag is real.** A fetch ~25s after a run returned 2 of 4 observations
+and an understated total cost. Retry until the observation set is complete before
+judging a trace.
+
+**4.18 — ENRICHING (§7) is untraced.**
+Question generation and scene tagging run in `warm.py` after `run_pipeline`
+returns, so they fall outside the trace context. Wiring them needs
+`trace_context=` plumbing into `llm/questions.py` and `llm/scene_tags.py`. §15's
+four state-machine nodes are complete; this is the gap.
 
 ---
 
