@@ -1192,3 +1192,290 @@ the whole context is `data/`, `services/`, `.dockerignore`, `.gitkeep` — 5.2 M
 with no `.env`, no `.venv`, no `node_modules`, no `.git`, no `dist`, no
 `__pycache__` and no test tree. The finished image was swept again for
 secret-shaped strings and for any file named `.env`: both empty.
+
+**7.14 — The tap-a-word CUE WORD could point at an option by shape, and did.
+The rule is now "no whole-word containment, in either direction, with ANY
+option".**
+Live row 4392 (stage 3, warm): prompt `Tap it. Hint: the.`, options
+`["sat", "in", "then"]`, answer `then`. `the` is a prefix of exactly one option,
+so the whole question is solvable by matching three letters — no phoneme, no
+grapheme, no sound. §8 then credits `th` mastery evidence for that tap, and that
+evidence feeds promotion: the same class of defect as 6.7's forgeable promotion
+signal, arriving by a different road.
+
+The prefix case is not the general rule and patching it would have missed the
+other live instance. Row 696 carried cue `win` against options
+`["in", "had", "went"]` (answer `went`) — `in` is a *suffix* of the cue, so the
+shape match points at a WRONG option and steers the child away from the answer
+they were meant to sound out. A cue that identifies the wrong option is the same
+defect wearing the opposite sign.
+
+The rule adopted, stated as a property rather than a case list: **the cue may
+share the target grapheme with an option and nothing else. It must stand in no
+whole-word containment relation — `cue in option` or `option in cue`, which
+subsumes identity, prefix and suffix in both directions — with ANY option.**
+
+Why containment and not "any shared letters": the grapheme itself is the signal
+the question is *for*. `check_tap_word` already proves exactly one option starts
+with the target grapheme and no distractor uses it anywhere, so a child matching
+`sh` is doing the phonics the screen is asking for. What a whole-word match adds
+is a way to answer *without* segmenting anything — recognising the chunk `the`
+inside `then` needs no knowledge that `th` says /θ/. So the line is drawn at the
+word boundary: sharing the grapheme is the question; containing the whole cue is
+the answer key.
+
+Enforced in two places on purpose, mirroring the node's existing discipline
+(`llm/questions.py`):
+- `sound_targets` now picks the cue from a RANKED candidate list per grapheme
+  and takes the first one that conflicts with no word in that sound's closed
+  offer list (`onset_words + clean_words`). A grapheme with no safe cue is
+  dropped from the menu, exactly as a grapheme with no cue at all already was.
+- `check_tap_word` re-proves it against the three options the model actually
+  chose. The narrowing in `sound_targets` is a menu; a guarantee that only lives
+  in the prompt is a suggestion (the same argument the `current_stage_word`
+  scope check is already written under).
+
+`_cue_index` therefore returns `grapheme -> [candidates]` (shortest, then most
+frequent, capped at `MAX_CUE_CANDIDATES`) instead of one word. Nothing about the
+gate, the "exactly one correct option" proof, or the §8 tiering moves.
+
+**7.15 — The eight defective rows in the live pool were REPAIRED IN PLACE, not
+deleted, and one of them carries mastery evidence that is now unreliable.**
+`warm.repair_leaky_cues` re-derives the cue and its prompt from
+`llm/questions` — the same pure functions the node uses, so a repaired row is
+indistinguishable from a freshly generated one — and writes `payload.cue_word`
+and `prompt`. `options` and `answer` are never touched, so no recorded answer
+changes meaning and no `answers` row is orphaned. That is deliberate:
+`answers.question_id` is `ON DELETE CASCADE`, an agent has already destroyed a
+`MASTERY_QTYPES` evidence row this way, and there is no path back from a deleted
+answer. It sweeps EVERY status, not just servable ones, because the defect is a
+property of the row's content and the one answered instance sits on a `rejected`
+story. Idempotent: a second run selects nothing.
+
+The sweep found **8** of 55 `tap_word` rows leaking (14.5%):
+- 7 warm, all stage 3, cue `the` against the option `then`, pointing AT the
+  correct answer. **0 answers recorded against any of them** — the pool was
+  warmed after the last child session, so no child has met one.
+- 1 (`q696`, story 8, `rejected`) with cue `win` against the option `in`,
+  pointing at a WRONG option. **6 answers recorded**, 4 marked correct, from
+  two kids (2622 Priya, 2665 Noah, both stage 3).
+
+**Said plainly: the six answers on q696 are not trustworthy evidence about
+whether those two children can decode `w`.** The question they were shown
+contained a shape cue pointing away from the answer, so a wrong answer may
+record a defect in the question rather than a gap in the child, and the
+`w|W / e|EH / n|N / t|T` counters on both kids (`went`'s alignment) are
+downstream of it. Nothing has been rewritten to hide that: the `answers` rows,
+their `correct` flags and the `gpc_stats` counters are all exactly as the app
+recorded them. `gpc_stats` is a running counter with no per-answer provenance,
+so "subtract the tainted evidence" is not available without recomputing every
+kid's history from `answers`, which is a larger change than this job and would
+itself be a silent rewrite of a child's record. The honest statement is the one
+recorded here rather than a quiet correction.
+
+**7.16 — The four `test_stories_api.py` tests now own their fixture rows, and
+the assertions were strengthened rather than relaxed.**
+All four read the live pool for their *expected values*, so `make warm` broke
+them — which means they were never deterministic, only lucky. The pattern that
+failed is the same one in each: an assertion about the pool (`space` has no
+stories; stage 4+ has never been warmed; the served stage-1 story has story
+words) written as though the pool were a fixture.
+
+They now create their own themes and stories and assert about *those ids*. The
+fallback tests place their fixtures in an unoccupied stage band computed as
+`max(servable stage) + 1`. The database is still read — but only to *place* the
+fixture in empty space, never to derive an expected value, which is the exact
+distinction that failed before. `_SERVE_SQL` orders `stage_id DESC` first, so a
+story alone at the top of the ladder is the deterministic winner for any request
+at or above its stage no matter what else is in the pool.
+
+Each edit went through the `justify-test-edit` gate; verdicts are recorded at the
+edit sites. §7's ladder is checked harder than before, not less: the
+`other_theme` test now also owns the lower-stage same-theme story it must
+*decline* (rung 2 before rung 3), and the `lower_stage` test now owns a story
+ABOVE the requested stage and proves it is never served — STATE invariant 6,
+which nothing previously tested with data it controlled.
+
+**7.17 — `test_stories_api.py::_pool` now uses `SERVABLE_STATUSES` (closes
+6.14).**
+It filtered `status='warm'` while `_SERVE_SQL` serves `warm|complete`, so any
+stage-1 story flipping to `complete` broke `test_least_recently_served_rotation`.
+Imported from `api.stories` rather than re-spelled, so the test cannot drift from
+the endpoint again.
+
+**7.18 — `test_a_real_node_produced_question_never_ships_its_answer_key` keeps
+its live sweep AND gains rows it owns.**
+This test caught 7.14, which is the argument for not converting it into a pure
+fixture test: its strength is that it reads whatever the node actually wrote into
+the real pool. Its weakness was `assert rows` — on a database where `make warm`
+has not run it fails for a reason that has nothing to do with the property. It
+now builds its own `tap_word` rows by calling `check_tap_word` (the node's real
+writer, not a hand-typed payload), so the sweep always has data, and then sweeps
+its own rows *and* every live one.
+
+The leak assertion was widened from `correct.startswith(value)` to the full
+7.14 containment rule in both directions, and to wrong-option pointing as well
+as correct-option pointing. Under the old, prefix-only assertion `q696`'s
+`win`/`in` suffix leak was invisible.
+
+**7.19 — The generator fix was proved by sabotage, not by assertion.**
+`test_questions.py::test_the_cue_word_never_points_at_an_option_by_shape` and
+`test_a_cue_that_contains_an_option_is_rejected` were both run against the
+pre-fix generator by reverting the fix in place: the first goes red with
+`cue 'the' is a prefix of option 'then'` — the live row 4392 reproduced from a
+unit test — and the second goes red because the old `check_tap_word` accepts the
+question. Both are green after. A test that has never been seen to fail is a
+test about nothing.
+
+**7.20 — The kids orphaned by `ab5a866f52fc` are ADOPTED by a follow-up
+migration, not left NULL.**
+`ab5a866f52fc:96` runs `UPDATE kids SET parent_id = NULL WHERE parent_id IS NOT
+NULL` before adding the FK, and its own note defends that as the confidentiality-
+safe direction: `auth.owned_kid` matches `parent_id = :caller`, so NULL is
+visible to nobody, whereas guessing an owner hands one family another family's
+children. That reasoning is correct and this migration does not undo it. What
+nothing accounted for is availability: after it ran, **all five readers in this
+database were owned by nobody**, `GET /api/kids` returned `[]` for every real
+Clerk account (verified live against an enforced API with a real RS256 token),
+the parent home said "No readers yet", and every reading, `gpc_stats` row and
+promotion decision from Phase 5 sat behind a row no principal could reach. That
+is what let C1 through: with no kid to resolve, kid mode fell back to a constant.
+
+The companion migration adopts orphans, and it will not guess. It resolves an
+owner in one of two ways and refuses to run if neither is available:
+
+1. `STORYFORGE_ADOPT_PARENT_CLERK_ID` names the account explicitly; or
+2. there is exactly ONE candidate user, where `demo_local_parent` — §18's fixed
+   bypass principal, which is not a person — is never a candidate.
+
+Anything else (no candidate, or two real accounts and no override) **raises**.
+A migration that cannot tell whose children these are must stop and say so: the
+alternative is either a silent re-orphaning, which is the defect it exists to
+fix, or a silent misassignment, which is worse than the defect. On a fresh
+database `kids` is empty and the whole thing is a no-op, so a first deploy never
+sees it.
+
+The downgrade is a no-op on purpose. Ownership cannot be un-inferred, and
+re-NULLing every `parent_id` on the way down would destroy real data that a
+later upgrade could not reconstruct.
+
+**7.21 — `POST /api/stories/request` takes `kid_id`. The stage is derived from
+the child, server-side; `stage_id` survives only as an admin preview knob.**
+§9 specifies `POST /api/stories/request {kid_id, theme_id}` and DEVIATIONS 4.7
+deferred that to a client-supplied `stage_id` because `kids` had no owner yet.
+It was never reinstated, so the request that decides what a five-year-old reads
+was anchored on a number the client chose. `stories.py:19-24` called the
+`stage_id <= :stage` filter "a child-safety bound, not an optimisation"; a bound
+relative to an untrusted number is not a bound. Reproduced end to end with no
+tooling: `/read/1648?stage=12` served a **13.0%-decodable** story to a stage-1
+reader (story 19, 40 violations in 46 scored words).
+
+The stage now comes from `auth.owned_kid(kid_id).stage_id` — the same ownership
+edge every other kid route uses, so an id belonging to another family is the
+same 404 a nonexistent one gets, and §0's posture toward the LLM is now the
+posture toward the client.
+
+**`stage_id` is refused for a parent and accepted only from an admin, and never
+together with `kid_id`.** Two reasons it is kept at all rather than deleted.
+First, it is the admin portal's preview path (§11's "generate cold story") and
+the eval/QA path, and both need to ask for a stage with no child in the room.
+Second — the honest one — it grants an admin nothing they do not already have:
+`GET /api/stories/{id}` has always served any servable story to any
+authenticated parent regardless of stage, because a story is a pool row and not
+a per-family artifact (`stories.py:40-47`). Removing `stage_id` while leaving
+that route open would look like a fix and be theatre.
+
+So the residual is stated plainly rather than implied: **the raw
+`POST /api/stories/request {"stage_id": 12}` repro still returns a stage-5 story
+to an ADMIN token.** It returns 422 to a parent token, it is unreachable from
+any child-facing path (7.23 removed `?stage=`), and 7.22 stops it being attached
+to a child. Moving the preview to `/api/admin/stories/preview` and closing
+`GET /api/stories/{id}` to a `kid_id` scope is the follow-up; both need
+`tests/test_stories_api.py`, which another agent held this session.
+
+**7.22 — `POST /api/readings` refuses a story above the reader's stage.**
+`stories.py:40-47` argued that ownership binds later, at `POST /api/readings`.
+It does bind the *kid* there, through `owned_kid` — but nothing there ever
+compared the story to the child: a stage-1 kid plus a stage-5 story filed a
+`201`. That row then feeds §8, whose "5 distinct stories completed at current
+stage" counts `readings.stage_id`, which is stamped from the kid (6.7's guard
+counting the right rows for the wrong stories).
+
+`story.stage_id <= kid.stage_id` is now checked before the insert, 422 with both
+numbers named. It cannot fire on a legitimate session: §7's ladder never climbs,
+so a story served for this child is at or below their stage by construction.
+It is a second gate on a path the first gate already covers, which is the point
+— C2 existed because there was exactly one gate and it was made of client input.
+
+**7.23 — A served story is re-validated against the READER's own stage before it
+leaves the server.**
+Defence in depth, and the specific property C2 lacked: a story that is 13%
+decodable *for the child receiving it* should be inexpressible, not merely
+unlikely. `validate_text` is pure and costs a median **0.47 ms** on a 76-word
+stage-5 story (50 runs, warm lexicon), against §1's 300 ms warm-serve budget, so
+there is no reason to trust the pipeline's stored verdict at serve time when the
+gate itself can be re-run.
+
+The check re-uses the pipeline's own inputs — `mastered_ids(stage)`, the
+cumulative `sight_words` at that stage, and the story's persisted
+`story_words` — so it is the §7 gate, not a second opinion that could drift.
+A story below `DECODABILITY_GATE` is excluded and the pick is retried (bounded);
+if nothing survives, 503, the same answer an empty pool already gets. It does
+not fire on the current pool: all **52** servable stories score ≥95% at their own
+stage and at every higher stage, which is the §5.7c monotonicity property
+measured rather than assumed.
+
+**7.24 — Kid mode has no default stage, no `?stage=`, and an unresolvable reader
+routes to the ADULT.**
+`DEFAULT_STAGE = 4` is deleted. Its comment said it "only applies when the parent
+has no kids at all"; after 7.20's migration that was the state of every account
+in the database, and the fallback was silent — the theme picker merely dropped
+the "hello {name}" greeting, which nobody reads as "this child's curriculum
+position has been discarded". A constant that silently substitutes a stage is the
+anti-pattern: not knowing a child's stage must never resolve to "serve stage 4
+anyway".
+
+§01 rules out the two obvious replacements. A child-facing error screen is
+forbidden, and guessing is what caused this. The third option is the honest one:
+**if there is no reader, there is no reading session.** `/read/:kidId` now shows
+the printer while the reader resolves, and if none resolves it navigates to
+`/app` — the adult's own screen, which knows how to say "no readers yet" and how
+to add one. A child never sees a failure; an adult sees the actual problem on
+the surface built to explain it.
+
+This also closes the audit's SUSPECTED render/effect race: `stage` used to be
+computed during render while `resolveKid` was awaited in an effect, so a child
+who tapped a theme before `GET /api/kids` returned got the default. There is now
+no stage to compute and no theme to tap until the reader exists.
+
+`?stage=` is removed outright. It was the address-bar half of C2 and it has no
+legitimate caller: the stage is the child's, and the child is in the URL.
+
+**7.25 — `/api/health` and every HTTP response disclose `DEMO_BYPASS_AUTH`.**
+The audit's finding 0: with the bypass on, **nothing in any HTTP response said
+so**. The banner (`auth.py:434-438, 718-724`) is a server log line, and health
+reported `database`, `decoder`, `anthropic` and stayed silent. Two agents drew
+opposite conclusions about whether auth was enforced, and a browser session was
+driven against an unauthenticated API for a whole phase. 6.16 recorded that
+exact failure one phase earlier and the fix applied then (make the SPA refuse to
+boot without a Clerk key) could not detect it, because the SPA's key was fine.
+
+`GET /api/health` now carries `demo_bypass_auth` and `principal` at the top
+level, and **every** response — including 401s and 404s, from any route — carries
+`X-Storyforge-Auth: demo-bypass` or `enforced`. One curl of anything answers "is
+this API checking anything?", which is the question that was unanswerable.
+
+The §18 startup guard is untouched, and the health `status` deliberately stays
+`ok` under the bypass. `status` is the aggregate of the §15 component checks
+(DB, CMUdict, Anthropic) that `docs/DEPLOY.md` and the Dockerfile HEALTHCHECK
+read; overloading it with a configuration verdict would change what "error"
+means for two existing readers in order to say something a dedicated field says
+better.
+
+**7.26 — The Vite dev proxy target is an environment override.**
+`vite.config.ts` hard-coded `http://localhost:8000`, so verifying a fix against
+an API with the bypass OFF meant editing the config, and the alternative — using
+whatever happens to be on `:8000` — is precisely how the audit's finding 0
+happened. `VITE_API_PROXY_TARGET` (and `VITE_DEV_PORT` / `VITE_PREVIEW_PORT`, so
+two dev servers can coexist) default to the previous values, so `make dev` is
+unchanged.

@@ -37,22 +37,45 @@ failure at boot, not a state a kid can reach at runtime.
 by request. They failed the decodability gate or moderation and are retained only
 as eval evidence (§7, warm.py).
 
-Both endpoints require a verified Clerk parent session (§9). Note what that does
-and does not mean here: a story is a **pool** row, not a per-family artifact —
-the same warm story is served to every child at that stage — so there is no
-owner to scope `GET /api/stories/{id}` to beyond "is authenticated". §9's
-"owner-scoped" is satisfied by the routes that DO carry ownership: a story only
-enters a child's record through `POST /api/readings`, which resolves `kid_id`
-through `auth.owned_kid`. The `rejected` filter below is the real content
-boundary on this module and it is not a matter of who is asking.
+**The stage comes from the CHILD, never from the caller** (DEVIATIONS 7.21).
+The body is §9's `{kid_id, theme_id}`: `kid_id` is resolved through
+`auth.owned_kid`, so the anchor for every decision above is a row this caller
+owns, and an id belonging to another family is the same 404 a nonexistent one
+gets. This was not always true. Until the Phase 6 audit the body carried a raw
+`stage_id` (DEVIATIONS 4.7, deferred when `kids` had no owner yet), and the
+paragraph above called `stage_id <= :stage` "a child-safety bound" while the
+number it bounded was chosen by the client. `/read/1648?stage=12` served a
+stage-1 reader a story measuring **13.0% decodable at their own stage**. §0 says
+the LLM is untrusted and a pure function is the gate; the client gets exactly the
+same treatment.
 
-Deviation from §9, because its dependency landed later:
-- The body is `{stage_id, theme_id_or_slug}` rather than `{kid_id, theme_id}`;
-  the stage is passed directly rather than looked up from a kid (DEVIATIONS 4.7).
+`stage_id` survives as an **admin-only** preview knob — §11's admin portal and
+the eval path both need to ask for a stage with no child in the room — and may
+never be combined with `kid_id`. It grants an admin nothing new: `GET
+/api/stories/{id}` below serves any servable story to any authenticated parent
+regardless of stage, because a story is a pool row and not a per-family artifact.
+
+Both endpoints require a verified Clerk parent session (§9). Note what that does
+and does not mean here: the same warm story is served to every child at that
+stage, so there is no owner to scope `GET /api/stories/{id}` to beyond "is
+authenticated". §9's "owner-scoped" is satisfied by the routes that DO carry
+ownership: a story only enters a child's record through `POST /api/readings`,
+which resolves `kid_id` through `auth.owned_kid` **and now also refuses a story
+above that kid's stage** (DEVIATIONS 7.22). The `rejected` filter below is the
+other content boundary on this module and it is not a matter of who is asking.
+
+**Defence in depth.** The story picked below is re-validated against the
+reader's own stage before it is returned (`_is_decodable_for`, DEVIATIONS 7.23).
+The pipeline already gated it at generation time, and §5.7c monotonicity says a
+story decodable at stage N stays decodable above it — so this should never fire.
+It exists because C2 existed: a story that is 13% decodable *for the child
+receiving it* should be inexpressible, not merely unlikely, and `validate_text`
+is pure and costs ~0.5 ms.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import defaultdict, deque
@@ -63,8 +86,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from storyforge.auth import Principal, require_parent
+from storyforge.auth import Principal, owned_kid, require_parent
 from storyforge.db import get_session
+from storyforge.decoder import mastered_ids, validate_text
+
+# Imported, not restated: §1's 95% is one number and the serve-time re-check
+# must be the same gate the pipeline applied, not a second opinion that can
+# drift away from it.
+from storyforge.pipeline import DECODABILITY_GATE
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["stories"])
 
@@ -75,6 +106,12 @@ SERVABLE_STATUSES = ("warm", "complete")
 
 RATE_LIMIT_PER_MINUTE = 10  # §9
 RATE_LIMIT_WINDOW_S = 60.0
+
+#: How many times the pick is retried when the story it returns fails the
+#: serve-time decodability re-check. Bounded because each attempt is a real
+#: `UPDATE … RETURNING`; three is enough to step over an isolated bad row and
+#: small enough that a systematically broken pool fails fast and loudly.
+SERVE_ATTEMPTS = 3
 
 
 # --- rate limiting -----------------------------------------------------------
@@ -234,7 +271,21 @@ class StoryDTO(BaseModel):
 
 
 class StoryRequest(BaseModel):
-    stage_id: int = Field(ge=1, le=12)
+    """§9 `POST /api/stories/request {kid_id, theme_id}`.
+
+    `kid_id` is the anchor and the only one a parent may use. The stage is read
+    from the kid row after `auth.owned_kid` has proved the caller owns it, so
+    there is no number in this body that decides what a child reads.
+
+    `stage_id` is the admin preview knob (module docstring, DEVIATIONS 7.21).
+    It is `None` for every parent request and is refused outright for one, which
+    is checked in the handler rather than here: a 422 that says "stage_id is
+    admin-only" is a better answer than a schema that pretends the field does
+    not exist.
+    """
+
+    kid_id: int | None = Field(default=None, ge=1)
+    stage_id: int | None = Field(default=None, ge=1, le=12)
     # Kid mode holds slugs (`GET /api/themes`); the admin portal holds ids.
     theme_id_or_slug: int | str
 
@@ -243,12 +294,17 @@ class StoryRequest(BaseModel):
 # One statement so the pick and the stamp cannot interleave. SKIP LOCKED means
 # two concurrent requests take two different stories instead of both taking the
 # least-recently-served one.
+#
+# `:excluded` carries the ids a previous attempt served and then rejected at the
+# serve-time decodability re-check. It is never empty (the caller seeds it with
+# a sentinel), so Postgres always knows the array's element type.
 _SERVE_SQL = text(
     """
     UPDATE stories SET last_served_at = now()
     WHERE id = (
         SELECT id FROM stories
         WHERE status = ANY(:statuses) AND stage_id <= :stage
+          AND NOT (id = ANY(:excluded))
         ORDER BY stage_id DESC,                  -- never above; nearest below
                  (theme_id = :theme) DESC,       -- requested theme first
                  last_served_at ASC NULLS FIRST, -- least recently served (§7)
@@ -421,6 +477,80 @@ def _fallback(dto: StoryDTO, stage_id: int, theme_id: int, theme_slug: str) -> F
     )
 
 
+async def _resolve_stage(
+    session: AsyncSession, principal: Principal, body: StoryRequest
+) -> int:
+    """The stage this request is anchored to (§9, DEVIATIONS 7.21).
+
+    Exactly one anchor is legal per request, and the parent-facing one is the
+    child. `owned_kid` is what makes it an anchor rather than another number the
+    caller typed: it 404s for a kid this caller does not own, in a body
+    byte-identical to the one a nonexistent kid gets.
+    """
+    if body.kid_id is not None and body.stage_id is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "send kid_id or stage_id, not both — a child's stage is a fact about "
+                "the child, so there is nothing for a second opinion to mean (§9)"
+            ),
+        )
+
+    if body.kid_id is not None:
+        kid = await owned_kid(session, principal, body.kid_id)
+        return int(kid.stage_id)
+
+    if body.stage_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "kid_id is required (§9) — the stage a story is written for is read "
+                "from the reader, never taken from the request"
+            ),
+        )
+
+    if not principal.is_admin:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "stage_id is an admin preview field; send kid_id instead (§9). A "
+                "client-chosen stage decides what a child reads, so it is not a "
+                "client-chosen number."
+            ),
+        )
+    return int(body.stage_id)
+
+
+async def _sight_words(session: AsyncSession, stage_id: int) -> frozenset[str]:
+    """Cumulative sight-word allowlist at this stage (§4) — same query as §5.6."""
+    rows = await session.execute(
+        text("SELECT word FROM sight_words WHERE stage_id <= :s"), {"s": stage_id}
+    )
+    return frozenset(r[0] for r in rows)
+
+
+def _is_decodable_for(dto: StoryDTO, stage_id: int, sight: frozenset[str]) -> float:
+    """Re-run §5's gate on the story about to be served, at the READER's stage.
+
+    Not the story's own stage: the question a serve-time check has to answer is
+    "can the child in front of this screen read this", which is what nothing in
+    the request path ever asked (DEVIATIONS 7.23). The inputs are the pipeline's
+    — `mastered_ids`, the cumulative sight words, and the story's own persisted
+    story words, which are exempt from the denominator by §5.1 because they ship
+    as picture chips with audio.
+    """
+    body = " ".join(seg.body for seg in dto.segments).strip()
+    if not body:
+        return 0.0
+    report = validate_text(
+        body,
+        mastered_ids(stage_id),
+        sight,
+        frozenset(w.lower() for w in dto.story_words),
+    )
+    return report.decodability
+
+
 # --- endpoints ---------------------------------------------------------------
 @router.post("/api/stories/request", response_model=StoryDTO)
 async def request_story(
@@ -429,7 +559,7 @@ async def request_story(
     principal: Principal = Depends(require_parent),
     session: AsyncSession = Depends(get_session),
 ) -> StoryDTO:
-    """Serve a story for (stage, theme) from the warm pool (§7).
+    """Serve a story for this reader's (stage, theme) from the warm pool (§7).
 
     Least-recently-served wins; `last_served_at` is stamped as part of the same
     statement that picks the row. `status` is intentionally left alone: §8 defines
@@ -445,40 +575,79 @@ async def request_story(
             headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
         )
 
+    stage_id = await _resolve_stage(session, principal, body)
+
     stage = (
-        await session.execute(text("SELECT 1 FROM stages WHERE id = :s"), {"s": body.stage_id})
+        await session.execute(text("SELECT 1 FROM stages WHERE id = :s"), {"s": stage_id})
     ).first()
     if stage is None:
         raise HTTPException(
-            status_code=404, detail=f"stage {body.stage_id} not seeded — run `make seed`"
+            status_code=404, detail=f"stage {stage_id} not seeded — run `make seed`"
         )
     theme_id, theme_slug = await _resolve_theme(session, body.theme_id_or_slug)
+    sight = await _sight_words(session, stage_id)
 
-    served = (
-        await session.execute(
-            _SERVE_SQL,
-            {"statuses": list(SERVABLE_STATUSES), "stage": body.stage_id, "theme": theme_id},
+    # 0 is not a story id; it seeds the array so Postgres can type it, and it
+    # keeps the empty-exclusion case on the same code path as the rest.
+    excluded: list[int] = [0]
+    undecodable: list[tuple[int, float]] = []
+
+    for _attempt in range(SERVE_ATTEMPTS):
+        served = (
+            await session.execute(
+                _SERVE_SQL,
+                {
+                    "statuses": list(SERVABLE_STATUSES),
+                    "stage": stage_id,
+                    "theme": theme_id,
+                    "excluded": excluded,
+                },
+            )
+        ).first()
+        await session.commit()
+
+        if served is None:
+            break
+
+        dto = await _load_story(session, served.id)
+        if dto is None:  # pragma: no cover — deleted between the UPDATE and the read
+            raise HTTPException(status_code=503, detail="story vanished mid-request")
+
+        decodability = _is_decodable_for(dto, stage_id, sight)
+        if decodability < DECODABILITY_GATE:
+            # Should be unreachable: the pipeline gated this story at generation
+            # and §5.7c monotonicity carries the verdict upward. Loud, because
+            # reaching it means a row in the pool is not what `stories` says.
+            log.error(
+                "SERVE GATE: story %s measures %.3f decodable at stage %s (§1 needs "
+                "%.2f) — refusing to serve it and picking another",
+                dto.id,
+                decodability,
+                stage_id,
+                DECODABILITY_GATE,
+            )
+            undecodable.append((dto.id, decodability))
+            excluded.append(dto.id)
+            continue
+
+        dto.fallback = _fallback(dto, stage_id, theme_id, theme_slug)
+        return dto
+
+    # Not a kid-reachable state: either no non-rejected story exists at or below
+    # this stage anywhere in the database (`make warm` has never run), or every
+    # candidate failed the gate above. Fabricating a story, or serving one the
+    # gate rejected, would each be worse than saying so.
+    detail = (
+        f"no story available at or below stage {stage_id} — "
+        "the warm pool is empty, run `make warm`"
+    )
+    if undecodable:
+        detail = (
+            f"no story at or below stage {stage_id} passes §1's "
+            f"{DECODABILITY_GATE:.0%} gate for this reader; "
+            f"rejected {', '.join(f'{i} ({d:.1%})' for i, d in undecodable)}"
         )
-    ).first()
-    await session.commit()
-
-    if served is None:
-        # Not a kid-reachable state: it means no non-rejected story exists at or
-        # below this stage anywhere in the database, i.e. `make warm` has never
-        # run. Fabricating a story would be the one thing worse than saying so.
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"no story available at or below stage {body.stage_id} — "
-                "the warm pool is empty, run `make warm`"
-            ),
-        )
-
-    dto = await _load_story(session, served.id)
-    if dto is None:  # pragma: no cover — deleted between the UPDATE and the read
-        raise HTTPException(status_code=503, detail="story vanished mid-request")
-    dto.fallback = _fallback(dto, body.stage_id, theme_id, theme_slug)
-    return dto
+    raise HTTPException(status_code=503, detail=detail)
 
 
 @router.get("/api/stories/{story_id}", response_model=StoryDTO)

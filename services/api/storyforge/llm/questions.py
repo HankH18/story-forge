@@ -92,9 +92,34 @@ makes the question checkable — and precisely what makes the grapheme a complet
 giveaway. Shipped in the payload it reduced the question to
 `[o for o in options if o.startswith(payload["target_grapheme"])][0]`, so §9's
 "the answer key never leaves the server" (DEVIATIONS 4.9) was false for every
-tap-a-word question. `cue_word` carries no such signal: it is chosen by
-`_cue_index` from the ALLOWED list and is explicitly excluded from the options,
-so it names the sound without naming the answer.
+tap-a-word question.
+
+**`cue_word` IS served, so it must carry no orthographic signal beyond the
+target sound** (DEVIATIONS 7.14). "Drawn from the allowed list and excluded from
+the options" was not enough, and live row 4392 is the proof: `Tap it. Hint: the.`
+over `["sat", "in", "then"]`. `the` is a prefix of exactly one option, so the
+child taps the only word that starts with those three letters and is right
+without segmenting anything — and §8 then credits `th` for the guess. Row 696 is
+the same defect with the opposite sign: cue `win` over `["in", "had", "went"]`,
+where `in` is a *suffix* of the cue, so the shape match points at a WRONG option
+and steers the child away from the word they were meant to sound out.
+
+The rule is therefore a property, not a list of cases: *the cue may share the
+target grapheme with an option and nothing else.* Operationally —
+
+    the cue must stand in NO whole-word containment relation with ANY option
+    (`cue in option` or `option in cue`, which subsumes identity, prefix and
+    suffix in both directions).
+
+Sharing the grapheme is exactly what the question asks the child to notice, and
+`check_tap_word` already proves the grapheme singles out one option; what a
+whole-word match adds is a way to answer *without* segmenting anything, since
+spotting the chunk `the` inside `then` needs no knowledge that `th` says /θ/.
+So the boundary is the word: the grapheme is the question, the whole cue is the
+answer key. `cue_conflict` decides it, `sound_targets` picks a cue that satisfies
+it against the sound's whole closed offer list, and `check_tap_word` re-proves it
+against the three options the model actually chose — a guarantee that only lives
+in the prompt is a suggestion.
 
 Determinism: option order is a pure function of (seed, question type, option
 set). `random.Random` is seeded from a blake2b digest — stable across processes
@@ -138,6 +163,11 @@ MCQ2_OPTIONS = 2
 # Keep the closed sound list short enough that the model reads all of it.
 MAX_SOUND_TARGETS = 6
 MAX_OFFERED_WORDS = 8
+# How many cue words to keep per grapheme before the first safe one is chosen
+# (DEVIATIONS 7.14). One was the old behaviour and is what shipped the leak:
+# when the single best cue collided with an option there was nothing to fall
+# back to but dropping the sound entirely.
+MAX_CUE_CANDIDATES = 24
 # Anti-guessability. A child who can spot the odd-one-out by shape has not read
 # anything, so an option that stands out by length is as broken as a wrong one.
 TAP_LEN_SPREAD = 2
@@ -368,6 +398,90 @@ def story_supports(option: str, story_text: str) -> bool:
     return True
 
 
+def cue_conflict(cue: str, option: str) -> str | None:
+    """How the cue gives this option away by SHAPE, or ``None`` if it does not.
+
+    DEVIATIONS 7.14. Containment in either direction is the whole rule, and it
+    subsumes identity, prefix and suffix — those are the four cases a child can
+    settle by laying one word against another without reading either. Sharing
+    only the target grapheme is deliberately NOT a conflict: that is the signal
+    the question exists to test.
+
+    Returns a phrase naming the relation, so the caller's problem string can say
+    what is wrong rather than that something is.
+    """
+    a, b = cue.strip().lower(), option.strip().lower()
+    if not a or not b:
+        return None
+    if a == b:
+        return f'the hint word "{a}" IS the option "{b}"'
+    if b.startswith(a):
+        return f'the option "{b}" starts with the whole hint word "{a}"'
+    if b.endswith(a):
+        return f'the option "{b}" ends with the whole hint word "{a}"'
+    if a in b:
+        return f'the option "{b}" contains the whole hint word "{a}"'
+    if a.startswith(b) or a.endswith(b) or b in a:
+        return f'the hint word "{a}" contains the whole option "{b}"'
+    return None
+
+
+def cue_leaks(cue: str, options: Iterable[str]) -> list[str]:
+    """Every way this cue points at one of these options by shape (7.14)."""
+    return [why for option in options if (why := cue_conflict(cue, option)) is not None]
+
+
+def choose_cue(candidates: Sequence[str], options: Iterable[str]) -> str | None:
+    """The best candidate cue that gives none of `options` away, or None.
+
+    `candidates` arrives already ranked (shortest, then most frequent), so this
+    is "the first safe one". None means this sound cannot be asked about with
+    this exact option set — the sound goes, never the rule. Used where the
+    options are already FIXED: `warm.repair_leaky_cues` re-cues a row that a
+    child may have answered, so the options are the one thing it must not move.
+    """
+    words = list(options)
+    return next((c for c in candidates if not cue_leaks(c, words)), None)
+
+
+def cue_candidates(
+    allowed_words: Sequence[str], stage_id: int, exclude: Iterable[str] = ()
+) -> dict[str, list[str]]:
+    """grapheme -> the cue words this stage could use for it, best first.
+
+    The public face of `_cue_index`, for callers that hold an option set rather
+    than a story: `warm.repair_leaky_cues` re-cues rows already in the pool and
+    must reach the same candidate list the node would have drawn from, or a
+    repaired row is not the row the node would write.
+    """
+    return _cue_index(allowed_words, mastered_ids(stage_id), {w.strip().lower() for w in exclude})
+
+
+def _cue_and_offer(
+    candidates: Sequence[str], onset: Sequence[str], clean: Sequence[str]
+) -> tuple[str | None, list[str], list[str]]:
+    """The best cue for this sound, with the offer list narrowed to fit it.
+
+    A conflict with one offered word is not a reason to lose the sound: the
+    offer list is a CLOSED list this module composes, so the word can simply
+    leave it — the same narrowing `_prefer_current_stage` already does, and
+    narrowing can only shrink what the model may pick. The sound is dropped
+    only when no candidate leaves an answerable question behind (one onset word
+    and two clean ones).
+
+    Measured over the 52 servable stories in the live pool, this costs nothing:
+    all 52 still offer a sound and the total offered targets is unchanged at
+    223, so the rule in 7.14 buys its safety for free at production vocabulary
+    sizes.
+    """
+    for cue in candidates:
+        keep_onset = [w for w in onset if cue_conflict(cue, w) is None]
+        keep_clean = [w for w in clean if cue_conflict(cue, w) is None]
+        if keep_onset and len(keep_clean) >= TAP_WORD_OPTIONS - 1:
+            return cue, keep_onset, keep_clean
+    return None, [], []
+
+
 def sound_targets(
     *,
     story_text: str,
@@ -411,8 +525,14 @@ def sound_targets(
     for grapheme in sorted({g[0] for g in graphemes_by_word.values()}):
         onset = [w for w, g in graphemes_by_word.items() if g[0] == grapheme]
         clean = [w for w, g in graphemes_by_word.items() if grapheme not in g]
-        cue = cues.get(grapheme)
-        if not onset or len(clean) < TAP_WORD_OPTIONS - 1 or cue is None:
+        if not onset or len(clean) < TAP_WORD_OPTIONS - 1:
+            continue
+        # 7.14: the cue is proved against EVERY word this sound may still offer,
+        # and any word it would give away leaves the offer list. Later steps
+        # (`_prefer_current_stage`, the `MAX_OFFERED_WORDS` cut) only narrow
+        # further, so a cue proved here stays proved.
+        cue, onset, clean = _cue_and_offer(cues.get(grapheme, ()), onset, clean)
+        if cue is None:
             continue
         targets.append(
             SoundTarget(
@@ -475,17 +595,26 @@ def _prefer_current_stage(targets: Sequence[SoundTarget], stage_id: int) -> list
 
 
 def _cue_index(
-    allowed_words: Sequence[str], mastered: frozenset[str], exclude: set[str]
-) -> dict[str, str]:
-    """grapheme -> the shortest, then most frequent, allowed word starting with it.
+    allowed_words: Sequence[str],
+    mastered: frozenset[str],
+    exclude: set[str],
+    limit: int = MAX_CUE_CANDIDATES,
+) -> dict[str, list[str]]:
+    """grapheme -> allowed words starting with it, shortest and commonest first.
 
     `allowed_words` arrives frequency-ordered from the precompute table, so rank
     is just the index. Shortest first because a cue is read aloud and compared
     by ear: "Tap: hat." is a cleaner model of /h/ than "Tap: having.", which is
     what pure frequency picked live. Words already in the story are excluded so
     the cue can never also be one of the options.
+
+    A RANKED LIST rather than one word (DEVIATIONS 7.14): the best cue for a
+    sound may be the one that gives an option away, and in the live pool it
+    repeatedly was — `the` is the shortest, commonest stage-3 word starting with
+    `th`, and seven warm stories offering the option `then` all took it. The
+    caller picks the first candidate that is safe for its own word list.
     """
-    best: dict[str, tuple[int, int, str]] = {}
+    ranked: dict[str, list[tuple[int, int, str]]] = {}
     for rank, raw in enumerate(allowed_words):
         word = raw.strip().lower()
         if not word or word in exclude:
@@ -493,10 +622,10 @@ def _cue_index(
         found = word_graphemes(word, mastered)
         if not found:
             continue
-        key = (len(word), rank, word)
-        if found[0] not in best or key < best[found[0]]:
-            best[found[0]] = key
-    return {grapheme: key[2] for grapheme, key in best.items()}
+        ranked.setdefault(found[0], []).append((len(word), rank, word))
+    return {
+        grapheme: [key[2] for key in sorted(keys)[:limit]] for grapheme, keys in ranked.items()
+    }
 
 
 def tap_word_prompt(
@@ -649,6 +778,16 @@ def check_tap_word(
         problems.append("the three words must all be different")
     if target.cue in options:
         problems.append(f'"{target.cue}" is the example word and cannot also be an option')
+    # DEVIATIONS 7.14. `sound_targets` already picked a cue that is safe for
+    # this sound's whole closed offer list, so this fires only when the model
+    # reached outside that list — which is exactly when a menu stops being a
+    # guarantee. The cue is fixed per sound, so the actionable instruction is to
+    # ask about a different sound, not to reword the hint.
+    for why in cue_leaks(target.cue, options):
+        problems.append(
+            f"{why}, so the hint points at an option by its letters instead of its "
+            f"sound — ask about a different sound"
+        )
 
     correct = options[0]
     in_story = set(story_word_tokens(story_text))

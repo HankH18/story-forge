@@ -14,12 +14,34 @@
  * behind the "the printer is working" screen and then offers a big Try again —
  * still a friendly sentence and a button, never a stack trace, never a red box.
  *
- * **The stage.** §9's request body is `{kid_id, theme_id}` and the server maps
- * kid → stage. `GET /api/kids` is live but unauthenticated until Clerk lands
- * (§16 phase 6), so the reader is resolved from that list; with no kids at all
- * the session runs anonymously at `?stage=` or DEFAULT_STAGE and simply records
- * nothing. Nothing here invents a reader: §13 means kid mode holds no name, no
- * birthday, no identity of any kind that a parent did not already enter.
+ * **The stage is the reader's, and there is no session without one.** §9's
+ * request body is `{kid_id, theme_id}` and the server maps kid → stage. This
+ * component used to compute a stage locally — `kid?.stage_id ?? ?stage= ??
+ * DEFAULT_STAGE`, with `DEFAULT_STAGE = 4` — and after the Phase 6 migration
+ * orphaned every kid row, `kid` was null for every account in the database, so
+ * every session in the product ran at stage 4. A stage-1 reader was served text
+ * measuring 17.6% decodable at their own stage, silently: the only visible
+ * difference was the missing "hello {name}" greeting.
+ *
+ * A constant that substitutes a stage is the anti-pattern. §01 forbids a
+ * child-facing error screen, so "show an error" and "guess a stage" are both
+ * wrong; the third option is the honest one. **If there is no reader, there is
+ * no reading session** — the printer screen holds while the reader resolves,
+ * and if none resolves we navigate to `/app`, the adult surface, which already
+ * knows how to say "no readers yet" and how to add one. The child never sees a
+ * failure and the adult sees the actual problem (DEVIATIONS 7.24).
+ *
+ * This also removes the render/effect race the audit suspected: `stage` was
+ * computed during render while `resolveKid` was awaited in an effect, so a fast
+ * tap beat the reader home. There is now no stage to compute and nothing to tap
+ * until the reader exists.
+ *
+ * `?stage=` is gone. It was the address-bar half of the escalation defect and
+ * it has no legitimate caller: the stage belongs to the child, and the child is
+ * already in the URL.
+ *
+ * Nothing here invents a reader: §13 means kid mode holds no name, no birthday,
+ * no identity of any kind that a parent did not already enter.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -59,17 +81,6 @@ import Comprehension from './Comprehension'
 import ReadingView from './ReadingView'
 import ThemePicker from './ThemePicker'
 
-/**
- * The stage a session runs at when nothing else says otherwise.
- *
- * Stage 4 rather than 1 for one honest reason: it is the lowest stage in the
- * seeded warm pool whose stories carry comprehension questions and tagged
- * artwork, so the default session exercises the whole §11.2 flow instead of
- * ending at the celebration with nothing to show. It only applies when the
- * parent has no kids at all — a real kid row's `stage_id` always wins.
- */
-const DEFAULT_STAGE = 4
-
 const REQUEST_ATTEMPTS = 3
 const SIZE_KEY = 'sf.readingSize'
 
@@ -101,19 +112,37 @@ export default function KidSession() {
   const [completed, setCompleted] = useState<CompleteResult | null>(null)
   const [progress, setProgress] = useState<Progress | null>(null)
   const [stalled, setStalled] = useState(false)
+  /** `resolveKid` came back empty; we are on our way to `/app`. */
+  const [kidMissing, setKidMissing] = useState(false)
 
   /** Story words that have already auto-announced (§07: once per story). */
   const announced = useRef<Set<string>>(new Set())
 
-  const stageFromQuery = Number(new URLSearchParams(window.location.search).get('stage'))
-  const stage = kid?.stage_id ?? (stageFromQuery > 0 ? stageFromQuery : DEFAULT_STAGE)
-
   useEffect(() => {
     primeVoices()
-    void getThemes().then(setThemes)
-    void resolveKid(kidId).then(setKid)
-    return () => cancelSpeech()
-  }, [kidId])
+    let live = true
+    void getThemes().then((t) => {
+      if (live) setThemes(t)
+    })
+    void resolveKid(kidId).then((resolved) => {
+      if (!live) return
+      if (resolved) {
+        setKid(resolved)
+        return
+      }
+      // No reader — the account has none, or the call failed. There is nothing
+      // honest to read at, so there is no session: hand the tablet back to the
+      // adult rather than invent a stage (DEVIATIONS 7.24). `/app` is a real
+      // screen with a real explanation, not an error page, and `RequireParent`
+      // sends a signed-out visitor on to sign-in.
+      setKidMissing(true)
+      navigate('/app', { replace: true })
+    })
+    return () => {
+      live = false
+      cancelSpeech()
+    }
+  }, [kidId, navigate])
 
   useEffect(() => {
     try {
@@ -133,8 +162,9 @@ export default function KidSession() {
       setProgress(null)
       setReadingId(null)
       setPhase('reading')
-      // No kid row → no telemetry. The session still reads; §13 would rather
-      // lose a stats row than attach a reading to a reader nobody created.
+      // `kid` is non-null by construction here — nothing can reach this without
+      // a resolved reader — but the guard stays, because the alternative is a
+      // reading filed against `undefined`.
       if (fresh.id > 0 && kid) void startReading(kid.id, fresh.id).then(setReadingId)
       if (import.meta.env.DEV && fresh.fallback) {
         // Never shown to the child (§10 fixes the reading chrome at three
@@ -147,6 +177,10 @@ export default function KidSession() {
 
   const pickTheme = useCallback(
     async (theme: Theme) => {
+      // Unreachable while the reader is still resolving — the picker is not
+      // rendered until then — and asserted rather than defaulted, because a
+      // default is the whole defect this replaced.
+      if (!kid) return
       cancelSpeech()
       setStalled(false)
       setPhase('loading')
@@ -158,7 +192,7 @@ export default function KidSession() {
 
       for (let attempt = 0; attempt < REQUEST_ATTEMPTS; attempt += 1) {
         try {
-          beginStory(await requestStory(stage, theme.slug))
+          beginStory(await requestStory(kid.id, theme.slug))
           return
         } catch (err) {
           if (import.meta.env.DEV) console.warn('[kid] story request failed:', err)
@@ -168,7 +202,7 @@ export default function KidSession() {
       // Still the printer screen — plus a way to ask again. Not an error state.
       setStalled(true)
     },
-    [beginStory, stage],
+    [beginStory, kid],
   )
 
   const finish = useCallback(
@@ -228,6 +262,21 @@ export default function KidSession() {
   const wordCount = useMemo(() => distinctWords(readText(plan)).length, [plan])
 
   // --- render ---------------------------------------------------------------
+
+  // No reader yet. Two states, one screen, and it is the friendly one:
+  //   - still resolving → the printer, for the few ms `GET /api/kids` takes;
+  //   - resolved to nothing → the printer for the one frame before the effect's
+  //     `navigate('/app')` commits.
+  // Neither may render the picker. Tapping a theme without a reader is the
+  // request that used to invent a stage (DEVIATIONS 7.24), so the tap must not
+  // be offered rather than be guarded after the fact.
+  if (!kid && (phase === 'picker' || kidMissing)) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-10 bg-paper-page px-6">
+        <PrinterWorking />
+      </div>
+    )
+  }
 
   if (phase === 'loading' || (phase === 'picker' && themes.length === 0)) {
     return (

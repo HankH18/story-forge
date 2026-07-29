@@ -26,6 +26,7 @@ from storyforge.llm.questions import (
     build_sound_block,
     check_mcq2,
     check_tap_word,
+    cue_leaks,
     generate_questions,
     readable,
     readable_openers,
@@ -251,6 +252,122 @@ def test_the_cue_word_is_never_one_of_the_story_words():
     story_tokens = set(STORY.lower().replace(".", "").split())
     for target in targets():
         assert target.cue not in story_tokens
+
+
+# --- the cue may name the sound and nothing else (DEVIATIONS 7.14) -----------
+# Live row 4392, reproduced exactly: story 1671, stage 3, the `the`/`then`
+# prefix. `the` is the shortest and commonest stage-3 word starting with `th`,
+# so the old one-cue-per-grapheme index picked it for every one of the seven
+# warm stories that offered `then` — and the question became "tap the word that
+# starts with these three letters", answerable with no phonics at all, while §8
+# credited `th` for the tap. `win`/`in` below is live row 696, the same defect
+# pointing at a WRONG option.
+LEAKY_STORY = (
+    "A dragon sat in a cave. It had fire. Sam went to the cave. The dragon ran at Sam. "
+    "Sam ran back fast. Then the dragon went into the cave. Sam did not go back."
+)
+# Frequency order as `allowed_words` really arrives for stage 3 — `the` first,
+# which is what made this the DEFAULT outcome rather than an unlucky one.
+STAGE3_ALLOWED = [
+    "the", "to", "and", "a", "in", "for", "that", "it", "on", "with",
+    "this", "at", "not", "but", "or", "an", "if", "can", "will", "just",
+    "up", "had", "get", "them", "its", "than", "him", "into", "think", "then",
+]
+
+
+def leaky_targets():
+    return sound_targets(
+        story_text=LEAKY_STORY,
+        stage_id=3,
+        allowed_words=STAGE3_ALLOWED,
+        sight_words=SIGHT,
+        story_words=STORY_WORDS,
+    )
+
+
+def test_the_cue_word_never_points_at_an_option_by_shape():
+    """The cue may share the target grapheme with an option and nothing else.
+
+    Whole-word containment in either direction is a match a child settles by
+    laying one word against the other, with no idea what `th` says — so it is
+    an answer key, not a hint. Sharing the grapheme is the question itself.
+    """
+    offered = leaky_targets()
+    assert offered, "story 1671 must still be able to ask something"
+    for target in offered:
+        assert cue_leaks(target.cue, target.onset_words + target.clean_words) == [], (
+            f"cue {target.cue!r} for /{target.grapheme}/ gives an option away"
+        )
+
+    # And specifically the live row: `th` is still askable, and `the` is not how.
+    th = next((t for t in offered if t.grapheme == "th"), None)
+    assert th is not None, "dropping the sound is not the fix — re-cueing it is"
+    assert "then" in th.onset_words
+    assert th.cue != "the"
+
+
+def test_a_cue_that_contains_an_option_is_rejected_even_if_it_was_offered():
+    """Live row 696: cue `win`, options `in`/`had`/`went`, answer `went`.
+
+    `in` is a suffix of the cue, so the shape match points at a WRONG option and
+    steers the child away from the word they were meant to sound out. A cue that
+    identifies the wrong option is the same defect with the opposite sign, and
+    `check_tap_word` must refuse it however the target was built — the narrowing
+    in `sound_targets` is a menu, and a guarantee that only lives in the prompt
+    is a suggestion.
+    """
+    story = "Sam had a hat. It went in. The man ran back."
+    target = SoundTarget(
+        grapheme="w",
+        cue="win",
+        onset_words=["went"],
+        clean_words=["in", "had", "hat", "man", "ran", "back"],
+        stage=3,
+        scope="current_stage_onset",
+    )
+    question, problems = check_tap_word(
+        TapWordDraft(target_grapheme="w", correct_word="went", other_words=["in", "had"]),
+        targets=[target],
+        stage_id=3,
+        story_text=story,
+        sight_words=SIGHT,
+        story_words=STORY_WORDS,
+        seed=7,
+    )
+    assert question is None
+    assert any('contains the whole option "in"' in p for p in problems)
+
+    # The same question with a cue that names only the sound is fine, which is
+    # what makes the rejection above about the CUE and not about the words.
+    clean = target.model_copy(update={"cue": "wet"})
+    question, problems = check_tap_word(
+        TapWordDraft(target_grapheme="w", correct_word="went", other_words=["had", "man"]),
+        targets=[clean],
+        stage_id=3,
+        story_text=story,
+        sight_words=SIGHT,
+        story_words=STORY_WORDS,
+        seed=7,
+    )
+    assert problems == [] and question is not None
+    assert question.payload["cue_word"] == "wet"
+
+
+def test_a_conflicting_cue_costs_a_WORD_and_not_the_whole_SOUND():
+    """The offer list is ours to narrow, so one collision is not a lost sound.
+
+    Measured over the 52 servable stories in the live pool: every one still
+    offers at least one sound after 7.14, and the total offered targets moves
+    223 -> 222. The rule is free at production vocabulary sizes; dropping the
+    sound outright would not have been.
+    """
+    # `with` collides with the clean word `it` and with nothing else, so /w/
+    # survives with `it` off the menu rather than disappearing.
+    w = next(t for t in targets() if t.grapheme == "w")
+    assert w.cue == "with"
+    assert "it" not in w.clean_words
+    assert len(w.clean_words) >= 2
+    assert "went" in w.onset_words
 
 
 def test_targets_are_deterministic():

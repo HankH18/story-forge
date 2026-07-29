@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 
@@ -47,6 +48,7 @@ from sqlalchemy import select, text
 from storyforge import obs
 from storyforge.api.stories import SERVABLE_STATUSES
 from storyforge.db import SessionLocal
+from storyforge.decoder import mastered_ids
 from storyforge.llm.client import fast_model
 from storyforge.llm.moderate import (
     UNGRAMMATICAL_PREFIX,
@@ -58,8 +60,13 @@ from storyforge.llm.pricing import Usage
 from storyforge.llm.questions import (
     GeneratedQuestion,
     QuestionSet,
+    choose_cue,
+    cue_candidates,
+    cue_leaks,
     generate_questions,
+    story_word_tokens,
     tap_word_prompt,
+    word_graphemes,
 )
 from storyforge.llm.scene_tags import SceneTagResult, select_asset, tag_segments
 
@@ -881,6 +888,120 @@ _TAP_WORD_ROWS_SQL = text(
 )
 
 
+#: Every tap-a-word row, at EVERY status, with the story text a new cue must
+#: avoid. Status-blind on purpose — see `repair_leaky_cues`.
+_TAP_WORD_CUE_ROWS_SQL = text(
+    """
+    SELECT q.id, q.prompt, q.payload, q.answer,
+           s.id AS story_id, s.stage_id, s.status, s.story_words,
+           t.slug AS theme_slug,
+           coalesce(string_agg(sg.body, ' ' ORDER BY sg.idx), '') AS body,
+           (SELECT count(*) FROM answers a WHERE a.question_id = q.id) AS n_answers
+    FROM questions q
+    JOIN stories s ON s.id = q.story_id
+    JOIN themes t ON t.id = s.theme_id
+    LEFT JOIN story_segments sg ON sg.story_id = s.id
+    WHERE q.qtype = 'tap_word'
+      AND (CAST(:statuses AS text[]) IS NULL OR s.status = ANY(CAST(:statuses AS text[])))
+      AND (CAST(:only AS int[]) IS NULL OR s.id = ANY(CAST(:only AS int[])))
+    GROUP BY q.id, q.prompt, q.payload, q.answer, s.id, s.stage_id, s.status,
+             s.story_words, t.slug
+    ORDER BY q.id
+    """
+)
+
+
+async def repair_leaky_cues(
+    session, target_status: Sequence[str] | None = None, only: Sequence[int] | None = None
+) -> tuple[int, list[int], list[int]]:
+    """Re-cue every row whose hint word points at an option by shape (7.14).
+
+    The cue and its prompt are pure functions of (grapheme, option set, stage
+    vocabulary) — `cue_candidates` / `choose_cue` / `tap_word_prompt`, the same
+    ones the node calls — so a repaired row is the row the fixed node would have
+    written, computed here with no API call.
+
+    **`options` and `answer` are never touched, and nothing is ever deleted.**
+    That is the whole design constraint rather than a nicety: `answers.
+    question_id` is `ON DELETE CASCADE`, `MASTERY_QTYPES` evidence lives on those
+    rows, and an agent has already destroyed one by regenerating a question a
+    child had answered. Moving only the hint leaves every recorded answer
+    meaning exactly what it meant — while stating, as 7.15 does rather than
+    silently repairing, that what it meant may not be trustworthy.
+
+    Status-blind by default (`target_status=None`). The defect is a property of
+    the row's content, not of whether the story is servable, and the one answered
+    instance in the live pool sat on a `rejected` story that no sweep filtered
+    to servable would ever have reached.
+
+    Returns (rows repaired, ids left alone, ids repaired that carry answers).
+    Idempotent: a repaired row no longer leaks, so a second run selects nothing.
+    """
+    rows = (
+        await session.execute(
+            _TAP_WORD_CUE_ROWS_SQL,
+            {
+                "statuses": list(target_status) if target_status else None,
+                "only": list(only) if only else None,
+            },
+        )
+    ).all()
+
+    vocab_cache: dict[tuple[int, str], object] = {}
+    repaired, stuck, answered = 0, [], []
+    for row in rows:
+        payload = dict(row.payload or {})
+        cue = str(payload.get("cue_word") or "").strip().lower()
+        options = [str(o).strip().lower() for o in (payload.get("options") or [])]
+        if not cue or not options or not cue_leaks(cue, options):
+            continue
+
+        answer = dict(row.answer or {})
+        grapheme = str(answer.get("target_grapheme") or "").strip().lower()
+        if not grapheme:
+            # Pre-4.9 rows kept no grapheme anywhere. Re-derive it from the
+            # answer the way `check_tap_word` proved it: the first GPC of the
+            # correct word. A row with no recoverable answer is left alone.
+            correct = str(answer.get("correct") or "").strip().lower()
+            found = word_graphemes(correct, mastered_ids(row.stage_id)) if correct else None
+            grapheme = found[0] if found else ""
+        if not grapheme:
+            stuck.append(row.id)
+            continue
+
+        key = (row.stage_id, row.theme_slug)
+        if key not in vocab_cache:
+            vocab_cache[key] = await load_vocabulary(session, row.stage_id, row.theme_slug)
+        vocab = vocab_cache[key]
+
+        story_words = list(row.story_words or [])
+        # The cue may not be a word of this story — `_cue_index`'s own rule, so
+        # the replacement can never turn out to be one of the options.
+        candidates = cue_candidates(
+            vocab.allowed_words,
+            row.stage_id,
+            exclude=set(story_word_tokens(row.body)) | set(options) | set(story_words),
+        ).get(grapheme, [])
+        fresh = choose_cue(candidates, options)
+        prompt = (
+            tap_word_prompt(fresh, row.stage_id, vocab.sight_words, story_words) if fresh else None
+        )
+        # §13 layer 1 reads the result, exactly as `refresh_tap_word_prompts` does.
+        if fresh is None or prompt is None or blocklist_check(prompt):
+            stuck.append(row.id)
+            continue
+
+        payload["cue_word"] = fresh
+        await session.execute(
+            text("UPDATE questions SET prompt = :p, payload = CAST(:j AS jsonb) WHERE id = :i"),
+            {"p": prompt, "j": json.dumps(payload), "i": row.id},
+        )
+        repaired += 1
+        if row.n_answers:
+            answered.append(row.id)
+    return repaired, stuck, answered
+
+
 async def refresh_tap_word_prompts(
     session, target_status: Sequence[str] = SERVABLE_STATUSES, only: Sequence[int] | None = None
 ) -> tuple[int, list[int]]:
@@ -934,6 +1055,31 @@ async def refresh_tap_word_prompts(
     return updated, skipped
 
 
+def _report_cue_repair(repaired: int, stuck: Sequence[int], answered: Sequence[int]) -> None:
+    """Print what `repair_leaky_cues` did — including what it could not do."""
+    if repaired:
+        print(f"  re-cued {repaired} tap-a-word row(s) whose hint pointed at an option (7.14)")
+    if answered:
+        print(
+            f"    {len(answered)} of them already carry recorded answers: {sorted(answered)}. "
+            "The rows are kept and the answers are untouched, but the §8 evidence "
+            "they produced was collected against a leaking hint — see DEVIATIONS 7.15."
+        )
+    if stuck:
+        print(f"    could NOT re-cue {len(stuck)} row(s), left as they are: {sorted(stuck)}")
+
+
+async def run_cue_repair(only: Sequence[int] | None = None) -> None:
+    """`--cue-repair`: sweep every tap-a-word row for the 7.14 hint leak."""
+    async with SessionLocal() as session:
+        repaired, stuck, answered = await repair_leaky_cues(session, None, only)
+        await session.commit()
+    if not repaired and not stuck:
+        print("  no tap-a-word row's hint points at an option — nothing to repair")
+        return
+    _report_cue_repair(repaired, stuck, answered)
+
+
 async def run_backfill(
     target_status: Sequence[str] = SERVABLE_STATUSES,
     only: Sequence[int] | None = None,
@@ -956,6 +1102,9 @@ async def run_backfill(
         moved = (await session.execute(_MOVE_ANSWER_KEY_SQL)).scalars().all()
         if moved:
             print(f"  moved target_grapheme out of {len(moved)} served payload(s) into `answer`")
+        # Before the prompt refresh: a repaired cue produces a new prompt, and
+        # the refresh below would otherwise re-derive the OLD one.
+        _report_cue_repair(*await repair_leaky_cues(session, None, only))
         rewritten, unchanged = await refresh_tap_word_prompts(session, target_status, only)
         if rewritten:
             print(f"  re-derived {rewritten} tap-a-word prompt(s) from the current frame ladder")
@@ -1214,12 +1363,22 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--cue-repair",
+        action="store_true",
+        help=(
+            "re-cue tap-a-word rows whose hint word points at an option by shape, "
+            "at every status, then exit (DEVIATIONS 7.14/7.15)"
+        ),
+    )
+    p.add_argument(
         "--only", help="restrict --backfill / --grammar-backfill to these comma-separated ids"
     )
     a = p.parse_args()
     only = [int(x) for x in a.only.split(",")] if a.only else None
     try:
-        if a.grammar_backfill:
+        if a.cue_repair:
+            asyncio.run(run_cue_repair(only=only))
+        elif a.grammar_backfill:
             asyncio.run(run_grammar_backfill(only=only))
         elif a.backfill:
             asyncio.run(run_backfill(only=only))

@@ -6,15 +6,28 @@ The frontend is a static SPA; all state and secrets live behind this service
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response
 
 from storyforge.api import health, kids, readings, stories, validate
+from storyforge.auth import auth_config
 
 logging.basicConfig(
     level=logging.INFO,
     format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
 )
+
+#: Present on EVERY response, from every route, including 401s and 404s.
+#:
+#: The Phase 6 audit's finding 0 was that §18's `DEMO_BYPASS_AUTH` was
+#: undetectable over HTTP — a server log line and nothing else — so a browser
+#: session was driven against a completely unauthenticated API for a phase, and
+#: two agents concluded opposite things about whether auth was enforced. The
+#: value is emitted in both states on purpose: a *missing* header would be
+#: ambiguous between "enforced" and "an older build", which is the same silence
+#: in a new place (DEVIATIONS 7.25).
+AUTH_MODE_HEADER = "X-Storyforge-Auth"
 
 
 def create_app() -> FastAPI:
@@ -35,7 +48,20 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Without this the browser hides the disclosure header from any
+        # cross-origin caller, which is every caller that is not going through
+        # the Vite proxy — i.e. exactly the ones most likely to be confused
+        # about which API they are talking to.
+        expose_headers=[AUTH_MODE_HEADER],
     )
+
+    @app.middleware("http")
+    async def _disclose_auth_mode(request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        response.headers[AUTH_MODE_HEADER] = (
+            "demo-bypass" if auth_config().demo_bypass else "enforced"
+        )
+        return response
 
     app.include_router(health.router)
     app.include_router(validate.router)

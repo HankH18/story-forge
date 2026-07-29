@@ -578,16 +578,41 @@ async def start_reading(
     only ever be started against a kid the caller owns — and the refusal is the
     same 404 an unknown kid gets, which is what stops the endpoint being used to
     enumerate other families.
+
+    **The story is checked against the kid's stage, not merely against the
+    caller** (DEVIATIONS 7.22). `api/stories.py` used to argue that ownership
+    binds here; it does, but until the Phase 6 audit nothing here compared the
+    two rows, so a stage-1 kid and a stage-5 story filed a 201 — and §8 then
+    counted it as a story "completed at current stage", because `stage_id` below
+    is stamped from the kid. This cannot fire on a legitimate session: §7's
+    ladder never climbs, so a story served for this child is at or below their
+    stage by construction. It is a second gate on a path the first gate already
+    covers, which is exactly the point.
     """
     kid = await owned_kid(session, principal, body.kid_id)
 
     story = (
         await session.execute(
-            text("SELECT id, status FROM stories WHERE id = :id"), {"id": body.story_id}
+            text("SELECT id, status, stage_id FROM stories WHERE id = :id"),
+            {"id": body.story_id},
         )
     ).first()
     if story is None or story.status not in SERVABLE_STATUSES:
         raise HTTPException(status_code=404, detail=f"story {body.story_id} not found")
+    if story.stage_id > kid.stage_id:
+        # 422, not 404: both ids are real and the caller owns the kid. The thing
+        # that is wrong is the pairing, and naming it is what an adult tool
+        # needs. No child-facing path can produce this (§01) — kid mode gets its
+        # story from the request endpoint, which derives the stage from this
+        # same kid row.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"story {story.id} is written for stage {story.stage_id} and kid "
+                f"{kid.id} is at stage {kid.stage_id}; a story above a reader's stage "
+                "can contain GPCs they have never been taught (§1, §4)"
+            ),
+        )
 
     row = (
         await session.execute(

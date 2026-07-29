@@ -303,10 +303,24 @@ export async function getThemes(): Promise<Theme[]> {
 
 // --- stories -----------------------------------------------------------------
 
-export async function requestStory(stageId: number, theme: string | number): Promise<Story> {
+/**
+ * §9 `POST /api/stories/request {kid_id, theme_id}`.
+ *
+ * The reader is the request. This used to send `{stage_id}` — a number the
+ * client picked — and the server used it as the ceiling on what a child was
+ * allowed to read, which made the ceiling a client-side value. `/read/1648?stage=12`
+ * served a stage-1 child a story measuring 13% decodable at their own stage.
+ * The stage is now read from the kid row server-side, behind the same ownership
+ * check every other kid route uses (DEVIATIONS 7.21).
+ *
+ * There is deliberately no way to override the stage from here. A caller that
+ * wanted to would be asking to choose what a child can read, and that is the
+ * one decision this product exists to take away from the caller.
+ */
+export async function requestStory(kidId: number, theme: string | number): Promise<Story> {
   return request<Story>('/api/stories/request', {
     method: 'POST',
-    body: JSON.stringify({ stage_id: stageId, theme_id_or_slug: theme }),
+    body: JSON.stringify({ kid_id: kidId, theme_id_or_slug: theme }),
   })
 }
 
