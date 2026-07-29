@@ -5,7 +5,11 @@
  * linear — `choice_label` is null on every row in the database, so the branch
  * screen has no live path to be driven through. Rather than ship branching as
  * code nobody has ever seen run, this fixture makes it drivable at
- * `/read/1?fixture=branch` while `bun run dev` is running.
+ * `/read/<one of your own kid ids>?fixture=branch` while `bun run dev` is
+ * running. It has to be a real, owned reader now: `/read/1` used to work because
+ * `resolveKid` substituted the account's first kid for an id it did not
+ * recognise, and that substitution is exactly what DEVIATIONS 7.33 removed. The
+ * fixture replaces the STORY, never the reader.
  *
  * Two guards keep it out of the child's way: the query parameter, and
  * `import.meta.env.DEV`, which Vite replaces with `false` at build time so the

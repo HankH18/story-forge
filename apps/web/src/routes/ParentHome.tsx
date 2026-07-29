@@ -28,7 +28,17 @@ export default function ParentHome() {
   // actually lands on. It exists because the failure this phase fixed was
   // invisible: with the API's demo bypass on, an app with no session at all
   // rendered exactly like an app with one.
-  const signedInAs = user?.primaryEmailAddress?.emailAddress ?? user?.username ?? null
+  //
+  // **Suppressed when the API has refused the session** (audit C4, DEVIATIONS
+  // 7.32). Clerk's client state and the API's verdict are different facts, and
+  // this line reads Clerk's — so printing it above "your session was not
+  // accepted" put two contradictory sentences on one screen. A line whose whole
+  // job is to make the session legible must not be the thing that misdescribes
+  // it.
+  const sessionRejected = state !== null && !state.ok && state.status === 401
+  const signedInAs = sessionRejected
+    ? null
+    : (user?.primaryEmailAddress?.emailAddress ?? user?.username ?? null)
 
   const load = useCallback(() => {
     let live = true

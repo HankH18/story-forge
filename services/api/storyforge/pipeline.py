@@ -17,6 +17,7 @@ This is the subset of §7's state machine that eval-smoke needs. The full machin
 
 from __future__ import annotations
 
+import time
 from datetime import date
 
 from pydantic import BaseModel, Field
@@ -60,6 +61,12 @@ class Attempt(BaseModel):
     decodability: float
     violations: list[str]
     usage: Usage
+    # §14 wants latency PER NODE, and the pipeline had no clock at all — a
+    # harness timing `run_pipeline` from outside can only ever report one number
+    # for four nodes (DEVIATIONS 7.42). Both default to 0.0, so every existing
+    # caller constructs an Attempt unchanged and no control flow moves.
+    latency_ms: float = 0.0  # GENERATING / REWRITING — the API call
+    validate_ms: float = 0.0  # VALIDATING — the pure function
 
 
 class PipelineResult(BaseModel):
@@ -76,12 +83,32 @@ class PipelineResult(BaseModel):
     # or failed — the run itself is unaffected either way.
     langfuse_trace_id: str | None = None
 
+    # §14 per-node latency (DEVIATIONS 7.42). `moderation_ms` is None when the
+    # story never reached MODERATING, which is a different fact from "moderation
+    # took 0 ms".
+    vocabulary_ms: float = 0.0
+    moderation_ms: float | None = None
+    total_ms: float = 0.0
+
     @property
     def rewrite_depth(self) -> int:
         return max(0, len(self.attempts) - 1)
 
     def total_cost_usd(self, on) -> float:
+        cost = sum(a.usage.cost_usd(on) for a in self.attempts)
+        if self.moderation is not None and self.moderation.usage is not None:
+            cost += self.moderation.usage.cost_usd(on)
+        return cost
+
+    def generation_cost_usd(self, on) -> float:
+        """GENERATING + REWRITING only — the Sonnet half of the bill."""
         return sum(a.usage.cost_usd(on) for a in self.attempts)
+
+    def moderation_cost_usd(self, on) -> float:
+        """MODERATING only. 0.0 when layer 1 short-circuited (no API call)."""
+        if self.moderation is None or self.moderation.usage is None:
+            return 0.0
+        return self.moderation.usage.cost_usd(on)
 
 
 async def load_vocabulary(session, stage_id: int, theme_slug: str) -> Vocabulary:
@@ -271,8 +298,11 @@ async def run_pipeline(
     effort: str = "medium",
     moderate_output: bool = True,
 ) -> PipelineResult:
+    t_run = time.perf_counter()
+    t_vocab = time.perf_counter()
     vocab = await load_vocabulary(session, stage_id, theme_slug)
     result = PipelineResult(stage_id=stage_id, theme=theme_slug, passed=False)
+    result.vocabulary_ms = (time.perf_counter() - t_vocab) * 1000
 
     user_block = build_request_block(
         theme_slug, vocab.story_words, vocab.target_min, vocab.target_max
@@ -302,7 +332,9 @@ async def run_pipeline(
                 model_parameters={"max_tokens": 8000, "effort": effort},
                 metadata={"attempt": n, "stage_id": stage_id, "theme": theme_slug},
             ) as gen_span:
+                t_node = time.perf_counter()
                 draft, usage = await _call(vocab, theme_slug, user_block, effort)
+                gen_ms = (time.perf_counter() - t_node) * 1000
                 body = draft_text(draft)
                 gen_span.update(
                     output={
@@ -318,8 +350,10 @@ async def run_pipeline(
                 input={"text": body, "story_words_claimed": draft.story_words_used},
                 metadata={"attempt": n, "stage_id": stage_id},
             ) as val_span:
+                t_node = time.perf_counter()
                 report = validate_draft(vocab, body, draft.story_words_used)
                 gate = passes_gate(report)
+                val_ms = (time.perf_counter() - t_node) * 1000
                 val_span.update(
                     output={
                         "decodability": report.decodability,
@@ -340,6 +374,8 @@ async def run_pipeline(
                     decodability=report.decodability,
                     violations=[w.word for w in report.violations],
                     usage=usage,
+                    latency_ms=gen_ms,
+                    validate_ms=val_ms,
                 )
             )
             result.final_text = body
@@ -357,7 +393,9 @@ async def run_pipeline(
                         input=body,
                         metadata={"attempt": n, "stage_id": stage_id},
                     ) as mod_span:
+                        t_node = time.perf_counter()
                         result.moderation = await moderate(body)
+                        result.moderation_ms = (time.perf_counter() - t_node) * 1000
                         result.passed = result.moderation.approved
                         mod_span.update(
                             output={
@@ -376,6 +414,7 @@ async def run_pipeline(
                         )
                 else:
                     result.passed = True
+                result.total_ms = (time.perf_counter() - t_run) * 1000
                 trace.update(output=_trace_summary(result))
                 return result
 
@@ -384,6 +423,7 @@ async def run_pipeline(
             kind = "rewrite"
 
         # §7: budget_exhausted. Not an error — the warm pool takes over.
+        result.total_ms = (time.perf_counter() - t_run) * 1000
         trace.update(
             output=_trace_summary(result),
             level="WARNING",

@@ -114,6 +114,20 @@ DEMO_CLERK_ID: Final = "demo_local_parent"
 
 _ROTATION_COOLDOWN_S: Final = 60.0
 
+#: How long a cached JWKS document may be served BEYOND its TTL when the JWKS
+#: endpoint cannot be reached (DEVIATIONS 7.34). One hour: long enough to ride out
+#: a Clerk incident, short enough that "the identity provider has been gone for a
+#: day" is not answered with keys from yesterday. RSA signing keys outlive this by
+#: design — Clerk rotates on the order of months and publishes the old and new
+#: keys together while it does.
+_DEFAULT_STALE_GRACE_S: Final = 3600.0
+
+#: While the endpoint is failing and a usable stale document is in hand, do not
+#: re-attempt the fetch more often than this. Without it, every request retries a
+#: 5 s connect while holding the cache lock, and an identity-provider outage
+#: becomes a queue.
+_FAILURE_BACKOFF_S: Final = 30.0
+
 
 # --- errors ------------------------------------------------------------------
 def _unauthorized(detail: str) -> HTTPException:
@@ -162,6 +176,11 @@ class AuthSettings(BaseSettings):
     #: §9 never wants a fetch per request. Ten minutes is Clerk's own guidance.
     clerk_jwks_ttl_s: int = 600
     clerk_jwks_timeout_s: float = 5.0
+    #: How long past the TTL a cached document may still be used when the JWKS
+    #: endpoint is unreachable (DEVIATIONS 7.34). Set to 0 to refuse all stale
+    #: keys and take the outage instead. This is availability only: an unknown
+    #: `kid` is still refused, and every signature and claim check is unchanged.
+    clerk_jwks_stale_grace_s: float = _DEFAULT_STALE_GRACE_S
     #: Clock skew tolerance in seconds. Zero by default: a token that is not yet
     #: valid is not valid, and a fudge factor here silently widens `exp` too.
     clerk_clock_skew_s: int = 0
@@ -197,27 +216,38 @@ class JwksCache:
         ttl_s: float,
         timeout_s: float,
         rotation_cooldown_s: float = _ROTATION_COOLDOWN_S,
+        stale_grace_s: float = _DEFAULT_STALE_GRACE_S,
+        failure_backoff_s: float = _FAILURE_BACKOFF_S,
     ) -> None:
         self.url = url
         self._ttl_s = ttl_s
         self._timeout_s = timeout_s
         self._rotation_cooldown_s = rotation_cooldown_s
+        self._stale_grace_s = max(0.0, stale_grace_s)
+        self._failure_backoff_s = max(0.0, failure_backoff_s)
         self._keys: dict[str, Any] = {}
         self._fetched_at: float | None = None
+        self._failed_at: float | None = None
         self._last_rotation_fetch = float("-inf")
         self._lock = Lock()
         #: HTTP requests actually made to the JWKS endpoint.
         self.fetches = 0
         #: Keys served without touching the network.
         self.cache_hits = 0
+        #: Keys served from a document past its TTL because the endpoint was down.
+        #: A counter rather than only a log line, for the same reason `fetches` is
+        #: one: "did this ever happen in production?" should be answerable.
+        self.stale_serves = 0
 
     def stats(self) -> dict[str, Any]:
         return {
             "url": self.url,
             "fetches": self.fetches,
             "cache_hits": self.cache_hits,
+            "stale_serves": self.stale_serves,
             "keys": sorted(self._keys),
             "ttl_s": self._ttl_s,
+            "stale_grace_s": self._stale_grace_s,
             "age_s": (
                 None if self._fetched_at is None else round(time.monotonic() - self._fetched_at, 3)
             ),
@@ -227,19 +257,33 @@ class JwksCache:
         """Forget everything, counters included. Tests and key-rotation drills."""
         self._keys = {}
         self._fetched_at = None
+        self._failed_at = None
         self._last_rotation_fetch = float("-inf")
         self.fetches = 0
         self.cache_hits = 0
+        self.stale_serves = 0
 
     async def key_for(self, kid: str) -> Any:
         """The public key for `kid`, from cache when possible.
 
-        Three outcomes, in order of how often they happen: a cache hit (no IO),
-        a TTL-expired refetch, and — rarely — a fetch triggered by a `kid` that
-        is not in a still-fresh document, which is what key rotation looks like
-        from here. The last one is deliberately rate-limited: without the
-        cooldown, an unauthenticated stranger sending random `kid`s would turn
-        this service into a load generator pointed at Clerk.
+        Four outcomes, in order of how often they happen: a cache hit (no IO), a
+        TTL-expired refetch, a **stale** serve when that refetch cannot reach
+        Clerk, and — rarely — a fetch triggered by a `kid` that is not in a
+        still-fresh document, which is what key rotation looks like from here.
+        The last one is deliberately rate-limited: without the cooldown, an
+        unauthenticated stranger sending random `kid`s would turn this service
+        into a load generator pointed at Clerk.
+
+        **The stale serve is not a fail-open** (DEVIATIONS 7.34). Three things
+        make it safe, and each is the reason the dangerous version was not
+        written. A stale document cannot contain a key it never contained, so an
+        unknown `kid` is still refused and the 503 still happens for it. Nothing
+        about signature, `exp`, `nbf`, `iss` or `aud` changes — the key is a real
+        Clerk public key that Clerk published, and an expired token is still
+        expired. And the window is bounded by `stale_grace_s`, so an identity
+        provider that never comes back does not leave this API trusting a key set
+        indefinitely. What it buys is that a Clerk blip past the TTL stops taking
+        the whole product down, including a child mid-story.
         """
         async with self._lock:
             now = time.monotonic()
@@ -249,20 +293,59 @@ class JwksCache:
                 self.cache_hits += 1
                 return self._keys[kid]
 
+            fetched_now = False
             if not fresh:
-                await self._fetch(now)
+                if self._backing_off(now) and self._stale_key_usable(kid, now):
+                    return self._serve_stale(kid, now, "the last fetch failed moments ago")
+                try:
+                    await self._fetch(now)
+                except JwksUnavailable:
+                    if self._stale_key_usable(kid, now):
+                        return self._serve_stale(kid, now, "the JWKS endpoint is unreachable")
+                    raise
+                fetched_now = True
                 if kid in self._keys:
                     return self._keys[kid]
 
-            if now - self._last_rotation_fetch >= self._rotation_cooldown_s:
+            if not fetched_now and now - self._last_rotation_fetch >= self._rotation_cooldown_s:
                 log.info(
                     "jwks: kid %r absent from a fresh document, refetching (rotation?)", kid
                 )
+                # No stale fallback on this path, and none is possible: the
+                # document in hand is FRESH and does not contain this kid, so
+                # there is no older key to fall back to. A failure here stays a
+                # 503, which is what an unreachable provider is.
                 await self._fetch(now)
                 if kid in self._keys:
                     return self._keys[kid]
 
             raise UnknownSigningKey(kid)
+
+    def _backing_off(self, now: float) -> bool:
+        """Did a fetch fail recently enough that retrying is just queueing?"""
+        return self._failed_at is not None and now - self._failed_at < self._failure_backoff_s
+
+    def _stale_key_usable(self, kid: str, now: float) -> bool:
+        """Is this `kid` in a document that is past its TTL but inside the grace?"""
+        if self._fetched_at is None or kid not in self._keys:
+            return False
+        return now - self._fetched_at <= self._ttl_s + self._stale_grace_s
+
+    def _serve_stale(self, kid: str, now: float, why: str) -> Any:
+        self.stale_serves += 1
+        age = 0.0 if self._fetched_at is None else now - self._fetched_at
+        log.warning(
+            "jwks: serving STALE key %r — %s and the cached document is %.0fs old "
+            "(ttl %.0fs + grace %.0fs). Signature, exp, nbf, iss and aud are all "
+            "still enforced and an unknown kid is still refused; this only avoids "
+            "locking every user out while Clerk is unreachable (§18, 7.34).",
+            kid,
+            why,
+            age,
+            self._ttl_s,
+            self._stale_grace_s,
+        )
+        return self._keys[kid]
 
     async def _fetch(self, now: float) -> None:
         """Replace the cached document. Callers hold the lock."""
@@ -273,11 +356,19 @@ class JwksCache:
                 response = await client.get(self.url)
                 response.raise_for_status()
                 document = response.json()
+            keys = _parse_jwks(document)
+        except JwksUnavailable:
+            # A document that parsed to nothing usable is as unavailable as one
+            # that never arrived, and both should arm the backoff.
+            self._failed_at = now
+            raise
         except Exception as exc:  # noqa: BLE001 — every transport failure is one thing here
+            self._failed_at = now
             raise JwksUnavailable(f"{type(exc).__name__}: {exc}") from exc
 
-        self._keys = _parse_jwks(document)
+        self._keys = keys
         self._fetched_at = now
+        self._failed_at = None
         log.info(
             "jwks: fetch #%d from %s → %d key(s) %s",
             self.fetches,
@@ -383,6 +474,7 @@ def auth_config() -> AuthConfig:
                 jwks_url,
                 ttl_s=max(1, extra.clerk_jwks_ttl_s),
                 timeout_s=extra.clerk_jwks_timeout_s,
+                stale_grace_s=max(0.0, extra.clerk_jwks_stale_grace_s),
             )
         ),
     )
@@ -399,6 +491,11 @@ def reset_auth_config() -> None:
 DEPLOYED_ENV_VALUES: Final[frozenset[str]] = frozenset(
     {"production", "prod", "staging", "stage", "live", "preview"}
 )
+#: …and the PREFIXES of such values, because the exact-set test missed
+#: `ENVIRONMENT=prod-us` — a real spelling that boots an unauthenticated API on a
+#: production cluster (DEVIATIONS 7.36). Deliberately not `dev`, `development`,
+#: `local` or `test`: those must keep working.
+DEPLOYED_ENV_PREFIXES: Final[tuple[str, ...]] = ("prod", "stag", "live", "preview")
 #: Variables that name an environment.
 ENV_NAME_VARS: Final[tuple[str, ...]] = (
     "ENV",
@@ -425,10 +522,52 @@ PLATFORM_VARS: Final[tuple[str, ...]] = (
     "VERCEL",
     "GAE_ENV",
     "WEBSITE_INSTANCE_ID",
+    # Added after the Phase 6 audit booted a bypassed API with each of these set
+    # (7.36). `AWS_EXECUTION_ENV` above is not enough on its own: the al2023
+    # Lambda runtimes stopped setting it, so `AWS_LAMBDA_FUNCTION_NAME` and
+    # `LAMBDA_TASK_ROOT` are the ones that are actually always there.
+    "K_SERVICE",  # Cloud Run / Knative
+    "K_REVISION",
+    "CONTAINER_APP_NAME",  # Azure Container Apps
+    "WEBSITE_SITE_NAME",  # Azure App Service / Functions
+    "FUNCTIONS_WORKER_RUNTIME",
+    "AWS_LAMBDA_FUNCTION_NAME",
+    "LAMBDA_TASK_ROOT",
+    "ECS_CONTAINER_METADATA_URI_V4",
+    "HEROKU_APP_NAME",
+    "NOMAD_ALLOC_ID",
+    "OPENSHIFT_BUILD_NAME",
+    "CF_PAGES",
+    "KOYEB_APP_NAME",
 )
+#: Variables that mean "a platform is telling this process how to serve".
+#:
+#: `PORT` is the archetype and it is the one addition here with a real
+#: false-positive risk — a developer may have it exported for something else. It
+#: is taken anyway: every PaaS on earth sets it, a laptop demo of THIS repo does
+#: not (`make dev` passes `--port 8000` as a flag), and §18's trade is already
+#: "a false positive costs one env var during a demo, a false negative costs an
+#: unauthenticated production API". The refusal names the variable.
+SERVING_HINT_VARS: Final[tuple[str, ...]] = ("PORT",)
 #: Database hosts that can only be a developer machine.
+#:
+#: The empty string is NOT in here any more. A `DATABASE_URL` whose host parses
+#: to nothing is a unix socket, and `?host=/cloudsql/…` is a deployment, not a
+#: laptop (7.36). An *empty* `DATABASE_URL` is handled separately, because that
+#: is "unconfigured" rather than "deployed".
 LOCAL_DB_HOSTS: Final[frozenset[str]] = frozenset(
-    {"", "localhost", "127.0.0.1", "::1", "db", "postgres", "host.docker.internal"}
+    {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
+)
+#: Hostnames that only resolve inside a container network — which is to say, this
+#: process is in a container. `db` is the service name in this repo's own
+#: `docker-compose.yml`, and it used to be on the LOCAL list: stand that compose
+#: file up on a rented VPS with the bypass on and the guard saw a local-looking
+#: database, no environment variable and a test Clerk key, and booted a fully
+#: unauthenticated API on a public address. `make dev` is unaffected — it runs the
+#: API on the host against `localhost:5433`, which is exactly why compose
+#: publishes `5433:5432`.
+CONTAINER_DB_HOSTS: Final[frozenset[str]] = frozenset(
+    {"db", "database", "postgres", "postgresql", "pg", "pgbouncer"}
 )
 
 _BYPASS_BANNER = (
@@ -436,6 +575,23 @@ _BYPASS_BANNER = (
     "runs as the fixed local session %r (§18). This is a laptop-only fallback; "
     "it refuses to start anywhere that looks deployed."
 )
+
+
+def is_deployed_env_value(value: str) -> bool:
+    """Does an environment-name variable's value mean "not a laptop"?
+
+    Exact membership OR a prefix match, because the exact-only version booted a
+    bypassed API under `ENVIRONMENT=prod-us` (DEVIATIONS 7.36).
+
+    `tests/conftest.py` scrubs these values before importing this module and so
+    duplicates the rule rather than calling this function — importing
+    `storyforge.auth` is what runs the guard, which is the thing the scrub exists
+    to avoid. Keep the two in step.
+    """
+    normalised = value.strip().lower()
+    if not normalised:
+        return False
+    return normalised in DEPLOYED_ENV_VALUES or normalised.startswith(DEPLOYED_ENV_PREFIXES)
 
 
 def deployment_signals(database_url: str = "", clerk_secret_key: str | None = None) -> list[str]:
@@ -446,21 +602,48 @@ def deployment_signals(database_url: str = "", clerk_secret_key: str | None = No
     message at 3am. The list is deliberately over-eager: a false positive costs
     one env var during a demo, a false negative costs an unauthenticated
     production API.
+
+    **This is still a list of negative signals, and that is its weakness.** A
+    bare `docker run -e DEMO_BYPASS_AUTH=true` on a public host sets none of
+    them. The honest control is the inverse — refuse unless an explicit local
+    assertion is present and the process is not bound to `0.0.0.0` — and it is
+    recorded as the follow-up in DEVIATIONS 7.36 rather than pretended away here.
     """
     signals: list[str] = []
 
     for name in ENV_NAME_VARS:
         value = (os.environ.get(name) or "").strip().lower()
-        if value in DEPLOYED_ENV_VALUES and value:
+        if is_deployed_env_value(value):
             signals.append(f"{name}={value}")
 
     for name in PLATFORM_VARS:
         if (os.environ.get(name) or "").strip():
             signals.append(f"{name} is set (platform-injected)")
 
-    host = (urlsplit(database_url).hostname or "").strip().lower()
-    if host and host not in LOCAL_DB_HOSTS:
+    for name in SERVING_HINT_VARS:
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            signals.append(
+                f"{name}={value} is set — a platform is telling this process where "
+                f"to listen. Unset it to run the §18 bypass locally."
+            )
+
+    url = (database_url or "").strip()
+    host = (urlsplit(url).hostname or "").strip().lower()
+    if host and host in CONTAINER_DB_HOSTS:
+        signals.append(
+            f"DATABASE_URL host {host!r} only resolves inside a container network, "
+            f"so this process is containerised"
+        )
+    elif host and host not in LOCAL_DB_HOSTS:
         signals.append(f"DATABASE_URL points at a non-local host ({host})")
+    elif url and not host:
+        # A unix socket. Could be Postgres.app on a laptop; could equally be
+        # `?host=/cloudsql/project:region:instance`. The hostname is the thing
+        # this function checks and there is none, so it cannot be verified local.
+        signals.append(
+            "DATABASE_URL has no host (unix socket), so it cannot be verified as local"
+        )
 
     if (clerk_secret_key or "").startswith("sk_live_"):
         signals.append("CLERK_SECRET_KEY is a live key (sk_live_…)")
@@ -838,6 +1021,7 @@ __all__ = [
     "bearer_token",
     "current_principal",
     "deployment_signals",
+    "is_deployed_env_value",
     "load_or_create_user",
     "owned_kid",
     "owned_reading",

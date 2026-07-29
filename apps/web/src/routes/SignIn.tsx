@@ -9,7 +9,7 @@
  * portal would work too and would take the parent off this origin mid-flow,
  * which is a worse thing to ask of someone typing a password.
  *
- * The `redirect_url` parameter is the deep link a guard interrupted, validated
+ * The `next` parameter is the deep link a guard interrupted, validated
  * to a same-origin path first (DEVIATIONS 6.23) — an unvalidated post-login
  * redirect is an open redirect with a session attached to it.
  *

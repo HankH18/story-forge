@@ -96,7 +96,8 @@ function ClerkTokenBridge() {
  *
  * Signed out is a redirect, not a 401 toast and not a blank screen — those are
  * the two shapes this guard exists to prevent. The deep link rides along in
- * `?redirect_url=` so the parent lands where they were going.
+ * `?next=` so the parent lands where they were going (`next`, not `redirect_url`:
+ * Clerk consumes that name itself — lib/authPaths.ts, DEVIATIONS 7.31).
  */
 export function RequireParent({ children }: { children: ReactNode }) {
   const { isLoaded, isSignedIn } = useAuth()

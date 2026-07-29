@@ -40,6 +40,14 @@
  * it has no legitimate caller: the stage belongs to the child, and the child is
  * already in the URL.
  *
+ * **And it is that child or no child.** `resolveKid` used to fall back to the
+ * account's first reader for an id it did not recognise, so `/read/162` from an
+ * account that does not own kid 162 rendered "hello Audit" — a different child —
+ * and filed the reading, and its §8 mastery evidence, against Audit's row. The
+ * URL said 162 and nothing on screen disagreed. That fallback is gone
+ * (DEVIATIONS 7.33); an unrecognised id is an unresolvable reader and takes the
+ * same route as no reader at all, which is the one below.
+ *
  * Nothing here invents a reader: §13 means kid mode holds no name, no birthday,
  * no identity of any kind that a parent did not already enter.
  */
@@ -99,7 +107,12 @@ const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve
 export default function KidSession() {
   const params = useParams()
   const navigate = useNavigate()
-  const kidId = Number(params.kidId ?? '1') || 1
+  // `NaN` for `/read/nonsense`, and that is the honest answer: it used to fall
+  // back to `1`, a guess at a kid id, which `resolveKid` then turned into a real
+  // but WRONG reader. `resolveKid` rejects anything that is not a positive
+  // integer, so this lands on the same route as an unowned id — the adult's
+  // screen (DEVIATIONS 7.33).
+  const kidId = Number(params.kidId)
 
   const [phase, setPhase] = useState<Phase>('picker')
   const [themes, setThemes] = useState<Theme[]>([])

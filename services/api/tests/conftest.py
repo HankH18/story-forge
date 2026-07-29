@@ -58,8 +58,16 @@ os.environ["DEMO_BYPASS_ROLE"] = "admin"
 # every test with a startup error, so the ones this suite can safely disclaim
 # are cleared here. DATABASE_URL is NOT touched: pointing the tests at a remote
 # database really should stop the bypass dead.
+#
+# The prefixes mirror `auth.DEPLOYED_ENV_PREFIXES` / `auth.is_deployed_env_value`
+# (DEVIATIONS 7.36) and are duplicated rather than imported ON PURPOSE: importing
+# `storyforge.auth` is what runs the guard, which is the thing this scrub exists
+# to get in front of. Both sites cross-reference each other.
+_DEPLOYED_VALUES = {"production", "prod", "staging", "stage", "live", "preview"}
+_DEPLOYED_PREFIXES = ("prod", "stag", "live", "preview")
 for _leaked in ("ENV", "ENVIRONMENT", "APP_ENV", "PYTHON_ENV", "NODE_ENV", "DEPLOY_ENV"):
-    if os.environ.get(_leaked, "").strip().lower() in {"production", "prod", "staging", "stage"}:
+    _value = os.environ.get(_leaked, "").strip().lower()
+    if _value and (_value in _DEPLOYED_VALUES or _value.startswith(_DEPLOYED_PREFIXES)):
         del os.environ[_leaked]
 
 # Imported only after the environment above is settled.

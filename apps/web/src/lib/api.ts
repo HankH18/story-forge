@@ -335,19 +335,33 @@ export async function listKids(): Promise<Kid[]> {
 }
 
 /**
- * Which reader this session belongs to.
+ * Which reader this session belongs to — **that reader, or none.**
  *
- * §9 has no `GET /api/kids/{id}` — the list is parent-scoped and will be tiny,
- * so the id in the URL is resolved against it. A url naming a kid who does not
- * exist falls back to the first reader rather than 404ing: kid mode has no
- * error state, and "wrong id in the address bar" is an adult's mistake that a
- * child would pay for. Returns null only when the parent has no kids at all,
- * which the caller runs as an anonymous session — kid mode never *creates* a
- * kid, because that is a parent action with a name attached to it (§13).
+ * §9 has no `GET /api/kids/{id}`: the list is parent-scoped and tiny, so the id
+ * in the URL is resolved against it, and an id that is not in it belongs to
+ * another family or to nobody. Either way the answer is `null`.
+ *
+ * This used to end `?? kids[0] ?? null` — substitute the caller's own first
+ * reader — and it was documented and defended for a *typo*: "kid mode has no
+ * error state, and a wrong id in the address bar is an adult's mistake that a
+ * child would pay for." That reasoning is right about the child and wrong about
+ * the family. `/read/162` signed in as an account that does not own kid 162
+ * rendered the full kid shell greeting a DIFFERENT child by name, and filed the
+ * reading — and its §8 mastery evidence — against that child's row (audit C9,
+ * DEVIATIONS 7.33). A parent with two readers who hands over a tablet on a stale
+ * URL is the ordinary case, not the adversarial one, and the product's answer was
+ * to record the wrong child's reading rather than to ask.
+ *
+ * `null` is not an error surface. `KidSession` shows §07's printer and routes to
+ * `/app`, the adult's own screen, which knows how to name the readers and how to
+ * add one (DEVIATIONS 7.24). A child never sees a failure; an adult sees the
+ * actual problem on the surface built to explain it. Kid mode never *creates* a
+ * kid either — that is a parent action with a name attached to it (§13).
  */
 export async function resolveKid(kidId: number): Promise<Kid | null> {
+  if (!Number.isInteger(kidId) || kidId <= 0) return null
   const kids = await listKids()
-  return kids.find((k) => k.id === kidId) ?? kids[0] ?? null
+  return kids.find((k) => k.id === kidId) ?? null
 }
 
 export async function getProgress(kidId: number): Promise<Progress | null> {
@@ -385,10 +399,6 @@ async function attempt<T>(path: string, init?: RequestInit): Promise<Result<T>> 
     // than "the server said no".
     return { ok: false, status: 0, message: err instanceof Error ? err.message : String(err) }
   }
-}
-
-export function isUnauthorized(result: { ok: false; status: number }): boolean {
-  return result.status === 401 || result.status === 403
 }
 
 export async function fetchKids(): Promise<Result<Kid[]>> {

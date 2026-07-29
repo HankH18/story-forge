@@ -57,9 +57,16 @@ export default function AddKid() {
     }
 
     setSubmitting(false)
+    // 401 only. 403 used to be folded in here for a case that cannot occur:
+    // `require_admin` is the only 403 in the API, it guards one route, and this
+    // form does not call it (DEVIATIONS 7.37). And the copy no longer says
+    // "expired… sign in again" without qualification — Clerk may still consider
+    // the session live, which is why the parent surface's 401 screen signs out
+    // first (7.32); a form telling them to do the thing that loops is the same
+    // dead end one screen over.
     setError(
-      result.status === 401 || result.status === 403
-        ? 'Your session has expired. Sign in again and this reader can be added.'
+      result.status === 401
+        ? 'The server did not accept this sign-in, so nothing was saved. Open “All readers” and sign out and in again, then this reader can be added.'
         : result.status === 0
           ? 'Could not reach Story Forge. Nothing was saved — try again.'
           : `Could not add this reader (${result.message}).`,

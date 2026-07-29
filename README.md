@@ -12,8 +12,16 @@ LLM is an untrusted generator. A pure function is the gate.
 make install   # uv sync (API, Python 3.12) + bun install (web)
 make dev       # Postgres via Docker, API on :8000, web on :5173
 make test      # API + decoder tests, plus a web typecheck
+make eval      # §14 harness: 12 stages x 3 themes x 5 stories, real API
 make help      # all targets
 ```
+
+`make eval` is where the guarantee is tested rather than asserted. It runs the
+real pipeline against the real model, checks §1's acceptance criteria, and exits
+non-zero when they are not met — a bad pass rate is reported as bad. Latest
+results, with the model ids, pricing date and total cost: **`docs/EVAL.md`**.
+`make eval EVAL_ARGS="--estimate-only"` projects the spend without calling the
+API; `make eval-smoke` is the cheap 4-story regression gate.
 
 `make dev` blocks until Postgres is genuinely accepting connections before
 starting the API, so migrations never race an unready socket.

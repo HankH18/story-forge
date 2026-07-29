@@ -139,10 +139,46 @@ verdict at the edit site.
   `_SERVE_SQL` serves `warm|complete`.
 
 ## JOB D — Phase 7 remainder
-Full `make eval` run + §14 report (held deliberately: the pool changed under it,
-so any earlier numbers are void). Then deploy — artifacts exist and were
-exercised locally (`services/api/Dockerfile`, `.do/app.yaml`, `docs/DEPLOY.md`),
-**nothing is deployed and no DO resources exist**. That is the user's call.
+
+### `make eval` + the §14 report — DONE. Read `docs/EVAL.md`.
+Full 12 stages x 3 themes x 5 stories against the live model. **169 of 169
+stories that the model produced cleared the 95% gate; 0 finished below it.** p95
+rewrite depth 1 (§1 budget 2), 0 OOV, 0 over the story-word cap. Cost **$2.7958**
+at 2026-07-29 pricing (Sonnet 5 intro rate), $0.0178 per accepted story excluding
+enrichment. Deviations 7.40-7.51.
+
+`make eval` **exits non-zero**, on availability rather than decodability: 11 of
+180 cells never produced text because §7's 30s generation timeout is too tight at
+the 120-200 word stages. Four findings worth acting on, all in `docs/EVAL.md`:
+
+1. **The 30s generation timeout (§7) fails ~7% of cells at stages 9-12** and
+   pushes cold p95 to 59.8s against §1.6's 12s. Successes there are landing on
+   SDK retry. `warm.py` still dies outright on the same exception (below).
+2. **`of` is neither decodable nor a sight word at any stage.** One of the
+   commonest words in English costs every story that uses it part of its 5%
+   violation budget. Appendix A's 33-row sight-word list is the fix; it needs
+   `make precompute` and the §5.7 goldens re-run, so it was not made here.
+3. **`data/blocklist.txt` blocks `high`** (drugs section), which killed a 100%
+   decodable, entirely safe stage-6 space story — *"The stars are very high."*
+   §13's own approve list names "high places". Two of 3 layer-1 rejects are this
+   word. Do NOT just delete it without re-testing both directions (STATE 5).
+4. **The grammar half of §13 rejects on SEMANTICS, not grammar**, in 5 of 8
+   cases ("Rockets do not run", "wings cannot sit", "should be cave not can").
+   Its own prompt says "Judge the grammar, not the sense." 8 of 12 moderation
+   rejects are grammar, so this is most of the 12.8% fallback rate.
+
+Also: **length compliance is 52% overall and 7-13% at stages 9-12** — the model
+returns ~90-102 words against a 120-200 target. Decodability is unaffected.
+
+Eval artifacts: `reports/eval-*.md` + `.json` (gitignored), `eval_runs` id 2 and
+its 180 `eval_run_items`. The 169 stories it wrote are `status='eval'`, a fourth
+status no serving path names (7.41) — verified live, 36/36 (stage, theme) probes
+served a non-eval story and all 169 are 404 by id. Servable pool 52 -> 52.
+
+### Deploy — still not done
+Artifacts exist and were exercised locally (`services/api/Dockerfile`,
+`.do/app.yaml`, `docs/DEPLOY.md`), **nothing is deployed and no DO resources
+exist**. That is the user's call.
 
 ---
 

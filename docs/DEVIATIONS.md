@@ -1479,3 +1479,559 @@ whatever happens to be on `:8000` — is precisely how the audit's finding 0
 happened. `VITE_API_PROXY_TARGET` (and `VITE_DEV_PORT` / `VITE_PREVIEW_PORT`, so
 two dev servers can coexist) default to the previous values, so `make dev` is
 unchanged.
+
+## Phase 7 — the JOB C audit remainder (`docs/AUDIT-PHASE6.md` C4–C9)
+
+The six smaller findings the C1/C2/C3 pass left behind. Logged before the change,
+per §0. Every claim below is marked PROVED (reproduced with the command shown) or
+ASSUMED.
+
+**7.30 — `apps/web` gets a real test runner. `make test-web` runs typecheck AND
+tests, and `bun test` is the runner.**
+`make test-web` was `bun run typecheck` — `tsc --noEmit` and nothing else — so
+the "395 tests green" line in `docs/STATE.md` described 395 *Python* tests and
+zero lines of web behaviour. The Phase 5 audit said so and it stayed true for two
+more phases. Every defect in this file that lived in `apps/web` (the `DEFAULT_STAGE`
+fallback, the `?stage=` escalation, `safeRedirectPath`, the substituted reader)
+was in code a type checker cannot have an opinion about.
+
+`bun test` rather than vitest + jsdom: the runner is already in the toolchain
+(`bun` builds and serves this app), it needs no new dependency beyond the
+`@types/bun` already in `devDependencies`, and it runs the TypeScript directly
+with no transform config to drift from Vite's. What that buys is the *pure*
+layer — `lib/authPaths.ts`, `lib/text.ts`, `lib/grade.ts`, `lib/plan.ts`,
+`lib/phonics.ts` — which is where the reasoning lives. **Component tests are
+deliberately NOT attempted here**: they need jsdom, a Clerk test harness and a
+router, and a shallow-rendered `<KidSession>` would have proved nothing about the
+two defects it actually had. The honest statement of coverage is "the pure
+helpers are tested; the components are verified in a real browser", and both
+halves of that are now true rather than one.
+
+Tests are co-located (`src/lib/*.test.ts`) so `tsconfig.json`'s existing
+`include: ["src"]` type-checks them: a test that does not compile is a test that
+does not run, and `bun test` alone would not have told us. They are not in the
+bundle — nothing imports them from the entry graph.
+
+**7.31 — `safeRedirectPath` is an ORIGIN COMPARISON now, not a prefix check.**
+PROVED bypass, on the live sign-in route:
+`/sign-in?redirect_url=%2F%5Cevil.example%2Fx` → the function returned the value
+unchanged, `new URL(that, location.origin)` resolves to `http://evil.example/x`,
+and the only thing that stopped the redirect was Clerk's own
+`allowedRedirectOrigins`. Five shapes got through — `/\`, `/\/`, TAB, CR/LF,
+`/\@` — while the three the old comment named (`//`, `https://`, `javascript:`)
+were correctly neutralised.
+
+The class, not the cases: the WHATWG URL parser **strips** leading/trailing C0
+characters and spaces and **removes** TAB/CR/LF from anywhere in a URL before
+parsing, and treats `\` as `/` in a special-scheme path. So a prefix check on the
+raw string is asking a question about a string the parser will never see. The fix
+resolves the value against a fixed sentinel origin and requires the result to
+still be on it, then returns the *resolved* `pathname + search + hash` rather
+than the raw input — so a caller cannot be handed a string that means something
+different once a browser parses it. A control-character/backslash rejection sits
+in front of that as a second line, because a value containing them is not the
+value it appears to be even when the origin survives.
+
+The sentinel is a constant (`https://storyforge.invalid`, RFC 2606) rather than
+`location.origin`, so the function keeps the property its own docstring is built
+on: no imports, no DOM, no React — which is also what makes it testable.
+
+`redirect_url` is still only passed to `forceRedirectUrl` on Clerk's widgets, so
+**And the parameter is renamed from `redirect_url` to `next`, which is the half
+of this finding the audit did not reach.** Fixing the function turned out not to
+be enough, and the reason was measured rather than reasoned. With the fix in
+place, driving
+`http://localhost:5193/sign-in?redirect_url=%2F%5Cevil.example%2Fx` — signed out,
+no sign-in attempted, `<SignIn forceRedirectUrl="/app">` being the only thing this
+app passed — still logged:
+
+```
+Clerk: Redirect URL http://evil.example/x is not on one of the
+allowedRedirectOrigins, falling back to the default redirect URL.
+```
+
+**Clerk reads `redirect_url` off the query string itself, by name.** So while that
+was the parameter's name, `safeRedirectPath` was not the control on it at any
+value — Clerk's `allowedRedirectOrigins` was the only layer, and DEVIATIONS 6.23
+credited this file for work it was structurally incapable of doing. Under `next`,
+a name Clerk does not consume, the same URL produces **no warning at all** (the
+value never reaches Clerk) and a legitimate `?next=%2Fdashboard%2F1648` still
+lands on `/dashboard/1648` — both driven in a real browser against an API with
+`DEMO_BYPASS_AUTH=false` and `garbage token -> 401` confirmed first. Clerk keeps
+its allowlist; it is simply no longer the only thing standing there.
+
+There was no live open redirect before this and there is not one now: the value
+is only ever handed to `forceRedirectUrl`. What changes is that the claim in the
+comment is now true.
+
+**7.32 — The 401 screen no longer contradicts the header above it, and its
+remedy is `signOut()` rather than a link back to itself.**
+PROVED against an API that verifies signatures but rejects the issuer (so a
+genuinely signed-in SPA 401s on every call — the real session-expiry shape):
+the page rendered "Please sign in again" *underneath* `ParentHome`'s "SIGNED IN
+AS holcombhank@gmail.com" and a live `<UserButton/>`, and clicking its "Sign in"
+button returned to `/app` with the same error and this console line: *"The
+`<SignIn/>` component cannot render when a user is already signed in … Clerk is
+redirecting to the `afterSignIn` URL instead."*
+
+Both halves are the same root cause: `SignedIn`/`SignedOut` read Clerk's *client*
+state, which is still valid, while the error is the *API* refusing the token. So
+the screen was describing two different systems as if they were one.
+
+- The heading is now "Your session was not accepted" and the copy says which
+  side refused, because "sign in again" to someone Clerk considers signed in is
+  an instruction that cannot be followed.
+- The remedy is `<SignOutButton redirectUrl="/sign-in">` when Clerk thinks the
+  session is live, and a plain sign-in link when it does not. Signing out first
+  is the whole point: it clears the stale client session that makes `<SignIn>`
+  refuse to render.
+- `ParentHome` suppresses its "Signed in as …" line when the API has rejected the
+  session. The line exists to make a session legible (it was added because the
+  demo bypass made "no session" look identical to "session"); printing it next to
+  "your session was not accepted" makes it a lie instead.
+
+The token lifecycle itself audited CLEAN — 16 probes over 150 s, 4 distinct
+tokens, zero 401s — so this is the genuine-expiry edge case, not something a
+parent meets in ordinary use. It is a dead end when they do meet it.
+
+**7.33 — `resolveKid` no longer substitutes a DIFFERENT CHILD, and an
+unrecognised reader id routes the ADULT to `/app`.**
+PROVED: `/read/162` signed in as an account that does not own kid 162 rendered
+the full kid shell greeting *"hello Audit"* — kid 4096, this account's own first
+reader — and the reading was filed against 4096 (`readings.id 5396 | kid_id 4096`).
+7.21 half-closed this: the request now carries `kid_id` and the stage is the
+substituted child's, so the text is decodable and nothing undecodable reaches a
+screen. What remained is the worse half for a parent: **silent wrong
+attribution.** Child B's session lands on child A's row, at child A's stage, and
+§8's mastery evidence — the thing the dashboard exists to report — is now about
+the wrong kid, with no signal anywhere.
+
+`?? kids[0]` was documented and defended for a *typo*: "kid mode has no error
+state, and a wrong id in the address bar is an adult's mistake that a child would
+pay for". That reasoning is right about the child and wrong about the family. A
+parent with two readers who hands over a tablet on a stale URL is the ordinary
+case, not the adversarial one, and the product's answer was to record the wrong
+child's reading rather than to ask.
+
+So `resolveKid` returns the exact match or `null`, and `KidSession` already knows
+what to do with `null` — 7.24's route to `/app`, the adult's own screen. A child
+still never sees an error: they see the printer for one frame and then the grown-up
+screen. `/read` with no id at all used to `<Navigate to="/read/1">`, a hard-coded
+guess at a kid id, and now goes to `/app` for the same reason.
+
+Cost, stated rather than buried: the dev fixture URL is now
+`/read/<a real kid id>?fixture=branch` instead of `/read/1?fixture=branch`, and a
+genuine typo costs one extra tap on the adult screen instead of silently reading
+as somebody else. That is the trade this project should always take.
+
+**7.34 — The JWKS cache serves STALE keys for a bounded grace window when Clerk
+is unreachable. It does not fail open.**
+PROVED against a controllable JWKS stub with `CLERK_JWKS_TTL_S=5`: a 500 after
+the TTL lapsed and a refused connection both produced
+`503 {"detail":"JWKS unavailable: …"}` while the cache was still holding keys
+that were *still valid and would have verified the token correctly*. A Clerk
+outage lasting longer than the 600 s TTL therefore takes the whole product down —
+the parent surface renders "Something went wrong" (503 is neither 401 nor 403 nor
+0) and kid mode parks on the printer screen.
+
+`key_for` now catches `JwksUnavailable` from its own fetch and, if the token's
+`kid` is in the keys it already holds and the document is no older than
+`ttl + CLERK_JWKS_STALE_GRACE_S` (default 3600 s), logs at WARNING and serves it.
+Three properties keep this closed rather than open, and each is the reason the
+obvious dangerous version was not written:
+
+1. **An unknown `kid` is still refused.** A stale document cannot introduce a key
+   it never contained, so the "verify anything" failure mode is unreachable: if
+   the fetch failed *and* the kid is not in the stale cache, the original
+   `JwksUnavailable` propagates and the caller still gets 503.
+2. **Nothing about signature or claim checking changes.** The key is a real Clerk
+   public key that Clerk published; `exp`, `nbf`, `iss` and `aud` are enforced by
+   PyJWT exactly as before. An expired token is still expired.
+3. **The window is bounded and configurable.** Past the grace period the cache
+   refuses again, so "Clerk is gone forever" does not become "this API trusts a
+   key set from last Tuesday". RSA signing keys outlive an hour by design — this
+   is what every RFC-conformant cache does with `stale-if-error`.
+
+The alternative — leave it fail-closed and accept the downtime — was considered
+and rejected, but the *reason* matters: it is rejected because serving a stale
+key is not a weakening of the security property. Had the fallback required
+skipping signature verification, or trusting an unverified `kid`, the right answer
+would have been to take the outage. Availability never buys a bypass here.
+
+A fetch-failure backoff comes with it (`_FAILURE_BACKOFF_S = 30`): while the
+document is stale-but-usable and the last fetch failed recently, requests are
+served from the stale cache without re-attempting the fetch. Without it every
+request retries a 5-second connect while holding the cache lock, which turns an
+identity-provider outage into a queue.
+
+**7.35 — The rotation cooldown stays armed by every fetch. The audit's SUSPECTED
+finding on `_last_rotation_fetch` is real, bounded, and deliberately NOT fixed.**
+`_fetch` sets `_last_rotation_fetch = now` on every call including ordinary TTL
+refreshes, so routine traffic arms the 60 s anti-amplification cooldown, and for
+up to 60 s after a routine refetch a token signed by a newly published Clerk key
+can be 401'd even though a refetch would fix it. The mechanism is confirmed by
+reading; the audit could not trigger it against real Clerk, which publishes the
+old and new keys together during a rotation.
+
+Moving the assignment into the rotation branch — the obvious one-line fix — was
+worked out and then refused, because of what it costs.
+`test_an_unknown_kid_cannot_be_used_to_hammer_the_jwks_endpoint` sends 50
+requests naming 50 nonexistent `kid`s and asserts **zero** extra fetches. Armed
+only by rotation, the first of those 50 triggers a refetch before the cooldown
+engages, and that assertion has to become `<= baseline + 1`. That is loosening a
+*proven* anti-amplification property to close a ≤60 s window that self-heals and
+that nobody has observed. The test is not wrong, so `justify-test-edit`'s bar —
+overwhelming evidence the TEST is wrong, not merely that it is inconvenient — is
+not met, and the trade is refused rather than taken quietly.
+
+Worth recording because it was mis-read once during this pass, and the mis-reading
+is instructive: the coupling is load-bearing in the *other* direction too.
+`_fetch` arms the cooldown at its own **start**, so a cold cache asked for an
+unknown `kid` makes ONE fetch rather than two — the TTL fetch it has just begun
+already armed the cooldown that the rotation branch then declines to fire.
+`test_the_real_jwks_is_fetched_once_and_then_cached` asserts precisely that
+(`fetches == 1` after a bootstrap lookup for a nonexistent kid, against real
+Clerk) and would go red on any change that separated the two clocks naively.
+
+A `fetched_now` guard is added regardless, so that case holds by statement instead
+of by coincidence: the rotation refetch is skipped when this same call already
+fetched the document, which is the only honest reason to skip it. With
+`rotation_cooldown_s=0` — a tests-only setting — that guard is the difference
+between one fetch and two of a byte-identical document.
+
+The fix, if this ever bites, is to make the two clocks separate — a
+`_last_rotation_attempt` distinct from the fetch timestamp, armed only on the
+rotation path, so both properties hold at once. That is a change to the most
+security-sensitive class in the API and it wants the rotation drill run against
+real Clerk, not a drive-by inside an audit-remediation pass.
+
+**7.36 — The §18 startup guard's signals are widened: env-value PREFIXES,
+container DB hostnames, unix sockets, `PORT`, and six more platform variables.**
+PROVED gaps, each `DEMO_BYPASS_AUTH=true` plus the named variable, importing
+`storyforge.auth`: `DATABASE_URL=…@db:5432/storyforge` **booted**, and `db` is
+the service name in this repo's own committed `docker-compose.yml`. So the single
+most obvious way to put the demo on a rented VPS — `docker compose up` on a
+public host — produced a fully unauthenticated API on a public address. Also
+booting: a unix-socket `DATABASE_URL` (hostname parses to `""`, which was in
+`LOCAL_DB_HOSTS`), `ENVIRONMENT=prod-us` (the check was exact-set membership),
+`PORT=8080`, `K_SERVICE`, `CONTAINER_APP_NAME`, `AWS_LAMBDA_FUNCTION_NAME`,
+`HEROKU_APP_NAME`, `NOMAD_ALLOC_ID`, `OPENSHIFT_BUILD_NAME`, `CF_PAGES`.
+
+Changes:
+- `DEPLOYED_ENV_PREFIXES = ("prod", "stag", "live", "preview")` in addition to
+  the exact set, so `prod-us`, `production-eu`, `staging2` all trip. `dev`,
+  `development`, `local` and `test` still do not.
+- `db`/`postgres`/`postgresql`/`database`/`pg` move OUT of `LOCAL_DB_HOSTS` into
+  `CONTAINER_DB_HOSTS` and become a **signal**. The reasoning inverted: a bare
+  service name only resolves inside a container network, and "we are in a
+  container" is the deployed shape, not the laptop one. `make dev` runs the API
+  on the host against `localhost:5433` (`docker-compose.yml` publishes `5433:5432`
+  precisely so it can), so nothing local uses these names.
+- An empty hostname on a NON-empty `DATABASE_URL` is a signal (unix socket —
+  `/cloudsql/…` is the shape that matters). An empty `DATABASE_URL` is not,
+  because that is "unconfigured", not "deployed".
+- `PORT` is a signal. It is the one addition with a real false-positive risk — a
+  developer may have it exported — and it is taken anyway, because "the platform
+  told this process where to listen" is exactly the discriminator, and the
+  §18 docstring's own trade is already "a false positive costs one env var during
+  a demo, a false negative costs an unauthenticated production API". The refusal
+  names `PORT` and says to unset it.
+
+The audit's stronger recommendation — invert the test, require an explicit
+positive laptop assertion (`STORYFORGE_LOCAL_DEV=…`) plus a `127.0.0.1` bind —
+is NOT taken here and is recorded as the follow-up. It is the better control:
+this list is still ~30 negative signals and a bare `docker run` on a public host
+sets none of them. It was not taken because it changes §18's documented contract
+(one flag) into two steps during exactly the emergency the flag exists for, and
+because `tests/conftest.py` turns the bypass on for the whole suite — that is a
+deliberate decision to make with the contract in hand, not a side effect of an
+audit fix.
+
+`tests/conftest.py`'s env scrub (which clears leaked `ENVIRONMENT=production`-ish
+values before importing `storyforge.auth`, so a CI runner does not fail every
+test at import) is extended with the same prefixes. It cannot import the
+predicate from `auth.py` — importing that module is what runs the guard — so the
+duplication is deliberate and cross-referenced in both files.
+
+**7.37 — The unreachable 403 branch is REMOVED, not kept as decoration.**
+PROVED unreachable: `grep -rn "status_code=403" services/api/storyforge` returns
+exactly one site, `require_admin`; `grep -rn "require_admin" storyforge` puts it
+on exactly one route, `POST /api/validate`; and
+`grep -rn "api/validate\|api/admin" apps/web/src` finds one prose comment in
+`Landing.tsx` and no call. `require_parent` — which guards both routes that can
+render `ParentError` — returns its principal unconditionally and never 403s. So
+`status === 403` in `ParentError` could not fire, and `MISSING_ROLE_CLAIM_DETAIL`,
+the careful sentence naming the Clerk dashboard action, was displayed to nobody.
+
+DEVIATIONS 6.20 reads as shipped behaviour. It was not; it was a branch waiting
+for Phase 8. Wiring an admin surface to reach it means building part of the Phase
+8 portal in an audit-remediation pass, which is how phases blur. Deleting it is
+the honest option: dead error handling that looks like coverage is worse than
+none, because it is counted as a case that has been thought about.
+
+Removed: the 403 branch in `ParentError`, `MISSING_ROLE_CLAIM_DETAIL`, and
+`isUnauthorized` (which folded 403 into 401 for the same non-existent case and
+had no remaining caller at all). `AddKid`'s `status === 401 || status === 403`
+narrows to 401. A 403 arriving from somewhere unforeseen — an edge proxy, a WAF —
+now renders the generic "Something went wrong" with the status in the message,
+which is the truthful rendering of a status this app cannot explain.
+
+**The sentence is preserved here verbatim so Phase 8 can restore it rather than
+re-derive it**, along with the fact that made it necessary: a REAL Clerk session
+token from this instance carries exactly `exp, fva, iat, iss, nbf, sid, sts, sub,
+v` — no `public_metadata` — even for a user whose `public_metadata` IS
+`{"role":"admin"}` server-side, so `role_from_claims` resolves every real session
+to `parent` until someone customises the session token in the dashboard
+(6.13, and it is a dashboard action with no Backend API):
+
+> The API accepted this session but not this screen. Clerk's default session
+> token carries no metadata, so the API reads every signed-in user as a parent —
+> including admins. Someone with access to the Clerk dashboard has to add the
+> claim (Sessions → customize session token → `{"public_metadata":
+> "{{user.public_metadata}}"}`), and then sign in again.
+
+**7.38 — Named and deliberately NOT fixed in this pass.**
+- **C10, kid mode's permanent printer screen.** Three attempts then a "Try again"
+  that re-enters the same loop, reachable by a child pressing "Read another"
+  eleven times in a minute (§9's limiter is 10/min). Still true. The audit's own
+  suggestion — fall back to the last successfully served story — is a change to
+  what a child reads, which is §0/§1 territory and wants its own pass with
+  measured decodability, not a bolt-on inside an auth-remediation job.
+- **C11, a revoked Clerk session's token works until `exp`.** Ordinary stateless
+  JWT trade-off, ≤60 s with Clerk's browser TTL. Checking `sts != "active"` would
+  close it; not touched, because `verify_token` is the most security-sensitive
+  function in the repo and a Backend-API-minted 1800 s token (the only way to
+  observe the window) is not the shape a browser produces.
+- **C12, `GET /api/themes` and `GET /api/stages` still 404.** §9 lists them; the
+  SPA mirrors `data/seed/*.csv` instead, and adding a theme to the CSV without
+  editing `lib/api.ts` in the same commit soft-bricks the new card. Five lines
+  against a table that exists — but it is an API route, and `services/api` was
+  being edited concurrently this session.
+- **The §18 inversion** (positive laptop assertion + bind-address check) — see
+  7.36 for why.
+- **`warm.py` aborting the whole run on `anthropic.APITimeoutError`** — untouched,
+  `warm.py` is outside this job.
+
+**7.39 — What the new web tests are evidence OF, stated so nobody over-reads
+them.**
+They cover pure functions: redirect validation, tokenisation, the local answer
+grader, the branch plan, and the phoneme gloss. They do **not** exercise a
+component, a route guard, Clerk, `fetch`, or anything that touches the network —
+`lib/api.ts` is deliberately untested here, because the interesting thing about
+it is what the server does with the request, and a mocked `fetch` would assert
+the mock.
+
+Two of the five files were proved by sabotage rather than asserted:
+
+- `authPaths.test.ts` run against the PREVIOUS implementation: **19 of 56 red**,
+  including all eight of the `— NEW` cases, each naming the off-origin URL a
+  browser resolves the value to. The corpus also carries its own anti-vacuity
+  test — every member of `OFF_ORIGIN` is asserted to be genuinely off-origin as a
+  raw string, so a corpus of harmless inputs could not pass by looking busy.
+- `phonics.test.ts`'s cross-check against `data/seed/gpcs.csv` was sabotaged in
+  place: changing one example word (`sh|SH` → `shop`) and unmapping one phoneme
+  (`AE`) turned it red on exactly the two assertions that exist for those drifts,
+  and green again on revert. That test is the only one here that can catch a
+  change made in *another* file (the seed inventory), which is why it was worth
+  proving rather than trusting.
+
+`text.test.ts`, `grade.test.ts` and `plan.test.ts` were written after the code
+they cover and are ratchets, not discoveries. Saying which is which is the whole
+reason this entry exists: a suite that does not distinguish the two invites the
+next reader to believe it found something.
+
+## Phase 7 — the eval harness (§14)
+
+`make eval` was a stub that printed "not implemented until phase 7" and exited 1
+(0.5). These entries are the decisions taken to implement §14's full run, logged
+before the change.
+
+**7.40 — `eval_runs` and `eval_run_items` land now, and `story_id` is
+NULLABLE.**
+§8 specifies both tables and `models.py` says in its own docstring that they
+"arrive with Phase 7" — an empty table passing a phase gate is a false green, so
+they were deliberately not created until something wrote to them. This is that
+something.
+
+`eval_run_items.story_id` departs from §8's bare `story_id fk` by being nullable,
+because §14 requires a metrics row for every story the matrix *attempted*, and
+the attempts that produce no story row at all are exactly the interesting ones: a
+generation that raised `APITimeoutError` has latency, an outcome and a cost, and
+no text. Writing those items with a NULL story is how "the harness tried 180
+cells and 178 produced a story" stays computable from the database instead of
+only from a log. `ON DELETE SET NULL` for the same reason in the other direction:
+the metrics outlive the artifact, which is the ordering 7.15 already argued for
+between §8 evidence and the row it was collected against.
+
+**7.41 — Eval stories are persisted with a FOURTH status, `eval`, that no
+serving path can reach.**
+§8's enum is `warm|complete|rejected` and `warm.persist` writes `warm` on a pass
+and `rejected` on a fail. Neither is right here. `warm` would put 100+ unenriched
+stories into the servable pool — precisely the defect the Phase 4 audit found
+(nine servable stories with no questions, silently), and it would also flood the
+§7 fallback ladder with rows no `make warm` run chose to make. `rejected` would
+be a lie about a story that passed the gate and moderation, and would corrupt
+the one number `rejected` currently means ("this failed").
+
+So every story the harness writes — pass or fail — gets `status='eval'`, and the
+verdict lives in `eval_run_items.metrics` and `gen_meta`. The safety argument is
+structural rather than a promise: both serving paths filter on an ALLOWLIST
+(`api/stories.py::SERVABLE_STATUSES = ("warm", "complete")`, used by `_SERVE_SQL`
+and by `GET /api/stories/{id}`), so a status they do not name is unreachable by
+construction, not by remembering to exclude it.
+
+Asserted through the ENDPOINTS, not through the constant, and proved by sabotage.
+`tests/test_eval.py` plants an `eval` story alone at the top of the ladder —
+`_SERVE_SQL` orders `stage_id DESC` under `stage_id <= :stage`, so if the status
+were servable that row is exactly the one that would be served — then checks
+`POST /api/stories/request`, `GET /api/stories/{id}` and `POST /api/readings`.
+Adding `"eval"` to `SERVABLE_STATUSES` turns three of those tests red and the
+request endpoint hands back the fixture, which is what makes them an experiment
+rather than a restatement of the SQL (6.14 is the precedent: a test and the
+endpoint quietly disagreeing about which statuses count). The run also re-reads
+the servable pool size before and after and prints both, and further tests assert
+that no `eval` row ever acquires a `last_served_at`, a question row, or a reading.
+
+`stories.status` carries no CHECK constraint, so this needs no migration. That is
+noted rather than relied on: if a later phase adds one, `eval` belongs in it.
+
+**7.42 — Per-node latency and per-node cost are measured inside `pipeline.py`,
+additively.**
+§14 requires "latency per node, token cost per node" and the pipeline had neither
+— `PipelineResult` carried token usage per *attempt* and no clock at all. A
+harness that timed `run_pipeline` from outside could only ever report one number
+for four nodes, and the interesting question ("is the rewrite loop the cost, or
+is generation?") would be unanswerable.
+
+`Attempt` gains `latency_ms` (the GENERATING/REWRITING API call) and
+`validate_ms` (VALIDATING, the pure function); `PipelineResult` gains
+`vocabulary_ms`, `moderation_ms` and `total_ms`. All default to 0, so every
+existing caller and test constructs the model unchanged, and no control flow
+moves. The clock is `time.perf_counter`, read only around awaits that already
+existed.
+
+**7.43 — `--cold` is accepted, is the only mode, and says so.**
+§14's CLI is `… --n 5 [--cold]`, i.e. cache-bypassed. `run_pipeline` has no cache
+branch to bypass: §7's CACHE_CHECK lives in `api/stories.py::request_story`,
+which reads the warm pool, and the harness never calls it. So the flag is
+accepted for spec fidelity, defaults to `True` with no way to turn it off, is
+recorded in `eval_runs.config`, and its `--help` text says outright that the
+harness is unconditionally cold. There is no `--no-cold`: offering one would
+imply a warm mode that does not exist, and a flag that silently means nothing is
+worse than a flag that states it is the only mode. What is NOT bypassed is
+Anthropic's
+*prompt* cache: the stage vocabulary block carries `cache_control` (STATE 10) and
+disabling it would change the cost numbers away from what production actually
+pays. The matrix therefore iterates stage-major so that reuse is real, and the
+report states cache-read and cache-write tokens separately so anybody can see how
+much of the input was cached.
+
+**7.44 — The spend cap is enforced on the RUNNING ACTUAL, and the pre-flight
+projection is explicitly a token model rather than a promise.**
+Two numbers, and conflating them would be the mistake. The projection is
+arithmetic over prompt sizes the harness can measure without any API call
+(`SYSTEM_RULES` + the stage's vocabulary block + the request block) and an output
+estimate from the stage's own `target_len_max`; it cannot know how many thinking
+tokens Sonnet will spend or how many rewrites the gate will force, so it is
+printed as an order of magnitude and nothing depends on it. The cap that binds is
+checked after every story against the summed `Usage.cost_usd(pricing_date)` of
+the calls actually made: crossing it stops the run, marks it
+`status='budget_stopped'`, writes the report from the items completed, and exits
+non-zero. A partial matrix reported as partial is worth having; a partial matrix
+reported as a pass is not.
+
+**7.45 — The eval does NOT enrich, so "cost per accepted story" is the cost of a
+story that clears the gate, not of a story a child could read.**
+§7 puts ENRICHING after the gate and §14's metric list is entirely about the
+generate/validate/moderate path, so QUESTION_GEN and SCENE_TAGGING are not run:
+they would roughly double the bill for output no metric in §14 reads, and they
+would produce eval rows that look servable. The consequence is stated wherever
+the number appears rather than left for a reader to discover — STATE.md already
+records that enrichment was 45–48% of a warm story's total cost, so the true cost
+of a *servable* story is close to double the figure this report prints.
+
+**7.46 — Moderation rejects are split by LAYER and by GRAMMAR, and the
+hazard/harm split is reported as verbatim reasons because it is not machine-
+derivable.**
+STATE invariant 5 is that moderation separates hazard from harm — a
+fire-breathing dragon is the premise — and §14 wants reject reasons. What the
+verdict actually carries is `layer` (`blocklist` | `model`), `approved`,
+`well_formed` and two free-text strings. `moderate()` folds grammar into
+`approved` and marks it with `UNGRAMMATICAL_PREFIX`, so blocklist / grammar /
+content separate cleanly and deterministically. Hazard-versus-harm does not: it
+is a judgement about the *content the model objected to*, and the only record of
+it is a sentence the model wrote. So the report prints the count per layer, and
+then every content reject's reason verbatim next to its stage and theme, plus a
+clearly-labelled keyword HEURISTIC flagging reasons that look like hazard
+false-positives. A number derived from keyword matching and presented as a
+measurement would be worse than the raw strings.
+
+**7.47 — An API failure is a per-story outcome, not a run-killer.**
+`warm.py` still aborts a whole run on `anthropic.APITimeoutError` (a standing
+finding in `docs/RESUME.md` JOB C). §7's taxonomy is
+`validation_fail | api_fail | moderation_fail | budget_exhausted | timeout` and
+every one of them is a *measurement* for the eval, so the harness catches per
+story, records the outcome and the exception type, and carries on. A matrix that
+dies at cell 140 of 180 because one HTTP call timed out would throw away the
+evidence for 139 cells, and the fallback rate §14 asks for aggregates exactly
+these events. Each item is committed as it completes for the same reason.
+
+**7.48 — Concurrency defaults to 1 so the latency numbers answer §1.6.**
+§1 item 6 is "cold generation p95 < 12s", which is a claim about one request. Any
+concurrency inflates per-story wall time and would make the p95 in the report
+mean something other than what §1 asks. The flag exists (`--concurrency`) and the
+value used is recorded in `eval_runs.config`; the reported run is sequential.
+
+**7.49 — `make eval` exits non-zero when §1 item 2 is not met, and the report is
+written first.**
+Four assertions are checked as a gate, and each has its own line in the report so
+a failure names itself: every story's FINAL decodability >= 95% (a story that
+exhausted the rewrite budget ends below the gate and is counted as a failure of
+the criterion, which is exactly what it is); p95 rewrite depth <= 2; every
+planned cell was attempted; and every planned cell PRODUCED text. The last two
+are separate on purpose — a matrix cut short by the spend cap and a matrix where
+eight cells died on an `api_fail` are different failures, and a run reported as
+covering 180 cells while eight of them are empty is the false green 0.5 forbids.
+
+A moderation reject is NOT a §1 item 2 failure — it is a content verdict on
+a story that met the decodability criterion — so it is reported loudly and does
+not set the exit code, and that division is stated in the report rather than
+implied. The report and the database rows are written before the non-zero exit,
+because §0's rule cuts both ways: the gate is never weakened to make the numbers
+look good, and a bad number is worthless if the run throws away the evidence for
+it on the way out.
+
+**7.50 — `PipelineResult.total_cost_usd` now includes the MODERATING node.**
+It summed `attempts` only, so the Haiku moderation call — a real API call on
+every story that reaches the gate — was missing from `gen_meta.cost_usd` for
+every warm story ever written and from the `eval-smoke` total. Exactly the shape
+of 5.15's discarded enrichment cost, one node over. `generation_cost_usd` and
+`moderation_cost_usd` are added alongside it because §14 requires cost PER NODE
+and a single total cannot answer "is the rewrite loop the expense or is
+moderation". `make warm`'s printed figures go up slightly as a result; they were
+wrong before, not right before.
+
+**7.51 — `--resume RUN_ID` exists because the first full run was killed at cell
+154 of 180.**
+Logged after the fact rather than before, which is a departure from §0's rule and
+is recorded as one: the feature was written in response to a live event.
+
+The event: the 180-cell matrix ran for 68 minutes and was sent SIGTERM by the
+process that launched it at story 154. Every `eval_run_items` row is committed as
+its story completes (7.47), so all 154 measurements survived in the database —
+but nothing could read them back, so the run was worth nothing. The same argument
+7.47 makes about an `api_fail` ("a matrix that dies at cell 140 of 180 throws away
+the evidence for 139 cells") applies with more force to a signal, and the fix
+belongs in the same place.
+
+`--resume` reads the `eval_runs` row and its items, counts what is already
+recorded **per (stage, theme)** — derived from the data, not from an assumption
+about iteration order — runs only the remainder, and finalises the same row.
+
+The stored `config` wins over the command line. That is the one decision here
+worth stating: the two halves of a single matrix must not be measurable against
+different models, a different gate, a different `n` or a different pricing date,
+so `--resume 2` ignores `--stages`, `--n`, `--effort` and `--pricing-date` and
+takes them from the row. A resume trail (`config.resumed`) records each
+continuation with its timestamp, the item count at the time, and the git commit,
+so a report says plainly that its matrix was gathered in more than one sitting.

@@ -3,10 +3,15 @@
  * `/app/add-kid` · `/read/:kidId` (kid mode) · `/dashboard/:kidId` (parent).
  * The admin portal arrives in phase 8.
  *
- * `/read` without an id resolves to kid 1 rather than 404ing: a child-facing
- * route that can show a "not found" page contradicts §01. The parent routes do
- * the opposite — `/dashboard/nonsense` says so, because a parent shown someone
- * else's numbers, or zeros, has been told something false about their child.
+ * `/read` without an id goes to `/app`, not to a guessed kid id. It used to
+ * `<Navigate to="/read/1">`, which is a guess at which child is holding the
+ * tablet — and `resolveKid` then quietly substituted whichever reader the account
+ * happened to list first, so a reading got filed against the wrong child
+ * (DEVIATIONS 7.33). A child-facing route still never shows a "not found" page
+ * (§01): `/app` is not an error screen, it is the adult's own screen, and it is
+ * the only place that knows which readers exist. The parent routes do the
+ * opposite — `/dashboard/nonsense` says so, because a parent shown someone else's
+ * numbers, or zeros, has been told something false about their child.
  *
  * §9's auth boundary is drawn here rather than inside each screen, so a route
  * added later is unprotected only by someone editing this table. The two guards
@@ -62,7 +67,7 @@ export default function App() {
           </RequireParent>
         }
       />
-      <Route path="/read" element={<Navigate to="/read/1" replace />} />
+      <Route path="/read" element={<Navigate to="/app" replace />} />
       <Route
         path="/read/:kidId"
         element={

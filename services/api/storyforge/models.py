@@ -1,7 +1,8 @@
 """ORM models (§8).
 
 Tables land in the phase that actually exercises them — an empty table passing a
-phase gate is a false green. `eval_runs`/`eval_run_items` (§8) arrive with Phase 7.
+phase gate is a false green. `eval_runs`/`eval_run_items` (§8) arrive with Phase 7,
+written by `storyforge.eval run` (DEVIATIONS 7.40).
 
     users ──< kids
     stages ──< sight_words
@@ -10,6 +11,8 @@ phase gate is a false green. `eval_runs`/`eval_run_items` (§8) arrive with Phas
        │                  └──< gpc_stats >── gpcs
        └──< stories ──< story_segments
     themes ──┘   └──< story_word_bank
+
+    eval_runs ──< eval_run_items >── stories   (§14, story_id nullable)
 
     gpcs                            (mirror of the decoder's gpcs.csv)
 
@@ -169,6 +172,13 @@ class Story(Base):
     `status` follows §7: `warm` = pre-generated and unread, `complete` = served
     to a kid at least once, `rejected` = failed the gate or moderation and is
     kept only as an eval artifact — never served.
+
+    A fourth value, `eval`, is written by the §14 harness (DEVIATIONS 7.41).
+    Neither §8 value fits a story generated to be *measured*: `warm` would push
+    100+ unenriched rows into the servable pool, and `rejected` would be a lie
+    about one that passed. It is unreachable by construction rather than by
+    convention — `api/stories.py::SERVABLE_STATUSES` is an allowlist that both
+    serving paths filter on, and it does not name `eval`.
     """
 
     __tablename__ = "stories"
@@ -472,3 +482,61 @@ class GpcStat(Base):
     # A GPC *instance* (§8): a word aligning to `d|D` twice counts twice.
     n_seen: Mapped[int] = mapped_column(Integer, default=0)
     n_correct: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class EvalRun(Base):
+    """One `python -m storyforge.eval run` invocation (§8, §14).
+
+    `config` is everything needed to reproduce the run — the stage/theme matrix,
+    `n`, the model ids, the pricing date, the gate, the rewrite budget, the spend
+    cap, the git commit. §14 calls the CLI canonical and the admin portal a view
+    of these tables, so a report that cannot be regenerated from `config` is a
+    report nobody can compare against.
+
+    The pricing date is in `config` and not derived at read time on purpose:
+    `pricing.price_for` takes an explicit `on` because Sonnet 5's introductory
+    rate expires 2026-08-31, so a cost recomputed later against `date.today()`
+    would silently disagree with the number that was printed.
+
+    `status` is `running` while the run is in flight and one of `completed` |
+    `budget_stopped` | `failed` afterwards. It is written as `running` first so a
+    run killed mid-flight leaves a row that says so rather than no row at all.
+    """
+
+    __tablename__ = "eval_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    metrics: Mapped[dict] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="running")
+
+
+class EvalRunItem(Base):
+    """One attempted story in a run — §14's per-story metric row.
+
+    `story_id` is NULLABLE, departing from §8's bare `story_id fk` (DEVIATIONS
+    7.40). §14 wants a metric row per story the matrix *attempted*, and the
+    attempts with no story are the informative ones: a generation that raised
+    `APITimeoutError` has a latency, an outcome and a cost, and no text. Writing
+    those with a NULL story is what keeps "the harness tried 180 cells and 178
+    produced a story" answerable from the database. `ON DELETE SET NULL` for the
+    same reason in the other direction — the measurement outlives the artifact.
+    """
+
+    __tablename__ = "eval_run_items"
+    __table_args__ = (Index("ix_eval_items_run", "run_id", "id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("eval_runs.id", ondelete="CASCADE"), index=True
+    )
+    story_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    metrics: Mapped[dict] = mapped_column(JSONB, default=dict)

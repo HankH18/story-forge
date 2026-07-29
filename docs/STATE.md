@@ -15,13 +15,28 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 | 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` fills ≥3 per (stage,theme), idempotent. Moderation = free blocklist + Haiku judge. |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
 
-**395 tests green, 1 skipped.** `make test` = pytest + web typecheck. Lint: `cd services/api && uv run ruff check storyforge tests`.
+**API: 643 passed, 1 skipped** (`cd services/api && uv run pytest`; the suite uses
+pytest-randomly and has pre-existing order-dependent failures under a random seed
+— use `-p no:randomly` for a clean baseline).
+**Web: 110 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers.
+`make test` = `test-api` + `test-web`, and **`test-web` is now typecheck AND
+tests** — it was typecheck alone for five phases, which is why the "395 tests
+green" line that used to sit here described 395 *Python* tests and zero lines of
+web behaviour (DEVIATIONS 7.30). Component tests are still absent by decision;
+the components are verified in a real browser.
+Lint: `cd services/api && uv run ruff check storyforge tests`.
 
 ## Commands
 ```
-make dev | test | seed | precompute | warm | eval-smoke
+make dev | test | seed | precompute | warm | eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
+`make eval` is the §14 harness and the §1-item-2 check: 12 stages x 3 themes x 5
+stories against the live model, writing `eval_runs`/`eval_run_items` and
+`reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest
+numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
+`make eval EVAL_ARGS="--estimate-only"` projects the spend with no API call;
+`--resume RUN_ID` continues a run that was interrupted (DEVIATIONS 7.51).
 `.env` at `services/api/.env` (600, gitignored) holds Anthropic + Langfuse keys.
 
 ## Hard-won invariants — do not regress

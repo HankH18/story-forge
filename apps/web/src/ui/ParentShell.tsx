@@ -11,10 +11,10 @@
  * normally prevent; the shell renders it anyway rather than assuming.
  */
 
-import { SignedIn, SignedOut, UserButton } from '@clerk/clerk-react'
+import { SignedIn, SignedOut, SignOutButton, UserButton } from '@clerk/clerk-react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { MISSING_ROLE_CLAIM_DETAIL, SIGN_IN_PATH } from '../lib/authPaths'
+import { SIGN_IN_PATH } from '../lib/authPaths'
 
 export interface ParentShellProps {
   children: ReactNode
@@ -73,22 +73,43 @@ export function AccountControl() {
 }
 
 /**
+ * The primary action on this screen. A literal in this file so Tailwind's
+ * scanner finds every class and the production bundle keeps them (STATE
+ * invariant 7 — dynamic class names are purged silently).
+ */
+const PRIMARY_ACTION =
+  'sf-lift-parent inline-flex min-h-tap min-w-tap items-center justify-center ' +
+  'rounded-btn border-2 border-berry-700 bg-berry-500 px-6 font-ui text-[17px] ' +
+  'font-bold text-paper-page transition-transform duration-[90ms] ease-out'
+
+/**
  * The one failure state the parent surface has to have.
  *
  * Kid mode may never show an error (§01). A parent must: they came for facts
  * about their child, and a screen that renders zeros because the request failed
  * has told them something false.
  *
- * 401 and 403 are separated because they are different problems with different
- * fixes, and collapsing them into "please sign in again" sends someone to do
- * the one thing that will not help. A 401 is an expired or absent session and
- * the button below signs in again. A 403 means the API *verified* the session
- * and still refused: `require_admin` only passes when the token itself carries
- * `public_metadata.role = "admin"`, and Clerk's default session token carries no
- * metadata at all — so every real session reads as a parent until a human adds
- * the claim in the Clerk dashboard. That sentence is in lib/auth.tsx, stated
- * once, and it names the dashboard action rather than saying "forbidden"
- * (DEVIATIONS 6.20).
+ * **A 401 here is not "you are signed out".** That was the bug (audit C4,
+ * DEVIATIONS 7.32): this screen said "Please sign in again" directly beneath
+ * ParentHome's "SIGNED IN AS …" and a live `<UserButton/>`, because
+ * `SignedIn`/`SignedOut` read Clerk's *client* state — which is still perfectly
+ * valid — while the 401 comes from the *API* refusing the token. Two systems,
+ * described as one, contradicting each other on the same screen. And its "Sign
+ * in" button linked to `/sign-in`, where `<SignIn>` refuses to render for an
+ * already-signed-in user and redirects straight back here: the remedy was a loop.
+ *
+ * So the copy names which side refused, and the remedy is `signOut()` first.
+ * Signing out is not ceremony — it is the step that clears the stale client
+ * session that makes the sign-in form bounce.
+ *
+ * There is no 403 branch. `require_admin` is the only thing in the API that
+ * produces 403, it guards exactly one route (`POST /api/validate`), and no web
+ * code calls it — so the branch could not render, and a case that cannot happen
+ * looks like a case that has been handled. It returns with the Phase 8 admin
+ * portal; the sentence it displayed is preserved verbatim in DEVIATIONS 7.37 so
+ * it can be restored rather than re-derived. A 403 from somewhere unforeseen (an
+ * edge proxy, a WAF) falls to the generic branch with its status in the message,
+ * which is the honest rendering of a status this app cannot explain.
  */
 export function ParentError({
   status,
@@ -99,29 +120,24 @@ export function ParentError({
   message: string
   retry?: () => void
 }) {
-  const signedOut = status === 401
-  const forbidden = status === 403
+  const rejected = status === 401
   const offline = status === 0
 
   return (
     <div className="rounded-card border-2 border-paper-rule bg-paper-card p-8 shadow-lift-parent">
       <h1 className="font-display text-[28px] text-ink-900">
-        {signedOut
-          ? 'Please sign in again'
-          : forbidden
-            ? 'This account cannot open this screen'
-            : offline
-              ? 'Could not reach Story Forge'
-              : 'Something went wrong'}
+        {rejected
+          ? 'Your session was not accepted'
+          : offline
+            ? 'Could not reach Story Forge'
+            : 'Something went wrong'}
       </h1>
       <p className="mt-3 max-w-[60ch] text-[16px] leading-[1.6] text-ink-700">
-        {signedOut
-          ? 'Your session has expired, so this page is not showing your reader’s progress rather than showing it wrong.'
-          : forbidden
-            ? MISSING_ROLE_CLAIM_DETAIL
-            : offline
-              ? 'The server did not answer. Nothing has been lost — this page only reads.'
-              : 'This page could not load your reader’s progress. Rather than show zeros that are not true, it is showing nothing.'}
+        {rejected
+          ? 'Story Forge asked the server for your reader’s progress and the server did not accept this sign-in — most likely it has been open long enough to expire. Rather than show numbers that might not be yours, this page is showing none. Your browser still thinks you are signed in, so the way back is to sign out and in again.'
+          : offline
+            ? 'The server did not answer. Nothing has been lost — this page only reads.'
+            : 'This page could not load your reader’s progress. Rather than show zeros that are not true, it is showing nothing.'}
       </p>
       <p className="mt-4 font-mono text-[12px] text-ink-500">{message}</p>
 
@@ -137,17 +153,36 @@ export function ParentError({
             Try again
           </button>
         ) : null}
-        {signedOut ? (
-          <Link
-            to={SIGN_IN_PATH}
-            className="sf-lift-parent inline-flex min-h-tap min-w-tap items-center justify-center
-                       rounded-btn border-2 border-berry-700 bg-berry-500 px-6 font-ui text-[17px]
-                       font-bold text-paper-page transition-transform duration-[90ms] ease-out"
-          >
-            Sign in
-          </Link>
-        ) : null}
+        {rejected ? <RejectedSessionRemedy /> : null}
       </div>
     </div>
+  )
+}
+
+/**
+ * The way out of a session the API will not accept.
+ *
+ * Both arms end at `/sign-in`; only one of them can get there. While Clerk still
+ * holds a session, `<SignIn>` will not render and redirects back — so the button
+ * has to sign out on the way. `<SignedOut>` is the case where Clerk agrees the
+ * session is gone (a genuinely signed-out visitor who reached a parent route
+ * before the guard moved), and then a plain link is the whole answer.
+ */
+function RejectedSessionRemedy() {
+  return (
+    <>
+      <SignedIn>
+        <SignOutButton redirectUrl={SIGN_IN_PATH}>
+          <button type="button" className={PRIMARY_ACTION}>
+            Sign out and sign in again
+          </button>
+        </SignOutButton>
+      </SignedIn>
+      <SignedOut>
+        <Link to={SIGN_IN_PATH} className={PRIMARY_ACTION}>
+          Sign in
+        </Link>
+      </SignedOut>
+    </>
   )
 }

@@ -46,8 +46,15 @@ test: test-api test-web ## Run the full test suite
 test-api: db ## Run API + decoder tests (needs Postgres for the health tests)
 	cd $(API) && uv run pytest
 
-test-web: ## Typecheck the web app
-	cd $(WEB) && bun run typecheck
+# Typecheck AND tests. This was `bun run typecheck` alone for five phases, which
+# is why `docs/STATE.md` could say "395 tests green" while covering zero lines of
+# web behaviour — and every web defect the Phase 6 audit found (a silent default
+# stage, a client-chosen stage, a redirect validator that did not validate, a
+# substituted child) lived in code a type checker has no opinion about
+# (DEVIATIONS 7.30). `tsc` runs first: a test that does not compile is a test
+# that does not run.
+test-web: ## Typecheck the web app and run its unit tests
+	cd $(WEB) && bun run typecheck && bun test src
 
 lint: ## Lint and format-check the API
 	cd $(API) && uv run ruff check . && uv run ruff format --check .
@@ -64,8 +71,14 @@ precompute: ## Build the allowed_words table (§5.4)
 warm: ## Pre-generate the warm story pool (§7)
 	cd $(API) && uv run python -m storyforge.warm
 
+# §14's documented command line, verbatim. 12 stages x 3 themes x 5 stories is
+# §1 item 2's acceptance matrix, so this target IS the §1 item 2 check: it exits
+# non-zero when the criterion is not met and when the spend cap is reached, and
+# writes reports/eval-{ts}.md either way. Never a silent success.
+# `make eval EVAL_ARGS="--estimate-only"` projects the spend with no API call.
 eval: ## Full eval harness run across stages and themes (§14)
-	@echo "make eval: not implemented until phase 7" >&2; exit 1
+	cd $(API) && uv run python -m storyforge.eval run \
+		--stages 1..12 --themes all --n 5 --cold $(EVAL_ARGS)
 
 eval-smoke: ## Regression gate: 2 stages x 1 theme x 2 stories (§14)
 	cd $(API) && uv run python -m storyforge.eval smoke

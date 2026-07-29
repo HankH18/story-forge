@@ -709,3 +709,222 @@ async def test_the_real_config_rejects_a_token_this_process_minted(
     # And with the bypass off, no token at all is refused too — the §18
     # fallback must not be silently carrying requests in a configured process.
     assert (await _kids(client, None)).status_code == 401
+
+
+# --- a Clerk outage (DEVIATIONS 7.34) ----------------------------------------
+# The audit's C8: verification fails CLOSED, which is correct, but with no stale
+# tolerance a Clerk blip lasting longer than the 600 s TTL logged EVERY user out —
+# including a child mid-story — while the cache was still holding keys that were
+# valid and would have verified the token correctly.
+#
+# The tests below are the shape of that fix and, more importantly, the shape of
+# its limits. Two of them exist specifically to prove it is not a fail-open: an
+# unknown `kid` is still refused during the outage, and an expired token is still
+# expired while stale keys are being served. If either of those ever goes green in
+# the other direction, the fallback has become a bypass.
+#
+# The outage is simulated by repointing `cache.url` at a closed port after a
+# successful fetch. That is a public attribute and the failure it produces
+# (ConnectError) is the same one the audit drove with a real stub server.
+DEAD_JWKS_URL = "http://127.0.0.1:1/.well-known/jwks.json"
+
+
+async def test_a_jwks_outage_serves_the_stale_key_rather_than_locking_everyone_out(local_clerk):
+    from storyforge.auth import JwksUnavailable
+
+    cache = JwksCache(
+        local_clerk.jwks_url,
+        ttl_s=0.05,
+        timeout_s=1,
+        stale_grace_s=3600,
+        failure_backoff_s=0,
+    )
+    assert await cache.key_for(local_clerk.live.kid) is not None
+    assert cache.fetches == 1
+    assert cache.stale_serves == 0
+
+    time.sleep(0.1)  # real elapsed time: the cache reads the monotonic clock
+    cache.url = DEAD_JWKS_URL
+
+    assert await cache.key_for(local_clerk.live.kid) is not None
+    assert cache.stale_serves == 1, "the still-valid cached key was not served"
+
+    # NOT a fail-open. A stale document cannot contain a key it never contained,
+    # so an unknown kid during an outage is the same 503 it always was — never a
+    # pass, and never a 401 that blames the user for Clerk being down.
+    with pytest.raises(JwksUnavailable):
+        await cache.key_for("rotated-tomorrow")
+
+
+async def test_the_stale_window_is_bounded(local_clerk):
+    """Past the grace period the cache refuses again.
+
+    "Clerk is unreachable" must not decay into "this API trusts a key set from
+    last week". `stale_grace_s=0` is the configuration for an operator who would
+    rather take the outage, and it is exercised here as the boundary case.
+    """
+    from storyforge.auth import JwksUnavailable
+
+    cache = JwksCache(
+        local_clerk.jwks_url, ttl_s=0.05, timeout_s=1, stale_grace_s=0.05, failure_backoff_s=0
+    )
+    assert await cache.key_for(local_clerk.live.kid) is not None
+    time.sleep(0.25)  # past ttl + grace
+    cache.url = DEAD_JWKS_URL
+
+    with pytest.raises(JwksUnavailable):
+        await cache.key_for(local_clerk.live.kid)
+    assert cache.stale_serves == 0
+
+
+async def test_serving_stale_does_not_retry_the_dead_endpoint_on_every_request(local_clerk):
+    """Otherwise an outage becomes a queue.
+
+    Every request would re-attempt a fetch, each holding the cache lock for the
+    full connect timeout. Ten lookups, one failed attempt.
+    """
+    cache = JwksCache(
+        local_clerk.jwks_url, ttl_s=0.05, timeout_s=1, stale_grace_s=3600, failure_backoff_s=60
+    )
+    assert await cache.key_for(local_clerk.live.kid) is not None
+    time.sleep(0.1)
+    cache.url = DEAD_JWKS_URL
+
+    for _ in range(10):
+        assert await cache.key_for(local_clerk.live.kid) is not None
+    assert cache.fetches == 2, f"{cache.fetches} fetches — the backoff is not holding"
+    assert cache.stale_serves == 10
+
+
+async def test_a_clerk_outage_no_longer_401s_a_signed_in_parent_end_to_end(
+    client, local_clerk, monkeypatch
+):
+    """The same property through the real route, which is where it matters.
+
+    Three statuses in one test on purpose, because the fix is only correct if all
+    three hold at once: a valid token still works, an EXPIRED token is still
+    refused, and a token naming a key nobody ever published is still a 503.
+    """
+    monkeypatch.setenv("CLERK_JWKS_TTL_S", "1")
+    reset_auth_config()
+
+    token = local_clerk.mint(sub="user_local_a")
+    assert (await _kids(client, token)).status_code == 200
+
+    time.sleep(1.1)  # the TTL lapses
+    auth_config().jwks.url = DEAD_JWKS_URL  # and Clerk goes away
+
+    assert (await _kids(client, token)).status_code == 200
+    assert auth_config().jwks.stats()["stale_serves"] >= 1
+
+    # Availability bought nothing that verification used to refuse.
+    assert (await _kids(client, local_clerk.mint(expires_in=-60))).status_code == 401
+    assert (await _kids(client, local_clerk.mint(kid="rotated-tomorrow"))).status_code == 503
+
+
+# --- §18: the signals the audit proved were missing (DEVIATIONS 7.36) ---------
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        # Environment values the exact-set test missed. `prod-us` is a real
+        # spelling and it booted an unauthenticated API.
+        ("ENVIRONMENT", "prod-us"),
+        ("ENVIRONMENT", "production-eu"),
+        ("APP_ENV", "staging2"),
+        ("DEPLOY_ENV", "live-1"),
+        # Platform variables. Each of these was measured BOOTING before the fix.
+        ("K_SERVICE", "api"),
+        ("K_REVISION", "api-00001"),
+        ("CONTAINER_APP_NAME", "storyforge"),
+        ("WEBSITE_SITE_NAME", "storyforge"),
+        ("AWS_LAMBDA_FUNCTION_NAME", "storyforge"),
+        ("LAMBDA_TASK_ROOT", "/var/task"),
+        ("HEROKU_APP_NAME", "storyforge"),
+        ("NOMAD_ALLOC_ID", "8f2c"),
+        ("OPENSHIFT_BUILD_NAME", "storyforge-1"),
+        ("CF_PAGES", "1"),
+        # "A platform is telling this process where to listen."
+        ("PORT", "8080"),
+    ],
+)
+def test_the_bypass_also_refuses_the_signals_the_audit_found_missing(monkeypatch, name, value):
+    monkeypatch.setenv("DEMO_BYPASS_AUTH", "true")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://storyforge:storyforge@localhost:5433/storyforge"
+    )
+    monkeypatch.setenv(name, value)
+    reset_auth_config()
+    with pytest.raises(RuntimeError) as caught:
+        assert_demo_bypass_is_local()
+    assert name in str(caught.value), "the refusal must name the signal it saw"
+    monkeypatch.undo()
+    reset_auth_config()
+
+
+@pytest.mark.parametrize(
+    ("label", "url"),
+    [
+        # THE one that mattered: `db` is the service name in this repo's own
+        # docker-compose.yml, so `docker compose up` on a public VPS with the
+        # bypass on used to serve a fully unauthenticated API.
+        ("this repo's compose service name", "postgresql+psycopg://u:p@db:5432/storyforge"),
+        ("a generic container alias", "postgresql+psycopg://u:p@postgres:5432/storyforge"),
+        # A unix socket: the hostname parses to nothing, which used to be on the
+        # LOCAL list. `?host=/cloudsql/…` is the shape that matters.
+        ("a unix socket", "postgresql+psycopg://u:p@/storyforge?host=/var/run/postgresql"),
+        ("a Cloud SQL socket", "postgresql+psycopg://u:p@/sf?host=/cloudsql/proj:region:inst"),
+    ],
+)
+def test_a_container_or_socket_database_url_is_a_deployment_signal(label, url):
+    signals = deployment_signals(url)
+    assert signals, f"{label} produced no signal: {url}"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+psycopg://storyforge:storyforge@localhost:5433/storyforge",
+        "postgresql+psycopg://u:p@127.0.0.1:5433/sf",
+        "postgresql+psycopg://u:p@host.docker.internal:5433/sf",
+    ],
+)
+def test_a_laptop_database_url_is_still_not_a_signal(url):
+    """The guard has to keep allowing the thing it exists to allow.
+
+    `make dev` runs the API on the host against `localhost:5433` — which is
+    exactly why docker-compose publishes `5433:5432` — so widening the DB
+    hostname rule must not touch it.
+    """
+    assert deployment_signals(url) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "deployed"),
+    [
+        ("production", True),
+        ("prod", True),
+        ("prod-us", True),
+        ("production-eu", True),
+        ("staging", True),
+        ("stage", True),
+        ("staging2", True),
+        ("live", True),
+        ("live-1", True),
+        ("preview", True),
+        ("preview-42", True),
+        # Everything a laptop actually says. A false positive here costs a
+        # developer their demo, so the prefixes are checked in both directions.
+        ("development", False),
+        ("dev", False),
+        ("local", False),
+        ("test", False),
+        ("ci", False),
+        ("sandbox", False),
+        ("", False),
+        ("   ", False),
+    ],
+)
+def test_the_environment_value_prefixes_cut_where_they_are_meant_to(value, deployed):
+    from storyforge.auth import is_deployed_env_value
+
+    assert is_deployed_env_value(value) is deployed
