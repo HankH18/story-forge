@@ -252,3 +252,38 @@ none offered — cutting the scored word count from 11 to 6 and reporting 100%.
 §0 is explicit that the LLM is an untrusted generator and a pure function is the
 gate, so the claim is now intersected with the words actually offered and
 anything invented falls through to normal scoring.
+
+**3.9 — `story_segments.asset_id` is a plain nullable int, not a FK.**
+§8 defines it as `fk assets`, but the `assets` table lands in Phase 4. A FK to a
+nonexistent table cannot be created; the column is reserved now so Phase 4 adds a
+constraint rather than a column. Branching columns (`parent_segment_id`,
+`choice_label`) are likewise present though Phase 3 generates a linear spine —
+§295's cut line drops branching but explicitly keeps the schema.
+
+**3.10 — Moderation was recalibrated after a 55% false-positive rate.**
+The first moderation prompt rejected 5 of 9 warm-pool stories, every one for a
+fire-breathing dragon. That makes the dragons theme unusable — the story-word
+bank *offers* "fire" and "dragon", and §6's bar is "no scary content **beyond
+mild peril**". A dragon in a cave is the premise, not a violation.
+
+The prompt now separates *hazard* from *harm*: a dragon that breathes fire, a
+character who is scared and hides, a dark cave — approved. Anyone hurt, cruelty,
+weapons used against a character, or peril left unresolved at the end — rejected.
+
+Re-tested in **both** directions rather than just confirming the rejects
+disappeared: 6/6 correct across three should-approve and three should-reject
+cases, including the subtle "Sam ran and ran but the thing got Sam. The end."
+(unresolved peril), which is still rejected. Warm-pool rejection went 55% -> 0%.
+
+**3.11 — Moderation fails CLOSED on an unparseable response.**
+§7 counts a schema-parse failure as `api_fail`. For the moderation node
+specifically that must not read as approval, so an unparseable verdict returns
+`approved=False`. The warm pool absorbs the rejection; a child sees nothing.
+
+**3.12 — Langfuse tracing is NOT implemented.**
+§15 requires a trace per pipeline run with a span per node. No Langfuse
+credentials were available, so building it would mean shipping an integration
+that has never once been observed working — exactly the false green this project
+avoids elsewhere. `stories.langfuse_trace_id` is reserved and `gen_meta` already
+carries per-attempt tokens, cost, rewrite depth and the moderation verdict, so
+§14's metrics are available without it. **Outstanding for Phase 7.**

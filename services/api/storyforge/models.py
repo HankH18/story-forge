@@ -1,12 +1,13 @@
 """ORM models (§8).
 
-Phase 2 scope only. The story/reading/eval tables in §8 land in the phases that
-actually exercise them — an empty table that passes a phase gate is a false
-green.
+Tables land in the phase that actually exercises them — an empty table passing a
+phase gate is a false green. Readings, answers, gpc_stats and eval_runs (§8)
+arrive with Phases 5 and 7.
 
     stages ──< sight_words
-       │
-       └──< allowed_words          (precompute output, §5.4)
+       │   └──< allowed_words       (precompute output, §5.4)
+       └──< stories ──< story_segments
+    themes ──┘   └──< story_word_bank
 
     gpcs                            (mirror of the decoder's gpcs.csv)
 
@@ -16,7 +17,20 @@ CSV, so the database and the validator cannot disagree about the inventory.
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from datetime import datetime
+
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from storyforge.db import Base
@@ -128,3 +142,67 @@ class StoryWord(Base):
     gloss: Mapped[str] = mapped_column(Text, default="")
     # Earliest stage this word may be offered at.
     min_stage: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class Story(Base):
+    """A generated story (§8).
+
+    `status` follows §7: `warm` = pre-generated and unread, `complete` = served
+    to a kid at least once, `rejected` = failed the gate or moderation and is
+    kept only as an eval artifact — never served.
+    """
+
+    __tablename__ = "stories"
+    __table_args__ = (Index("ix_stories_pool", "stage_id", "theme_id", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stage_id: Mapped[int] = mapped_column(ForeignKey("stages.id"), index=True)
+    theme_id: Mapped[int] = mapped_column(ForeignKey("themes.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="warm")
+    title: Mapped[str] = mapped_column(String(128), default="")
+    decodability: Mapped[float] = mapped_column(Numeric(5, 4), default=0)
+    # The distinct story words actually used — drives the picture chips (§4).
+    story_words: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    # §14 metrics: rewrite depth, per-attempt usage, moderation verdict, cost.
+    gen_meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    langfuse_trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # Least-recently-served wins when the pool is drawn from (§7).
+    last_served_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    segments: Mapped[list[StorySegment]] = relationship(
+        back_populates="story", cascade="all, delete-orphan", order_by="StorySegment.idx"
+    )
+
+
+class StorySegment(Base):
+    """One screen of a story (§8, §10).
+
+    Branching columns (`parent_segment_id`, `choice_label`) exist now even though
+    Phase 3 generates a linear spine — §295's cut line drops branching but keeps
+    the schema, so adding them later would be a migration for no reason.
+    `asset_id` is a plain nullable int rather than a FK: the assets table lands
+    in Phase 4 (docs/DEVIATIONS.md 3.9).
+    """
+
+    __tablename__ = "story_segments"
+    __table_args__ = (UniqueConstraint("story_id", "idx", name="uq_segment_story_idx"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    story_id: Mapped[int] = mapped_column(
+        ForeignKey("stories.id", ondelete="CASCADE"), index=True
+    )
+    idx: Mapped[int] = mapped_column(Integer)
+    parent_segment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("story_segments.id"), nullable=True
+    )
+    choice_label: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    body: Mapped[str] = mapped_column(Text)
+    scene_tags: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    asset_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    story: Mapped[Story] = relationship(back_populates="segments")

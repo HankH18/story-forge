@@ -62,7 +62,7 @@ precompute: ## Build the allowed_words table (§5.4)
 	cd $(API) && uv run python -m storyforge.precompute
 
 warm: ## Pre-generate the warm story pool (§7)
-	@echo "make warm: not implemented until phase 3" >&2; exit 1
+	cd $(API) && uv run python -m storyforge.warm
 
 eval: ## Full eval harness run across stages and themes (§14)
 	@echo "make eval: not implemented until phase 7" >&2; exit 1

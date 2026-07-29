@@ -28,6 +28,7 @@ from storyforge.llm.generate import (
     build_request_block,
     build_vocabulary_block,
 )
+from storyforge.llm.moderate import ModerationResult, moderate
 from storyforge.llm.pricing import Usage, usage_from_response
 
 # §6: the prompt gets the top-N allowed words by frequency, not the whole table.
@@ -65,6 +66,9 @@ class PipelineResult(BaseModel):
     attempts: list[Attempt] = Field(default_factory=list)
     final_text: str = ""
     final_report: TextReport | None = None
+    title: str = ""
+    story_words: list[str] = Field(default_factory=list)
+    moderation: ModerationResult | None = None
 
     @property
     def rewrite_depth(self) -> int:
@@ -232,7 +236,11 @@ async def _call(vocab: Vocabulary, theme: str, user_block: str, effort: str):
 
 
 async def run_pipeline(
-    session, stage_id: int, theme_slug: str, effort: str = "medium"
+    session,
+    stage_id: int,
+    theme_slug: str,
+    effort: str = "medium",
+    moderate_output: bool = True,
 ) -> PipelineResult:
     vocab = await load_vocabulary(session, stage_id, theme_slug)
     result = PipelineResult(stage_id=stage_id, theme=theme_slug, passed=False)
@@ -261,7 +269,16 @@ async def run_pipeline(
         result.final_report = report
 
         if passes_gate(report):
-            result.passed = True
+            result.title = draft.title
+            result.story_words = report.distinct_story_words
+            if moderate_output:
+                # §7: MODERATING sits between the validator passing and
+                # PERSISTED. A story that clears the decodability gate but fails
+                # moderation is rejected, not served.
+                result.moderation = await moderate(body)
+                result.passed = result.moderation.approved
+            else:
+                result.passed = True
             return result
 
         # §0: fix the prompt, never the gate.
