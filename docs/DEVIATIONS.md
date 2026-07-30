@@ -12264,3 +12264,122 @@ really is still a deployed signal.)
   `apps/web/src/lib/api.ts` and `AdminEvalRun.tsx` doc comments, `AddKid.tsx`'s
   "twelve radios"). Documentation drift, not a bound; other agents hold those
   files in this worktree and a doc sweep is not this audit's remit.
+
+## Phase 8 — "there is no free repair" was a claim about the wrong population (14.40-14.42)
+
+14.20 shipped the story-word band with a gate that was RED at 248 of 326 and a hint
+that said the backlog could only be fixed by regenerating stories. That hint
+generalised from the 23 chips ABOVE the reader's stage — where it is true — to the
+225 below, where it is the opposite of true. The 225 are the finding.
+
+### 14.40 — the free half: 182 chips dropped for $0.00
+
+For a chip whose word the reader can ALREADY decode, removing it does not leave an
+undecodable word as plain text. It leaves a word the child can sound out, which is
+the product's entire purpose. The story text is untouched, the word moves OUT of
+the exempt set and INTO the scored denominator as `decodable`, and since
+`(d+k)/(s+k) >= d/s` the §1 metric can only improve.
+
+Verified before writing anything, and the check was built to refute rather than to
+confirm — every way it could be false, asked explicitly:
+
+```
+119 servable stories, 326 chip slots, 225 with distance <= 0
+
+every dropped word is an exact lowercase token of its own body   225/225
+verdict after un-exempting, at EVERY reader stage the story can
+  be served to (story.stage_id .. 11), 5054 evaluations           decodable 5054
+                                                                  violation 0, oov 0
+decodability delta                                    min +0.000000, max +0.010293
+story falls below DECODABILITY_GATE                                          0
+new violation / new OOV introduced                                           0
+kept chips disturbed                                                         0
+```
+
+Why the reader-stage sweep and not just the story's own stage: `_SERVE_SQL` picks
+`stage_id <= :stage`, so a story is served to readers at its stage **or above**,
+and `_is_decodable_for` re-scores at the READER's stage (7.23). Cumulative
+inventories make that monotone, but the whole point of a refutation attempt is not
+to take the monotonicity on trust.
+
+Two details that could have made it false and did not: `validate_word` checks
+`sight_words` BEFORE `story_words`, so a word that is both was never a chip's to
+lose; and §5.2.1's tokeniser keeps the clitic, so `dragon's` is a different token
+from `dragon` and was never exempted by it.
+
+### 14.41 — the second condition, which the first analysis missed
+
+Decodability is necessary and **not sufficient**. A chip may only be dropped when
+the word is ALSO permitted vocabulary at that stage — in `allowed_words` or
+`sight_words`.
+
+`dragon` and `planet` are decodable from stage 1 and appear in **no** stage's
+`allowed_words` at all: §5.4's register/frequency filters drop them (11.9-11.11).
+They are in these stories only under the story-word exemption. De-chipping one
+converts a licensed word into a word the stage's own vocabulary does not permit —
+trading a bookkeeping defect for a real one, and one that `--check-vocabulary`
+reports.
+
+That is 43 of the 225. The free population is **182**, not 225, and the
+distribution is not a rounding difference:
+
+| population | slots | free? |
+|---|---|---|
+| decodable now, and permitted vocabulary | 182 | **yes** |
+| decodable now, NOT permitted vocabulary (`dragon` 39, `planet` 4) | 43 | no |
+| 4-7 stages ahead | 23 | no |
+
+Both conditions are read from the live tables inside `droppable_chips`, never from
+another gate's verdict, so the repair stays correct whether or not anything else is
+measuring them.
+
+### 14.42 — the repair, and what it refuses
+
+`--story-word-repair`. Free: one query, one UPDATE, no API client. It never edits
+story TEXT and never reads or writes a `questions` row, so there is no path by
+which it can cascade a child's recorded answer away — the refusal `--mcq2-repair`
+had to express as a SQL predicate is structural here.
+
+It proves its own postcondition rather than asserting it: for every row it is about
+to write it re-scores the real body at the story's own stage with the reduced
+exemption set, and refuses to write unless decodability holds and stays above
+`DECODABILITY_GATE`. `stories.decodability` is rewritten alongside, computed exactly
+as `persist` computes it — left alone it would be a stale under-estimate of a story
+that just got better (27 rows were).
+
+**Run against the live pool:**
+
+```
+--check-story-words   BEFORE   248 of 326 slot(s) out of band
+--story-word-repair            dropped 182 chip(s) from 97 stories
+                               22 stories now carry no chip at all
+                               27 had `decodability` corrected upward
+                               0 refused
+--check-story-words   AFTER     66 of 144 slot(s) out of band
+second run                     nothing droppable (idempotent)
+```
+
+`--check-vocabulary`'s output is **byte-identical** before and after, which is the
+control for 14.41.
+
+Child-visible effect of a dropped chip, audited in `apps/web` — exactly three
+things, all downstream of the same removal: the word loses its 28px inline cutout
+(`lib/art.ts`'s per-word `CUTOUTS` map, not scene tags — segment illustrations are
+a separate channel and are untouched), it loses auto-speak on first appearance
+(`introductionIndices` drives the chip and the utterance off one array, 11.26), and
+it leaves the celebration "New words" card. Nothing assumes a non-empty list:
+`storyWords.ts:49` short-circuits on an empty set and `Celebration.tsx:166` guards
+the whole card on `.length`. 22 stories now show no card, which is honest — those
+stories contain no word the child could not already read.
+
+### Not fixed here, and why
+
+- **43 wasted chips on `dragon`/`planet`.** Free only if those words are added to
+  `allowed_words`, which is a §5.4 register-filter decision and a `make precompute`
+  change, not a pool repair.
+- **23 chips above the reader's stage.** Genuinely regeneration-only; the argument
+  in `_CHIP_HINT` (b) is unchanged and correct for these.
+- **The gate stays RED**, now at 54 of 121 on the live pool (the totals moved
+  because a concurrent agent re-statused 13 stories while this ran). Regeneration
+  cost at $0.026/story: **12 stories / $0.31** for the too-far half alone, **47
+  stories / $1.22** for every remaining out-of-band story. Not spent.

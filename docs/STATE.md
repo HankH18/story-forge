@@ -133,10 +133,16 @@ ladder chipped a word its reader could sound out, while `castle` — which this
 for. The band is `pipeline.STORY_WORD_MAX_LOOKAHEAD`: undecodable at the reader's
 stage, and either permanently unalignable or decodable within 3 stages. Enforced
 at GENERATION (`load_vocabulary`), so nothing generated since can carry one;
-this gate audits the backlog. **There is no free repair and that is a property of
-the defect** — the word is IN the story, so dropping it from `stories.story_words`
-would leave a word the child cannot decode as plain text with no picture. Free:
-one SQL query and the decoder (DEVIATIONS 14.20-14.21).
+this gate audits the backlog. **Two remedies, not one** (14.40): `--story-word-repair` is FREE
+and drops every chip whose word the reader can already decode AND that the stage's
+`allowed_words`/`sight_words` permit — **182 of the first 225, run against the live
+pool, $0.00**, idempotent, never editing story text and never reading a questions
+row. The rest is regeneration: a chip ABOVE the reader's stage is load-bearing (the
+word is in the story either way, so dropping it leaves a word the child cannot read
+with no way in), and so is a decodable word the stage's vocabulary does not permit
+(`dragon`, `planet` are in NO stage's `allowed_words` — de-chipping one would trade
+a wasted chip for a §5.4 vocabulary violation). Free: one SQL query and the decoder
+(DEVIATIONS 14.20-14.21, 14.40-14.42).
 All six are free, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
@@ -249,7 +255,13 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     space had none until `alien`/`astronaut` moved to `min_stage` 1. The band is
     enforced where the OFFER is built and never inside `validate_draft`: that is a
     measurement, and `_is_decodable_for` re-scores live stories with it at serve
-    time (DEVIATIONS 14.20-14.21).
+    time (DEVIATIONS 14.20-14.21). **A chip is free to REMOVE only when the reader
+    can already decode the word AND the stage's `allowed_words`/`sight_words`
+    permit it — both, never either.** Dropping one above the reader's stage leaves
+    a word they cannot read with no way in; dropping a decodable word the
+    vocabulary does not permit (`dragon`, `planet` are in NO stage's
+    `allowed_words`) trades a wasted chip for a §5.4 violation. 182 of 225 met both
+    and were repaired free against the live pool; 43 did not (14.40-14.42).
 
 | 5 kid mode + mastery | Full kid session live in a real browser (dev AND production bundle): theme picker → reading → questions → celebration, TTS, §11 floors verified by computed style. `readings`/`answers` APIs, `gpc_stats`, stage promotion proven at the 79/80% boundary. |
 

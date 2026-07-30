@@ -108,7 +108,8 @@ from sqlalchemy import select, text
 from storyforge import obs
 from storyforge.api.stories import ANSWERABLE_SQL, SERVABLE_STATUSES
 from storyforge.db import SessionLocal
-from storyforge.decoder import MAX_STAGE, MIN_STAGE, mastered_ids
+from storyforge.decoder import MAX_STAGE, MIN_STAGE, mastered_ids, validate_text
+from storyforge.decoder.tokenizer import tokenize
 from storyforge.llm.client import fast_model
 from storyforge.llm.moderate import (
     UNGRAMMATICAL_PREFIX,
@@ -150,15 +151,23 @@ from storyforge.mastery import (
 )
 from storyforge.models import Asset, Question, Story, StorySegment
 from storyforge.pipeline import (
+    DECODABILITY_GATE,
     MAX_STORY_WORDS,
     STORY_WORD_MAX_LOOKAHEAD,
     PipelineResult,
+    decodable_from_stage,
     load_vocabulary,
     run_pipeline,
     story_word_is_eligible,
     story_word_lookahead,
     story_word_refusal,
 )
+
+# The register filter itself, imported rather than restated (DEVIATIONS 11.8):
+# `--check-vocabulary` classifies an off-list word by asking the same
+# Dale-Chall set `precompute.compute_rows` filters on, so the gate's account of
+# WHY a word is not offered cannot drift from the reason it is not offered.
+from storyforge.precompute import child_forms
 
 TARGET_PER_PAIR = 3
 
@@ -3011,17 +3020,31 @@ async def dead_bank_entries(session) -> list[tuple[str, str]]:
     ]
 
 
-#: What an operator does about an over-the-band chip, and why — unlike the third
-#: and fourth gates — there is no free repair.
+#: What an operator does about an over-the-band chip. TWO remedies, because the
+#: two halves of this gate are not the same defect.
+#:
+#: This string said "there is NO free repair" for one commit, and that was a claim
+#: about the wrong population (DEVIATIONS 14.40). It is true of a word ABOVE the
+#: reader's stage and false of the majority, which is a word the reader can already
+#: decode — for those, dropping the chip leaves a word the child can sound out,
+#: which is what the product is for.
 _CHIP_HINT = (
-    "There is NO free repair for these. A chip is not a text defect — the word is "
-    "IN the story — so dropping it from `stories.story_words` would leave a word "
-    "the child cannot decode rendered as plain text with no picture, which is "
-    "strictly worse than the wrong chip. The remedy is generation: the band is "
-    "enforced in `pipeline.load_vocabulary`, so a story generated after DEVIATIONS "
-    "14.20 cannot carry one. Reject and re-generate the named stories with `python "
-    "-m storyforge.warm`, or hold the backlog knowingly. Verify with `python -m "
-    "storyforge.warm --check-story-words`."
+    "TWO remedies, because these are two defects.\n"
+    "(a) FREE — `python -m storyforge.warm --story-word-repair` drops every chip "
+    "whose word the reader can ALREADY decode AND that the stage's own "
+    "`allowed_words`/`sight_words` permit. No API call, no text edit, no questions "
+    "row read, and it re-scores each story and refuses to write unless decodability "
+    "holds. 182 of the first 225 were repairable this way.\n"
+    "(b) GENERATION — everything else. A chip ABOVE the reader's stage is "
+    "load-bearing: the word is IN the story either way, so dropping that one would "
+    "leave a word the child cannot decode as plain text with no picture, which is "
+    "strictly worse. Same for a decodable word the stage's vocabulary does not "
+    "permit (`dragon`, `planet`) — de-chipping it would trade a wasted chip for a "
+    "vocabulary violation. Reject and re-generate those stories with `python -m "
+    "storyforge.warm`, or hold the backlog knowingly. Prevention is already real: "
+    "the band is enforced in `pipeline.load_vocabulary`, so a story generated after "
+    "14.20 cannot carry one.\n"
+    "Verify with `python -m storyforge.warm --check-story-words`."
 )
 
 
@@ -3101,6 +3124,636 @@ async def run_story_word_check() -> None:
         f"OK — all {total} chip(s) sit on a word the reader cannot decode at their own "
         f"stage,\n     and that either never becomes decodable within this inventory or "
         f"does within {STORY_WORD_MAX_LOOKAHEAD} stages."
+    )
+
+
+# --- the free half of the repair (DEVIATIONS 14.40-14.42) --------------------
+# `_CHIP_HINT` said there was NO free repair. That was right about a word ABOVE
+# the reader's stage and wrong about the population that actually dominates the
+# finding: 225 of the 248 offences are words the reader can ALREADY decode, and
+# for those, dropping the chip does not leave an undecodable word as plain text —
+# it leaves a word the child can sound out, which is the product's whole purpose.
+#
+# TWO conditions, and the second is the one that is easy to miss.
+
+
+@dataclass(frozen=True)
+class ChipRepair:
+    """One story's chip list, before and after the free drop."""
+
+    story_id: int
+    stage_id: int
+    dropped: tuple[str, ...]
+    kept: tuple[str, ...]
+    before: float
+    after: float
+
+
+#: Servable stories with their body, so the repair can PROVE its own postcondition
+#: rather than assert it. `string_agg` over the ordered segments is the same text
+#: `enrich` reconstructs and the same text `_is_decodable_for` scores.
+_CHIP_REPAIR_SQL = text(
+    f"""
+    SELECT s.id AS story_id, s.stage_id, s.story_words, s.decodability,
+           coalesce(
+             (SELECT string_agg(seg.body, ' ' ORDER BY seg.idx)
+              FROM story_segments seg WHERE seg.story_id = s.id), ''
+           ) AS body
+    FROM stories s
+    WHERE s.status = ANY(:statuses)
+      AND {ANSWERABLE_SQL.format(story="s")}
+      AND (CAST(:only AS int[]) IS NULL OR s.id = ANY(CAST(:only AS int[])))
+    ORDER BY s.id
+    """
+)
+
+
+def droppable_chips(
+    word_list: Sequence[str], stage_id: int, permitted: frozenset[str]
+) -> tuple[list[str], list[str]]:
+    """Split a story's chips into (drop, keep). BOTH conditions, or neither.
+
+    A chip may be dropped only when:
+
+    1. **the reader can already decode the word** (`story_word_lookahead <= 0`).
+       For anything above their stage the chip is load-bearing: the word stays in
+       the text either way, so removing the picture would leave a word the child
+       cannot read and now has no way into. That is strictly worse than the wrong
+       chip, and it is why this repair refuses the 23 too-far offences outright.
+    2. **the word is permitted vocabulary at that stage** — in `allowed_words` or
+       `sight_words`. This is the condition that is easy to miss and it removes 43
+       of the 225: `dragon` and `planet` are decodable from stage 1 but are in no
+       stage's `allowed_words` at all (the §5.4 register/frequency filters drop
+       them), so they are in these stories ONLY under the story-word exemption.
+       De-chipping one converts a licensed word into a word the stage's own
+       vocabulary does not permit — trading a wasted chip for a vocabulary
+       violation, which `run_pool_vocabulary_check` would then report and which is
+       a real defect rather than a bookkeeping one.
+
+    Both conditions are read from the live tables, never from another gate's
+    verdict, so this stays correct whatever else is or is not measuring them.
+    """
+    drop, keep = [], []
+    for word in word_list:
+        ahead = story_word_lookahead(word, stage_id)
+        decodable_now = ahead is not None and ahead <= 0
+        (drop if decodable_now and word.lower() in permitted else keep).append(word)
+    return drop, keep
+
+
+async def repair_wasted_chips(
+    session, statuses: Sequence[str], only: Sequence[int] | None = None
+) -> tuple[list[ChipRepair], list[int]]:
+    """Drop every chip the reader did not need. Free — no API call, no text edit.
+
+    Returns `(repairs, refused)`. The refusals are a PROOF, not a convention: for
+    every story it is about to write, the repair re-scores the real body at the
+    story's own stage with the reduced exemption set and refuses to write unless
+    decodability holds up and stays above `DECODABILITY_GATE`. A story-word drop
+    can only move that number toward 1.0 — the word leaves the exempt set and
+    enters the denominator as `decodable`, and `(d+k)/(s+k) >= d/s` — so a refusal
+    here means the premise was wrong for that row, and the row is left alone and
+    named.
+
+    The story TEXT is never touched and no `questions` row is read or written, so
+    there is no path by which this can cascade a child's recorded answer away —
+    the refusal `--mcq2-repair` had to make with a SQL predicate is structural
+    here.
+
+    `stories.decodability` is rewritten alongside, computed exactly as
+    `persist` computes it (the report at the story's OWN stage, rounded to 4). Left
+    alone it would be a stale under-estimate of a story that just got better.
+    """
+    allowed, sight = await stage_vocabularies(session)
+    rows = (
+        await session.execute(
+            _CHIP_REPAIR_SQL,
+            {"statuses": list(statuses), "only": list(only) if only else None},
+        )
+    ).all()
+
+    repairs: list[ChipRepair] = []
+    refused: list[int] = []
+    for row in rows:
+        words = list(row.story_words or [])
+        if not words:
+            continue
+        permitted = allowed.get(row.stage_id, frozenset()) | sight.get(
+            row.stage_id, frozenset()
+        )
+        drop, keep = droppable_chips(words, row.stage_id, permitted)
+        if not drop:
+            continue
+
+        mastered = mastered_ids(row.stage_id)
+        stage_sight = sight.get(row.stage_id, frozenset())
+        before = validate_text(row.body, mastered, stage_sight, frozenset(words))
+        after = validate_text(row.body, mastered, stage_sight, frozenset(keep))
+        if after.decodability < before.decodability or after.decodability < DECODABILITY_GATE:
+            refused.append(row.story_id)
+            continue
+
+        await session.execute(
+            text(
+                "UPDATE stories SET story_words = CAST(:w AS text[]), "
+                "decodability = :d WHERE id = :id"
+            ),
+            {
+                "w": keep,
+                "d": round(after.decodability, 4),
+                "id": row.story_id,
+            },
+        )
+        repairs.append(
+            ChipRepair(
+                story_id=row.story_id,
+                stage_id=row.stage_id,
+                dropped=tuple(drop),
+                kept=tuple(keep),
+                before=round(before.decodability, 4),
+                after=round(after.decodability, 4),
+            )
+        )
+    return repairs, refused
+
+
+async def run_story_word_repair(only: Sequence[int] | None = None) -> None:
+    """`--story-word-repair`: drop the chips the reader never needed. Free.
+
+    Idempotent by construction — it selects on a property of the row, so a second
+    run finds nothing to do — and it is its own check: it re-reads the pool through
+    `chip_offences` afterwards and reports the residual rather than its own
+    counters (11.84's rule, after a grammar backfill printed success while writing
+    three of five verdict fields).
+    """
+    async with SessionLocal() as session:
+        before_offences, total = await chip_offences(session)
+        repairs, refused = await repair_wasted_chips(session, SERVABLE_STATUSES, only)
+        await session.commit()
+        after_offences, total_after = await chip_offences(session)
+
+    dropped = sum(len(r.dropped) for r in repairs)
+    print(f"\nSTORY-WORD REPAIR — {len(before_offences)} of {total} slot(s) out of band")
+    if not repairs:
+        print("  nothing droppable — every remaining offence needs generation, not an UPDATE")
+    else:
+        print(
+            f"  dropped {dropped} chip(s) from {len(repairs)} story/stories: each word is "
+            "one the\n  reader can already decode AND that the stage's own vocabulary "
+            "permits."
+        )
+        emptied = [r for r in repairs if not r.kept]
+        moved = [r for r in repairs if r.after > r.before]
+        print(f"    {len(emptied)} story/stories now carry no chip at all")
+        print(f"    {len(moved)} had `decodability` corrected upward (it was understated)")
+        for r in repairs[:10]:
+            print(
+                f"    story {r.story_id} stage {r.stage_id}: -{list(r.dropped)} "
+                f"kept {list(r.kept)} dec {r.before} -> {r.after}"
+            )
+        if len(repairs) > 10:
+            print(f"    ... and {len(repairs) - 10} more")
+    if refused:
+        print(
+            f"  REFUSED {len(refused)} story/stories whose own re-score did not hold up: "
+            f"{sorted(refused)}"
+        )
+    print(
+        f"  residual: {len(after_offences)} of {total_after} slot(s) still out of band "
+        f"(was {len(before_offences)} of {total})."
+    )
+    print("  Verify with `python -m storyforge.warm --check-story-words`.")
+
+
+# --- §5.4 vocabulary: the SEVENTH gate (DEVIATIONS 22.1-22.9) ----------------
+# The general principle, and the reason this is a gate and not a one-off script:
+# **a precomputed input changing must invalidate the artefacts built from it.**
+#
+# `allowed_words` is a PRECOMPUTE. `make precompute` recomputes it from
+# `data/*`, and the stories in the pool were generated against whatever it held
+# on the day they were written. Nothing in this module had ever re-asked the
+# question afterwards, so DEVIATIONS 11.7-11.11 — which replaced §5.4's literal
+# SUBTLEX intersection with a child-register filter because `amid` was reaching
+# five-year-olds — changed the vocabulary the generator is GIVEN and changed
+# nothing at all about the 119 stories already servable. Measured when this gate
+# was written: **`amid` is absent from `allowed_words` at every one of the eleven
+# stages and 9 servable stories still contain it**, three of them offering it to
+# a stage-1 child as a tappable option.
+#
+# The decodability gate does not catch this and is not supposed to. `amid` IS
+# decodable — a-m-i-d, four one-to-one GPCs, alignable from stage 1 — so
+# `_is_decodable_for` re-scores those stories at serve time and passes them
+# every time. The objection is REGISTER, not phonics, and register lives in
+# `allowed_words` alone. That is the same shape as 11.60 (a prompt frame the
+# ladder no longer produces), 11.64 (an mcq2 the generator would now refuse) and
+# 14.20 (a picture chip outside §5.5's band): a rule moved forward and the pool
+# stayed where it was.
+
+
+@dataclass(frozen=True)
+class VocabOffence:
+    """One word on one servable story that the CURRENT vocabulary does not permit."""
+
+    story_id: int
+    stage_id: int
+    theme_slug: str
+    status: str
+    word: str
+    #: `"body"` (segment text, which `validate_draft` scores) or `"title"` (which
+    #: it does not — see `_TITLE_UNVALIDATED`).
+    where: str
+    occurrences: int
+
+
+#: Every servable story, its title, and its segment bodies as one string.
+#:
+#: Same `SERVABLE_STATUSES` + `ANSWERABLE_SQL` predicate as every other gate,
+#: imported and never re-spelled: a word on a story the serving path refuses is
+#: not a word any child is shown, and a gate that counted one would report drift
+#: an operator cannot act on.
+#:
+#: `LEFT JOIN` on the segments, so a story with no segment rows comes back with a
+#: NULL body rather than as no row — the 8.44 vacuity rule, one query later. It
+#: contributes no offence, but its title is still read.
+_VOCAB_SQL = text(
+    f"""
+    SELECT s.id AS story_id, s.stage_id, s.status, s.title, s.story_words,
+           t.slug AS theme_slug,
+           string_agg(seg.body, ' ' ORDER BY seg.idx) AS body
+    FROM stories s
+    JOIN themes t ON t.id = s.theme_id
+    LEFT JOIN story_segments seg ON seg.story_id = s.id
+    WHERE s.status = ANY(:statuses)
+      AND {ANSWERABLE_SQL.format(story="s")}
+    GROUP BY s.id, t.slug
+    ORDER BY s.stage_id, t.slug, s.id
+    """
+)
+
+
+async def stage_vocabularies(
+    session,
+) -> tuple[dict[int, frozenset[str]], dict[int, frozenset[str]]]:
+    """`(allowed_words per stage, cumulative sight words per stage)`. One query each.
+
+    **Read straight from the tables rather than through
+    `pipeline.load_vocabulary`, and that is deliberate.** `load_vocabulary`
+    applies `ORDER BY freq_rank LIMIT PROMPT_WORD_LIMIT` — a decision about how
+    big a PROMPT may be, not about which words the stage permits. A word at rank
+    401 is permitted vocabulary that this particular request did not have room to
+    name, and a gate built on the window would report every one of them as a
+    violation. The window is a strict subset of what this returns, so a gate on
+    the full table cannot be stricter than the generator's own instructions.
+
+    Sight words are cumulative (`stage_id <= s`), exactly as `load_vocabulary`
+    reads them, because the sight-word ladder is cumulative like the GPC one.
+    """
+    allowed: dict[int, set[str]] = {}
+    for row in await session.execute(text("SELECT stage_id, word FROM allowed_words")):
+        allowed.setdefault(row.stage_id, set()).add(row.word)
+    sight_rows = (await session.execute(text("SELECT stage_id, word FROM sight_words"))).all()
+    stages = [
+        r[0] for r in (await session.execute(text("SELECT id FROM stages ORDER BY id"))).all()
+    ]
+    sight = {
+        stage: frozenset(r.word for r in sight_rows if r.stage_id <= stage) for stage in stages
+    }
+    return {s: frozenset(w) for s, w in allowed.items()}, sight
+
+
+def permitted_at(
+    stage_id: int,
+    allowed: dict[int, frozenset[str]],
+    sight: dict[int, frozenset[str]],
+    story_words: Sequence[str],
+) -> frozenset[str]:
+    """Every word a story at `stage_id` is permitted to contain, today.
+
+    The three lists `SYSTEM_RULES` rule 1 names, and nothing else: "Every word
+    must come from the PERMITTED WORDS list, the SIGHT WORDS list, or the STORY
+    WORDS list. There are no other options."
+
+    The story words are the STORY's OWN persisted `story_words`, not the theme
+    bank: those are the words this story ships picture chips for, they are exempt
+    from the decodability denominator by §5.1, and whether a chip should have
+    been spent on them is `--check-story-words`' question, not this one. Asking it
+    twice, in two places, with two answers, is how 11.60 happened.
+    """
+    return (
+        allowed.get(stage_id, frozenset())
+        | sight.get(stage_id, frozenset())
+        | frozenset(w.strip().lower() for w in story_words or () if w and w.strip())
+    )
+
+
+@dataclass(frozen=True)
+class VocabCensus:
+    """Everything `--check-vocabulary` measured, so nothing is inferred from a count."""
+
+    offences: tuple[VocabOffence, ...]
+    #: Servable stories read.
+    stories: int
+    #: Word tokens read across every title and body.
+    scored: int
+    #: Tokens not decodable at their story's stage — §1's gate, not this one's.
+    slack: int
+    #: Possessive clitics of permitted words — a tokenisation artefact.
+    possessive: int
+    #: Offending words that appear in LOWER case somewhere in the servable pool.
+    #: A word absent from this set is capitalised everywhere it occurs, which is
+    #: what `classify_offence` reads as a name. Collected over the whole pool
+    #: rather than per story: one sentence-initial `Every` proves nothing, but
+    #: `every` appearing lower case anywhere proves `Every` is not a name.
+    lowercase_anywhere: frozenset[str]
+
+    @property
+    def story_ids(self) -> tuple[int, ...]:
+        return tuple(sorted({o.story_id for o in self.offences}))
+
+
+async def vocabulary_offences(session) -> VocabCensus:
+    """Every word on a servable story that the current vocabulary does not permit.
+
+    Two exclusions, and both are exclusions of a DIFFERENT gate's business rather
+    than concessions to make this one green:
+
+    **A word that is not decodable at the story's stage is the 0.95 decodability
+    gate's business, not this one's.** `precompute.compute_rows` drops any word
+    the inventory cannot align (`if first is None: continue`), so `allowed_words`
+    is STRUCTURALLY unable to contain `could`, `would`, `goes` or `around` at any
+    stage — counting them here would silently turn this into a second decodability
+    gate with no slack at all, which is a different proposition (§1 permits 5%)
+    with a different remedy. `pipeline.DECODABILITY_GATE` owns that floor and
+    `api/stories.py::_is_decodable_for` re-asserts it at serve time.
+
+    **A possessive of a permitted word is a tokenisation artefact.** `§5.2.1`'s
+    tokeniser keeps the clitic, so `rabbit's` is one token; `rabbit` is offered
+    and the possessive is the same lexical item. Reporting it as drift would
+    manufacture a finding out of a regex.
+
+    Both exclusions are COUNTED and printed, so the operator can see what the
+    gate declined to judge instead of inferring it from a number that got smaller.
+    """
+    allowed, sight = await stage_vocabularies(session)
+    rows = (await session.execute(_VOCAB_SQL, {"statuses": list(SERVABLE_STATUSES)})).all()
+
+    offences: list[VocabOffence] = []
+    lowercase: set[str] = set()
+    scored = slack = possessive = 0
+    for row in rows:
+        permitted = permitted_at(row.stage_id, allowed, sight, row.story_words)
+        for where, blob in (("title", row.title or ""), ("body", row.body or "")):
+            counts: dict[str, int] = {}
+            for token in tokenize(blob):
+                if not token.is_word:
+                    continue
+                scored += 1
+                word = token.text
+                # `token.text` is lower-cased; `token.raw` is what the child sees.
+                if token.raw[:1].islower():
+                    lowercase.add(word)
+                if word in permitted:
+                    continue
+                if word.endswith("'s") and word[:-2] in permitted:
+                    possessive += 1
+                    continue
+                first = decodable_from_stage(word)
+                if first is None or first > row.stage_id:
+                    slack += 1
+                    continue
+                counts[word] = counts.get(word, 0) + 1
+            offences += [
+                VocabOffence(
+                    story_id=row.story_id,
+                    stage_id=row.stage_id,
+                    theme_slug=row.theme_slug,
+                    status=row.status,
+                    word=word,
+                    where=where,
+                    occurrences=n,
+                )
+                for word, n in sorted(counts.items())
+            ]
+    return VocabCensus(
+        offences=tuple(offences),
+        stories=len(rows),
+        scored=scored,
+        slack=slack,
+        possessive=possessive,
+        lowercase_anywhere=frozenset(lowercase),
+    )
+
+
+#: Sorting only. `classify_offence` decides the ORDER of the report and never the
+#: exit code, which is the property that makes a heuristic safe here: a
+#: misclassified word is still an offence and still fails the gate. The
+#: alternative — a class the gate forgives — is how a check comes to pass because
+#: it asked the wrong question.
+REGISTER_CLASS = "register"
+NAME_CLASS = "proper-noun-shaped"
+STAGE_CLASS = "wrong-stage"
+
+
+def classify_offence(word: str, lowercase_anywhere: bool) -> str:
+    """Why this word is not permitted, as far as CURRENT data can say.
+
+    Three answers, three different remedies:
+
+    * `REGISTER_CLASS` — no stage offers it and Dale-Chall does not vouch for it.
+      This is `amid`, `admit`, `action`, `national`, `international`: adult
+      register that §5.4's SUBTLEX intersection offered and the 11.8 filter now
+      refuses. It is the class the user complained about and the only one that is
+      a CHILD-FACING defect rather than a bookkeeping one.
+    * `NAME_CLASS` — the token never appears in lower case anywhere in the
+      servable pool, so it is being used as a name. `common_forms()` filters
+      proper nouns out of the allowlist by design (DEVIATIONS 11.9), and the
+      generator invented `Sam`, `Dan`, `Kim`, `Pam` anyway — which `SYSTEM_RULES`
+      rule 1 forbids and `SYSTEM_RULES` rule 6 *demonstrates* ("Sam sat. A cat sat
+      on Sam." is the prompt's own worked example of correct output). A rules
+      conflict, not adult register reaching a five-year-old.
+    * `STAGE_CLASS` — Dale-Chall vouches for the word and some stage offers it,
+      just not this one. `every` at stage 5 is the whole class: DEVIATIONS 21.2
+      moved the syllable cap from `min_syllables` over every CMUdict entry to
+      `aligned_syllables` over the ones that actually align, `every` aligns at
+      stage 5 in three syllables against a cap of two, and it went from offered to
+      not-offered without anything re-reading the pool. Same defect, different
+      precomputed input — which is why the gate is about staleness and not about
+      `amid`.
+    """
+    if not lowercase_anywhere:
+        return NAME_CLASS
+    return STAGE_CLASS if word in child_forms() else REGISTER_CLASS
+
+
+#: The finding this gate surfaces that has nothing to do with staleness, printed
+#: whenever a title offends: `pipeline.run_pipeline` scores `draft_text(draft)`,
+#: which joins SEGMENT text and nothing else, so `stories.title` has never been
+#: through the decodability gate or the vocabulary rule. DEVIATIONS 17.1 routed it
+#: through §13 moderation for exactly this reason and stopped there.
+_TITLE_UNVALIDATED = (
+    "Titles are included because NOTHING ELSE reads them: `validate_draft` scores "
+    "`draft_text(draft)`, which joins segment bodies only, so a title reaches "
+    "`stories.title` and every `StoryDTO` having passed §13 moderation "
+    "(DEVIATIONS 17.1) and neither the decodability gate nor the vocabulary rule. "
+    "A title-only offence is therefore a GENERATION-path gap, not pool drift."
+)
+
+#: The remedy, and honestly what it costs. There is no free repair: unlike a
+#: prompt (`--backfill` re-derives one) or an mcq2 (`--mcq2-repair` removes one),
+#: a word is load-bearing in a sentence and nothing can substitute it without
+#: rewriting the story — which is a generation call.
+_VOCAB_HINT = (
+    "There is NO free repair. A prompt can be re-derived and a leaking question "
+    "can be removed, but a word sits inside a sentence: dropping it leaves a hole "
+    "and swapping it is a rewrite, which costs an API call. The two honest "
+    "remedies are (a) re-status the named stories so they stop being served and "
+    "re-fill with `python -m storyforge.warm`, checking `--check-coverage` after, "
+    "or (b) hold the backlog knowingly. Prevention is already real — the words are "
+    "gone from `allowed_words`, so a story generated after DEVIATIONS 11.11 cannot "
+    "contain one. Verify with `python -m storyforge.warm --check-vocabulary`."
+)
+
+
+#: One line per class, in the order an operator should act on them. `register`
+#: first because it is the only class that is a child-facing defect.
+_VOCAB_CLASS_NOTE = {
+    REGISTER_CLASS: (
+        "adult register: no stage offers the word and Dale-Chall does not vouch "
+        "for it. THIS is the class the child sees (DEVIATIONS 11.7-11.11)"
+    ),
+    NAME_CLASS: (
+        "capitalised at every occurrence in the pool, so used as a NAME. "
+        "`common_forms()` filters proper nouns out of the allowlist by design "
+        "(11.9) while SYSTEM_RULES rule 6 demonstrates one. A rules conflict, not "
+        "adult register"
+    ),
+    STAGE_CLASS: (
+        "child register, offered at SOME stage but not this one — a stage-ladder "
+        "or syllable-cap move (e.g. DEVIATIONS 21.2)"
+    ),
+}
+
+
+def render_vocabulary(census: VocabCensus, limit: int = 12) -> list[str]:
+    """The offending WORDS by class, then the stories by name. Never just a count.
+
+    8.43's rule. A gate that prints "49 stories are stale" sends an operator to
+    read 49 stories; the WORD is the unit a decision is made in — one `amid` over
+    nine stories is one judgement, not nine — and the STORY is the unit a remedy
+    is applied in, so both are printed.
+    """
+    out = [
+        "",
+        f"POOL VOCABULARY — every word on the {census.stories} servable "
+        f"({'|'.join(SERVABLE_STATUSES)}) story/stories, against the CURRENT "
+        "`allowed_words`",
+        "  + `sight_words` + that story's own story words. Titles AND bodies.",
+        f"  {census.scored:,} word token(s) read.",
+        f"  NOT judged here: {census.slack:,} token(s) not decodable at their own "
+        f"story's stage — §1's {int(DECODABILITY_GATE * 100)}% gate owns those and",
+        "                   `allowed_words` structurally cannot contain them — and "
+        f"{census.possessive:,} possessive form(s) of a permitted word.",
+    ]
+    if not census.offences:
+        return out
+
+    by_word: dict[str, list[VocabOffence]] = {}
+    for offence in census.offences:
+        by_word.setdefault(offence.word, []).append(offence)
+
+    classes: dict[str, list[str]] = {}
+    for word in by_word:
+        classes.setdefault(
+            classify_offence(word, word in census.lowercase_anywhere), []
+        ).append(word)
+
+    for cls in (REGISTER_CLASS, NAME_CLASS, STAGE_CLASS):
+        words = classes.get(cls)
+        if not words:
+            continue
+        stories = len({o.story_id for w in words for o in by_word[w]})
+        out.append(f"\n  {cls.upper()} — {_VOCAB_CLASS_NOTE[cls]}")
+        out.append(f"  {len(words)} word(s) over {stories} story/stories:")
+        for word in sorted(words, key=lambda w: (-len({o.story_id for o in by_word[w]}), w)):
+            hits = by_word[word]
+            ids = sorted({o.story_id for o in hits})
+            bodies = sorted({o.story_id for o in hits if o.where == "body"})
+            titles = sorted({o.story_id for o in hits if o.where == "title"})
+            shown = ", ".join(str(i) for i in ids[:limit])
+            more = f", +{len(ids) - limit} more" if len(ids) > limit else ""
+            out.append(
+                f"    {word!r}: {sum(o.occurrences for o in hits)} occurrence(s) over "
+                f"{len(ids)} story/stories ({len(bodies)} in the body, "
+                f"{len(titles)} in the title), stage(s) "
+                f"{sorted({o.stage_id for o in hits})} — {shown}{more}"
+            )
+
+    title_only = {o.story_id for o in census.offences if o.where == "title"} - {
+        o.story_id for o in census.offences if o.where == "body"
+    }
+    if title_only:
+        out.append(
+            f"\n  {len(title_only)} story/stories offend ONLY in the TITLE: "
+            f"{sorted(title_only)}"
+        )
+        out.append(f"  {_TITLE_UNVALIDATED}")
+    return out
+
+
+async def run_vocabulary_check() -> None:
+    """`--check-vocabulary`: the pool against the CURRENT allowlist. Free.
+
+    The SEVENTH gate, and the first that asks whether the stories already in the
+    pool are still consistent with the vocabulary the generator is GIVEN. Every
+    other gate reads something the pool contains — a story count, an evidence
+    count, a prompt, an mcq2, a picture chip. This one reads the pool against
+    something outside it, which is exactly why nothing caught `amid`: the word is
+    in the story, the story is decodable, and every existing query is green.
+
+    No API client is constructed; nothing is spent and nothing is written.
+    """
+    async with SessionLocal() as session:
+        census = await vocabulary_offences(session)
+
+    if census.stories == 0:
+        # 8.44's vacuity rule. A vocabulary check over an empty pool finds no
+        # offences and exits 0 — on a fresh deploy, which is when an operator is
+        # most likely to believe it.
+        raise SystemExit(
+            "refusing to report a clean vocabulary over an EMPTY pool: no story is "
+            "servable (`SERVABLE_STATUSES` + `ANSWERABLE_SQL`). Run `python -m "
+            "storyforge.warm`, then `--check-coverage`, then this."
+        )
+
+    for line in render_vocabulary(census):
+        print(line, flush=True)
+
+    if census.offences:
+        words = {o.word for o in census.offences}
+        register = {
+            w
+            for w in words
+            if classify_offence(w, w in census.lowercase_anywhere) == REGISTER_CLASS
+        }
+        reg_stories = {o.story_id for o in census.offences if o.word in register}
+        detail = (
+            f" {len(register)} of those word(s) are adult REGISTER over "
+            f"{len(reg_stories)} story/stories: {sorted(register)}."
+            if register
+            else ""
+        )
+        raise SystemExit(
+            f"\n{len(census.story_ids)} of {census.stories} servable story/stories "
+            f"contain at least one of {len(words)} word(s) the CURRENT vocabulary "
+            f"does not permit at their stage.{detail}\n"
+            "A precomputed input changed and the artefacts built from it were never "
+            "re-checked: `allowed_words` is rebuilt by `make precompute` and nothing "
+            "re-reads the pool afterwards.\n" + _VOCAB_HINT
+        )
+    print(
+        f"\nOK — every word on all {census.stories} servable story/stories is one the "
+        f"current `allowed_words`,\n     `sight_words` or that story's own story words "
+        "permit at its stage."
     )
 
 
@@ -3561,6 +4214,25 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--check-vocabulary",
+        action="store_true",
+        help=(
+            "re-validate every servable story's TITLE and BODY against the CURRENT "
+            "`allowed_words` + `sight_words` + that story's own story words, and "
+            "exit NON-ZERO while any word is one the vocabulary no longer permits "
+            "at that story's stage, then exit. No API calls, nothing spent. "
+            "COVERS: pool drift after `make precompute` — a word the generator was "
+            "offered when the story was written and is not offered now (`amid`, "
+            "DEVIATIONS 11.7-11.11). DOES NOT COVER: whether a word is DECODABLE "
+            "(§1's 0.95 gate and `_is_decodable_for` own that, and this gate skips "
+            "every token that fails it, because `allowed_words` structurally cannot "
+            "contain one); whether a picture chip is well spent (--check-story-words); "
+            "what a question SAYS (--check-prompts, --check-mcq2); or QUESTION text, "
+            "whose vocabulary rule is INSTRUCTION_WORDS + decodability, not this one. "
+            "There is no free repair (DEVIATIONS 22.1)"
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -3602,6 +4274,17 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--story-word-repair",
+        action="store_true",
+        help=(
+            "drop every picture chip whose word the reader can ALREADY decode AND "
+            "that the stage's own allowed_words/sight_words permit, then exit. Free, "
+            "no API call; never edits story text and never reads a questions row. A "
+            "chip ABOVE the reader's stage is left alone — removing that one would "
+            "leave a word the child cannot read with no way in (DEVIATIONS 14.40)"
+        ),
+    )
+    p.add_argument(
         "--mcq2-archive-answered",
         action="store_true",
         help=(
@@ -3628,10 +4311,14 @@ def main() -> None:
             asyncio.run(run_mcq2_check())
         elif a.check_story_words:
             asyncio.run(run_story_word_check())
+        elif a.check_vocabulary:
+            asyncio.run(run_vocabulary_check())
         elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
         elif a.mcq2_repair:
             asyncio.run(run_mcq2_repair(only=only))
+        elif a.story_word_repair:
+            asyncio.run(run_story_word_repair(only=only))
         elif a.mcq2_archive_answered:
             asyncio.run(run_mcq2_archive(only=only))
         elif a.grammar_backfill:

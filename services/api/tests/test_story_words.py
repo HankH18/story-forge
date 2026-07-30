@@ -28,7 +28,17 @@ Two halves, tested as two propositions:
 1. the BAND is a pure function of (word, stage) over the frozen inventory, and
    `load_vocabulary` applies it so a story generated from now on cannot carry an
    out-of-band chip (`test_the_band_*`, `test_the_offer_*`);
-2. the GATE reads what is already in the pool and refuses (`test_the_gate_*`).
+2. the GATE reads what is already in the pool and refuses (`test_the_gate_*`);
+3. the free half of the backlog is REPAIRABLE without an API call
+   (`test_the_repair_*`, DEVIATIONS 14.40).
+
+The repair's first draft said there was no free repair at all. That was right
+about a word ABOVE the reader's stage — the word stays in the text either way, so
+removing the picture leaves a word the child cannot read and now has no way into —
+and wrong about the 225 that dominate the finding, where dropping the chip leaves
+a word the child can sound out, which is the product's entire purpose. Measured:
+182 of the 225 are free, and the other 43 are held back by a SECOND condition
+(`test_the_repair_leaves_*`) that the first analysis missed.
 
 Nothing here calls Anthropic.
 """
@@ -42,6 +52,7 @@ from storyforge.api.stories import ANSWERABLE_SQL
 from storyforge.db import SessionLocal
 from storyforge.decoder import MAX_STAGE, MIN_STAGE
 from storyforge.pipeline import (
+    DECODABILITY_GATE,
     MAX_STORY_WORDS,
     STORY_WORD_MAX_LOOKAHEAD,
     decodable_from_stage,
@@ -239,8 +250,17 @@ def test_the_gate_names_every_chip_and_which_kind_of_waste_it_is(monkeypatch, ca
     assert "2 of 326 picture-chip slot(s)" in message
     assert "1 spent on a word the child could already read" in message
     assert "1 on a word the curriculum will teach properly first" in message
-    # No free repair, and the message must say WHY rather than just omit one.
-    assert "NO free repair" in message and "strictly worse" in message
+    # BOTH remedies, named, and the reason they are different remedies.
+    #
+    # This assertion read `"NO free repair" in message` for one commit, and it was
+    # pinning a FALSE claim: the hint generalised from the too-far chips (where the
+    # word stays unreadable, so there really is no free fix) to the 225 that
+    # dominate the finding, where the child can already read the word. Replaced,
+    # not relaxed — it now requires the message to name the free repair by its flag
+    # AND to keep the argument for why the rest is not free (DEVIATIONS 14.40).
+    assert "--story-word-repair" in message
+    assert "strictly worse" in message
+    assert "load-bearing" in message
 
     out = capsys.readouterr().out
     assert "story 2 stage 1 / dragons: 'dragon'" in out
@@ -370,3 +390,227 @@ async def test_the_gate_counts_slots_and_not_occurrences(session):
         words = list(r.story_words or [])
         assert len(set(words)) == len(words)
         assert len(words) <= MAX_STORY_WORDS
+
+
+# --- the free repair (DEVIATIONS 14.40-14.42) ---------------------------------
+def test_the_repair_drops_only_what_the_reader_can_already_decode():
+    """Condition 1. A chip above the reader's stage is load-bearing and is kept.
+
+    The word stays in the story either way — the repair never edits text — so
+    removing the picture from a word the child cannot decode swaps a wasted chip
+    for an unreadable word. That is strictly worse, and it is why the 23 too-far
+    offences are not repairable at any price short of regeneration.
+    """
+    permits_everything = frozenset({"cave", "fire", "giraffe", "castle", "moon"})
+    # stage 4: cave and fire are decodable AT 4 (lookahead 0); giraffe is 4 ahead;
+    # castle is never decodable at all.
+    drop, keep = warm.droppable_chips(["cave", "fire", "giraffe", "castle"], 4, permits_everything)
+    assert drop == ["cave", "fire"]
+    assert keep == ["giraffe", "castle"]
+    # A permanently unalignable word is never dropped, at any stage, even though
+    # it is "not decodable at the reader's stage" — it is the chip's whole reason.
+    for stage in range(MIN_STAGE, MAX_STAGE + 1):
+        d, k = warm.droppable_chips(["castle"], stage, permits_everything)
+        assert (d, k) == ([], ["castle"]), stage
+
+
+def test_the_repair_leaves_a_decodable_word_the_vocabulary_does_not_permit():
+    """Condition 2 — the one the first analysis missed, and it holds back 43 slots.
+
+    `dragon` and `planet` are decodable from stage 1 but appear in NO stage's
+    `allowed_words` (§5.4's register/frequency filters drop them). They are in
+    these stories only under the story-word exemption, so de-chipping one converts
+    a licensed word into a word the stage's own vocabulary does not permit —
+    trading a wasted chip for a vocabulary violation, which is a real defect
+    rather than a bookkeeping one.
+    """
+    permits_neither = frozenset({"cave"})
+    drop, keep = warm.droppable_chips(["dragon", "cave"], 4, permits_neither)
+    assert drop == ["cave"], "the permitted one goes"
+    assert keep == ["dragon"], "the unpermitted one stays chipped"
+    # Both conditions are required, not either.
+    assert warm.droppable_chips(["dragon"], 4, frozenset({"dragon"})) == (["dragon"], [])
+
+
+async def test_the_repair_matches_the_gate_it_is_repairing(session):
+    """Nothing the repair drops may be a chip the gate would have called legal.
+
+    The two read the same `story_word_lookahead`; this is what stops the repair
+    quietly widening the band it is supposed to be enforcing.
+    """
+    allowed, sight = await warm.stage_vocabularies(session)
+    for stage in range(MIN_STAGE, MAX_STAGE + 1):
+        permitted = allowed.get(stage, frozenset()) | sight.get(stage, frozenset())
+        bank = [r[0] for r in await session.execute(warm.text("SELECT word FROM story_word_bank"))]
+        drop, _keep = warm.droppable_chips(bank, stage, permitted)
+        for word in drop:
+            assert story_word_refusal(word, stage) is not None, (
+                f"{word!r} at stage {stage} is a LEGAL chip and the repair would drop it"
+            )
+
+
+@pytest.fixture
+async def repairable_story(session):
+    """A stage-4 dragons story with one of each kind of chip.
+
+    `cave`/`fire` are decodable at stage 4 and in `allowed_words` there — free.
+    `castle` can never be aligned — kept. The text is untouched by the repair, so
+    it must still be a real, gate-clearing story afterwards.
+    """
+    theme_id = (
+        await session.execute(warm.text("SELECT id FROM themes WHERE slug = 'dragons'"))
+    ).scalar_one()
+    story_id = (
+        await session.execute(
+            warm.text(
+                "INSERT INTO stories (stage_id, theme_id, status, title, decodability, "
+                "story_words, gen_meta) VALUES (4, :th, 'warm', 'Repair Fixture', "
+                "1.0, CAST(:w AS text[]), '{}'::jsonb) RETURNING id"
+            ),
+            {"th": theme_id, "w": ["cave", "fire", "castle"]},
+        )
+    ).scalar_one()
+    await session.execute(
+        warm.text(
+            "INSERT INTO story_segments (story_id, idx, body, scene_tags) "
+            "VALUES (:s, 0, :b, ARRAY[]::text[])"
+        ),
+        {"s": story_id, "b": "The cave had fire. The castle is big. A cat sat on it."},
+    )
+    await session.execute(
+        warm.text(
+            "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+            "VALUES (:s, 0, 'tap_word', 'Tap: sit.', CAST(:p AS jsonb), CAST(:a AS jsonb))"
+        ),
+        {
+            "s": story_id,
+            "p": '{"options": ["sat", "did", "nap"], "cue_word": "sit"}',
+            "a": '{"correct": "sat", "index": 0, "target_grapheme": "s"}',
+        },
+    )
+    await session.commit()
+    try:
+        yield story_id
+    finally:
+        await session.rollback()
+        await session.execute(
+            warm.text("DELETE FROM stories WHERE id = :id"), {"id": story_id}
+        )
+        await session.commit()
+
+
+async def test_the_repair_drops_the_free_chips_and_keeps_the_load_bearing_one(
+    repairable_story, session
+):
+    """End to end against a real row, including the postcondition read back."""
+    repairs, refused = await warm.repair_wasted_chips(
+        session, warm.SERVABLE_STATUSES, only=[repairable_story]
+    )
+    await session.commit()
+    assert refused == []
+    assert len(repairs) == 1
+    r = repairs[0]
+    assert sorted(r.dropped) == ["cave", "fire"]
+    assert list(r.kept) == ["castle"]
+    # Decodability may only move toward 1.0 — the word leaves the exempt set and
+    # enters the denominator as `decodable`.
+    assert r.after >= r.before
+
+    row = (
+        await session.execute(
+            warm.text("SELECT story_words, decodability FROM stories WHERE id = :i"),
+            {"i": repairable_story},
+        )
+    ).first()
+    assert list(row.story_words) == ["castle"]
+    assert float(row.decodability) >= DECODABILITY_GATE
+
+    # The text is NEVER edited — that is what makes this free and reversible.
+    body = (
+        await session.execute(
+            warm.text("SELECT body FROM story_segments WHERE story_id = :i"),
+            {"i": repairable_story},
+        )
+    ).scalar_one()
+    assert "cave" in body and "fire" in body and "castle" in body
+
+    # And the question is untouched, so no §8 evidence can be cascaded away.
+    assert (
+        await session.execute(
+            warm.text("SELECT count(*) FROM questions WHERE story_id = :i"),
+            {"i": repairable_story},
+        )
+    ).scalar_one() == 1
+
+
+async def test_the_repair_is_idempotent(repairable_story, session):
+    """It selects on a property of the row, so the second run has nothing to do."""
+    first, _ = await warm.repair_wasted_chips(
+        session, warm.SERVABLE_STATUSES, only=[repairable_story]
+    )
+    await session.commit()
+    second, refused = await warm.repair_wasted_chips(
+        session, warm.SERVABLE_STATUSES, only=[repairable_story]
+    )
+    await session.commit()
+    assert len(first) == 1 and second == [] and refused == []
+
+
+async def test_the_repaired_story_still_passes_the_gate_for_every_reader(
+    repairable_story, session
+):
+    """§7 serves a story to any reader at or ABOVE its stage, so the postcondition
+    has to hold at all of them — not just at the story's own."""
+    await warm.repair_wasted_chips(session, warm.SERVABLE_STATUSES, only=[repairable_story])
+    await session.commit()
+    row = (
+        await session.execute(
+            warm.text(
+                "SELECT s.stage_id, s.story_words, "
+                "(SELECT string_agg(g.body, ' ' ORDER BY g.idx) FROM story_segments g "
+                " WHERE g.story_id = s.id) AS body FROM stories s WHERE s.id = :i"
+            ),
+            {"i": repairable_story},
+        )
+    ).first()
+    _allowed, sight = await warm.stage_vocabularies(session)
+    for reader in range(row.stage_id, MAX_STAGE + 1):
+        report = warm.validate_text(
+            row.body,
+            warm.mastered_ids(reader),
+            sight.get(reader, frozenset()),
+            frozenset(row.story_words),
+        )
+        assert report.decodability >= DECODABILITY_GATE, (reader, report.decodability)
+
+
+async def test_the_repair_refuses_a_drop_that_would_lower_decodability(
+    repairable_story, session, monkeypatch
+):
+    """The postcondition, tested at the seam it exists to protect.
+
+    Conditions 1 and 2 make this branch unreachable on real data — which is
+    exactly why a sabotage run could delete the guard and leave every test green.
+    So the guard is exercised by making the SPLIT wrong, which is the failure it
+    is a proof against: `droppable_chips` gaining a bug and proposing a word the
+    reader cannot decode. The repair must re-score, refuse, and write nothing.
+    """
+    monkeypatch.setattr(
+        warm, "droppable_chips", lambda words, stage, permitted: (["castle"], ["cave", "fire"])
+    )
+    repairs, refused = await warm.repair_wasted_chips(
+        session, warm.SERVABLE_STATUSES, only=[repairable_story]
+    )
+    await session.commit()
+
+    assert repairs == []
+    assert refused == [repairable_story]
+    # Nothing was written: the row still carries all three chips.
+    row = (
+        await session.execute(
+            warm.text("SELECT story_words, decodability FROM stories WHERE id = :i"),
+            {"i": repairable_story},
+        )
+    ).first()
+    assert sorted(row.story_words) == ["castle", "cave", "fire"]
+    assert float(row.decodability) == 1.0
