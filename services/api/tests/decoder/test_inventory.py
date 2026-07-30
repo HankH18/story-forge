@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from storyforge.decoder import load_gpcs, load_lexicon
+from storyforge.decoder import MAX_STAGE, MIN_STAGE, load_gpcs, load_lexicon
 
 DATA = Path(__file__).resolve().parents[2] / "storyforge/decoder/data"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -62,16 +62,30 @@ def test_gpc_ids_are_unique():
 
 def test_every_stage_unlocks_something():
     stages = {g.stage for g in load_gpcs()}
-    # Stage 12 is review only (Appendix A) — it lifts the syllable cap, which is
-    # a generation-side filter, not a new GPC.
-    assert set(range(1, 12)).issubset(stages)
+    # The top stage (11) is review only (Appendix A's stage 12, renumbered) — it
+    # lifts the syllable cap, which is a generation-side filter, not a new GPC.
+    assert set(range(1, MAX_STAGE)).issubset(stages)
+
+
+def test_the_ladder_constant_matches_the_inventory():
+    """DEVIATIONS 12.4: `MAX_STAGE` has one canonical home, and this pins it.
+
+    The ladder is ELEVEN stages (docs/DECISION-stage-ladder.md — the user
+    retired Appendix A's stage 1). The top stage is review and introduces no
+    GPCs, so the constant must sit exactly one above the highest stage any GPC
+    is taught at — if either the inventory or the constant moves without the
+    other, this is the test that says so.
+    """
+    assert MIN_STAGE == 1
+    assert MAX_STAGE == 11
+    assert MAX_STAGE == max(g.stage for g in load_gpcs()) + 1
 
 
 def test_stage_sets_are_cumulative():
     """Monotonicity (§5.7c) only holds because mastery is a union over stages."""
     from storyforge.decoder import mastered_ids
 
-    for stage in range(1, 12):
+    for stage in range(1, MAX_STAGE):
         assert mastered_ids(stage) <= mastered_ids(stage + 1)
 
 

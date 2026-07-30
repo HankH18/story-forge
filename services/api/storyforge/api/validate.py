@@ -28,7 +28,7 @@ router = APIRouter(tags=["validate"])
 
 class ValidateRequest(BaseModel):
     text: str = Field(max_length=4000)
-    stage_id: int = Field(ge=1, le=12)
+    stage_id: int = Field(ge=1, le=11)
     # A kid's own name is added to their sight allowlist (§4), so callers need to
     # extend the list per request.
     extra_sight_words: list[str] = Field(default_factory=list, max_length=64)

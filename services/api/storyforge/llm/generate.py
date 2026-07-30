@@ -43,14 +43,21 @@ from functools import lru_cache
 
 from pydantic import BaseModel, Field
 
-from storyforge.decoder import WordVerdict, load_gpcs, mastered_ids, validate_word
+from storyforge.decoder import (
+    MAX_STAGE,
+    MIN_STAGE,
+    WordVerdict,
+    load_gpcs,
+    mastered_ids,
+    validate_word,
+)
 from storyforge.llm.client import generation_model, generation_timeout, get_client
 from storyforge.llm.pricing import Usage, usage_from_response
 
 # Imported, never reimplemented: the prompt must point at the words the GRADER
 # credits. A second copy of "which GPCs does this word use" would drift, and the
 # drift would be invisible — stories would look right and earn nothing.
-from storyforge.mastery import MAX_STAGE, MIN_STAGE, word_gpc_ids
+from storyforge.mastery import word_gpc_ids
 
 # §13's deterministic layer, the same list `llm/moderate.py` screens finished
 # stories with. A shortlist a story writer is told to PREFER has to clear it —
@@ -192,11 +199,11 @@ def allowlist_stage(allowed_words: tuple[str, ...]) -> int | None:
     would all have to change to pass one. It does not need to: the allowlist for
     stage N is every word decodable at N, so the newest sound it represents IS N.
 
-    One honest limitation. Stage 12 introduces no GPCs at all — it lifts the
-    syllable cap and reviews — so its allowlist looks like stage 11's and this
-    returns 11. That is the right answer to the question the caller is really
-    asking ("what are the newest sounds in here?"), and §8 cannot promote out of
-    stage 12 anyway, so no evidence is owed at that stage.
+    One honest limitation. The top stage (11, review) introduces no GPCs at all
+    — it lifts the syllable cap and reviews — so its allowlist looks like stage
+    10's and this returns 10. That is the right answer to the question the
+    caller is really asking ("what are the newest sounds in here?"), and §8
+    cannot promote out of the top stage anyway, so no evidence is owed there.
     """
     stages = [s for s in (_first_decodable_stage(w) for w in allowed_words) if s is not None]
     return max(stages) if stages else None
@@ -285,10 +292,11 @@ NARRATIVE_HEADER = "STORY SHAPE"
 
 #: Stage bands for the narrative ask, taken from §10 rather than invented
 #: (DEVIATIONS 11.44). §10: "linear spine with exactly 0-2 branch points
-#: (stage-scaled: 0 for stages 1-2, up to 2 for 5+)". A branch point is a decision
-#: and a decision needs a situation, so §10's own scaling is the shape of the ask:
-#: 0 decisions at stages 1-2, one at 3-4, up to two from 5 up.
-NARRATIVE_BAND_EDGES = (2, 4, 8)
+#: (stage-scaled: 0 for stages 1-2, up to 2 for 5+)" — in the spec's TWELVE-stage
+#: numbering. Under the eleven-stage ladder (DEVIATIONS 12.10) each band covers
+#: the same inventory range one number lower: 0 decisions at stage 1, one at 2-3,
+#: up to two from 4 up.
+NARRATIVE_BAND_EDGES = (1, 3, 7)
 
 #: What every band says, whatever else it says. Three separate hazards, each one a
 #: thing a previous prompt change actually did:
@@ -323,8 +331,8 @@ _NARRATIVE_ANTIPATTERN = (
 )
 
 _NARRATIVE_BANDS = {
-    # Stages 1-2. §18: stage-1 vocabulary is `s a t p i n m d` and "Sam sat. A cat
-    # sat." is authentic register, not a defect. So this band asks for LESS, and
+    # Stage 1 (the entry stage). §18: "Sam sat. A cat sat." is authentic
+    # decodable-reader register, not a defect. So this band asks for LESS, and
     # says out loud how small a want is allowed to be — the failure mode to avoid
     # here is a prompt that pushes a 30-word story into breaking the gate reaching
     # for something it cannot say (DEVIATIONS 11.46).
@@ -336,7 +344,7 @@ _NARRATIVE_BANDS = {
         "in the way is a problem. A cat that sits on Sam's map until Sam taps it is "
         "a whole story at this stage, and six short sentences is enough to tell it."
     ),
-    # Stages 3-4. §10's implied middle: one branch point.
+    # Stages 2-3 (Appendix A's 3-4). §10's implied middle: one branch point.
     1: (
         "One character, one thing they want or one thing that is wrong, and ONE "
         "thing that gets in the way before it is settled.\n\n"
@@ -345,7 +353,7 @@ _NARRATIVE_BANDS = {
         "actions never has, and it is the difference between a story and a list. "
         "The last sentences tell us how it came out."
     ),
-    # Stages 5-8. §10: up to 2 branch points from stage 5.
+    # Stages 4-7 (Appendix A's 5-8). §10: up to 2 branch points.
     2: (
         "A story is one situation that CHANGES. Settle these before you write a "
         "word:\n"
@@ -360,7 +368,8 @@ _NARRATIVE_BANDS = {
         "the same as it was at the start.\n\n"
         "You have enough words now to do all five, so do all five."
     ),
-    # Stages 9-12. Same shape, twice the words — and the extra words are where the
+    # Stages 8-11 (Appendix A's 9-12). Same shape, twice the words — and the
+    # extra words are where the
     # padding failure lives (DEVIATIONS 11.41): story 7309's arc was finished at
     # sentence 14 and four flat sentences were bolted on after it to reach 120.
     3: (
@@ -385,36 +394,14 @@ _NARRATIVE_BANDS = {
 }
 
 
-#: Stage 1 ONLY, and it is a fact about the GPC inventory rather than a style note.
-#: PROVED with `validate_word(w, mastered_ids(1))`, not assumed: at stage 1 `not`,
-#: `no`, `cannot`, `never` and `nope` are ALL violations, and the stage-1 allowlist
-#: contains no word with the letter `o` in it at all. **A stage-1 story cannot say
-#: that something did not happen.**
-#:
-#: This clause exists because the first version of this block asked stage 1 for
-#: "something that is wrong", and the model complied by writing "Rabbit cant nap."
-#: `cant` is a real English word, it WAS in the stage-1 allowlist, and it is
-#: decodable (c-a-n-t) — so §5's gate passed it at 100% and §13's grammar half
-#: rejected it as a mis-spelled "can't". Two of six stage-1 stories died that way
-#: against zero before the change (DEVIATIONS 11.57). `cant` has since left the
-#: allowlist under another agent's vocabulary work, so that exact word can no longer
-#: be offered; the INVENTORY fact that caused it is unchanged, which is why the fix
-#: is stated as the inventory fact and does not name the word. Naming a word raises
-#: its salience in both directions (STATE invariant 5's lesson), and a word that is
-#: no longer on the list is one the model has no reason to reach for.
-_STAGE1_NEGATION = (
-    "\n\nAt this stage you have no way to write \"not\", \"no\", \"cannot\" or "
-    "\"never\" — every one of those words needs a letter this child has not been "
-    "taught yet. So say what IS happening and never what is not, and never spell a "
-    "word you do not have in order to say it. A problem still works said forwards: "
-    "\"A cat sat on the map. Sam did tap the cat. The cat ran.\" If a problem cannot "
-    "be said forwards with your words, use a different problem, or just a want that "
-    "is met."
-)
-
-#: The stage this clause is about. Named so the test can assert the pairing rather
-#: than re-deriving it.
-STAGE1_NEGATION_STAGE = 1
+# The stage-1 negation clause (DEVIATIONS 11.57) lived here until the ladder was
+# renumbered (12.9). It stated an inventory FACT about the retired stage 1 — no
+# word with the letter `o`, so `not`/`no`/`cannot`/`never` were unwritable and a
+# story could not state an obstacle. The new stage 1 (the old stage 2 inventory)
+# has `o`, `not` is decodable and `no`/`go`/`so`/`do` are its sight words, so the
+# clause's premise is false and keeping it would tell the model a lie that removes
+# its cheapest way to state a problem. Its guard test carried an explicit kill
+# switch for exactly this condition and was removed with it.
 
 
 def narrative_band(stage: int | None) -> int:
@@ -453,12 +440,8 @@ def build_narrative_block(allowed_words: list[str]) -> str:
     """
     stage = allowlist_stage(allowed_words)
     band = _NARRATIVE_BANDS[narrative_band(stage)]
-    # Stage 1 only. See `_STAGE1_NEGATION`: the ask for "something that is wrong" is
-    # unsatisfiable at stage 1 without a word the inventory cannot spell, and the
-    # measured consequence was two grammar rejections out of six.
-    negation = _STAGE1_NEGATION if stage == STAGE1_NEGATION_STAGE else ""
     return (
-        f"{NARRATIVE_HEADER}\n\n{band}{negation}"
+        f"{NARRATIVE_HEADER}\n\n{band}"
         f"{_NARRATIVE_ANTIPATTERN}{_NARRATIVE_FLOOR}"
     )
 
@@ -530,8 +513,8 @@ def build_vocabulary_block(
 #: construction, so a word target has to be translated into a number of THINGS
 #: THAT HAPPEN before the model can plan for it — "120 words in short sentences"
 #: is not a plan, "about 20 short sentences" is. Eight is the middle of the
-#: observed register: `docs/EVAL.md`'s stage-1 output runs 5-7 words a sentence
-#: and stage-12 runs nearer 10.
+#: observed register: `docs/EVAL.md`'s lowest-stage output runs 5-7 words a
+#: sentence and the top stage runs nearer 10.
 WORDS_PER_SENTENCE = 8
 
 

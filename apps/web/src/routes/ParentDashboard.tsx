@@ -185,7 +185,7 @@ function StatCards({ progress: p }: { progress: Progress }) {
           pr.promote
             ? 'Both parts of the rule are met.'
             : atMaxStage
-              ? 'Stage 12 is the last stage in the scope & sequence.'
+              ? 'Stage 11 is the last stage in the scope & sequence.'
               : `${name} moves up on both counts together, never on one alone.`
         }
       />

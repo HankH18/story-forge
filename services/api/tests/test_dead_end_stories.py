@@ -528,13 +528,13 @@ async def test_every_offered_sound_can_be_answered(session):
                 "coalesce(string_agg(sg.body, ' ' ORDER BY sg.idx), '') AS body "
                 "FROM stories s JOIN themes t ON t.id = s.theme_id "
                 "LEFT JOIN story_segments sg ON sg.story_id = s.id "
-                "WHERE s.status = ANY(:statuses) AND s.stage_id >= 7 "
+                "WHERE s.status = ANY(:statuses) AND s.stage_id >= 6 "
                 "GROUP BY s.id, s.stage_id, s.story_words, t.slug ORDER BY s.id"
             ),
             {"statuses": list(SERVABLE_STATUSES)},
         )
     ).all()
-    assert rows, "no servable story at stage 7+ — run `make seed && make warm`"
+    assert rows, "no servable story at stage 6+ — run `make seed && make warm`"
 
     cache: dict[tuple[int, str], object] = {}
     unanswerable, storyless = [], []

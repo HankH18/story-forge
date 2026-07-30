@@ -3,13 +3,13 @@
  * portal", §17 step 2; style guide §09).
  *
  * §5.4 says this table is three things: LLM prompt input, admin-portal browsable,
- * and "itself a demo artifact — here is every word a stage-3 reader can legally
+ * and "itself a demo artifact — here is every word a stage-2 reader can legally
  * see". This screen is the second and third of those.
  *
  * **The counts on screen are the server's, and §17's script is out of date.**
- * Measured against the live table: stage 1 holds 157 rows, stage 3 holds 2,593 and
- * stage 12 holds 9,360 — 64,296 in total. §17 step 2's line says "611 words" and
- * the phase brief says 9,359 at stage 12; neither is what this database contains.
+ * Measured against the renumbered eleven-stage table (DEVIATIONS 12.x): stage 1
+ * holds 771 rows and stage 11 holds 4,397 — 34,288 in total. §17 step 2's line
+ * says "611 words"; that is not what this database contains.
  * Nothing on this screen prints a number from a document (DEVIATIONS 9.30).
  *
  * **`in_prompt` is why this is a browser and not a list.** §6 hands the generator
@@ -37,9 +37,9 @@ const SEARCH_DEBOUNCE_MS = 250
 
 export default function AdminAllowedWords() {
   // The stage, the page and the query live in the URL: this screen is a demo
-  // artifact, and a demo artifact has to be linkable ("here is stage 3").
+  // artifact, and a demo artifact has to be linkable ("here is stage 2").
   const [params, setParams] = useSearchParams()
-  const stage = clampStage(Number(params.get('stage') ?? 3))
+  const stage = clampStage(Number(params.get('stage') ?? 2))
   const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0)
   const q = params.get('q') ?? ''
 
@@ -99,7 +99,7 @@ export default function AdminAllowedWords() {
       meta={
         data ? (
           <>
-            {/* §17 step 2's actual line: "every word a stage-3 reader is
+            {/* §17 step 2's actual line: "every word a stage-2 reader is
                 permitted to see". That is `stage_total`, which is unaffected by
                 the filter — so a search narrows `total` and leaves the claim
                 intact rather than appearing to shrink the vocabulary. */}
@@ -229,8 +229,8 @@ export default function AdminAllowedWords() {
 }
 
 function clampStage(n: number): number {
-  if (!Number.isFinite(n)) return 3
-  return Math.min(12, Math.max(1, Math.trunc(n)))
+  if (!Number.isFinite(n)) return 2
+  return Math.min(11, Math.max(1, Math.trunc(n)))
 }
 
 function PageButton({
@@ -263,7 +263,7 @@ function PageButton({
  * A real `<table>` rather than §09's CSS grid: this is a data table with a header
  * row and it should be one to a screen reader. §09's grid was drawn to make the
  * parent GPC table stack on a phone (styles/index.css `.sf-gpc-row`); the admin
- * grid is 1440px wide and nobody browses 9,360 words on a phone.
+ * grid is 1440px wide and nobody browses 4,400 words on a phone.
  */
 function WordTable({ page }: { page: AllowedWordsPage }) {
   const hasPromptFlag = page.words.some((w) => w.in_prompt !== undefined)

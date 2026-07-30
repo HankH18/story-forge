@@ -35,7 +35,7 @@ what they mean in docs/EVAL.md. What it deliberately does differently:
 
 Usage:
 
-    .venv/bin/python scripts/measure_length.py --stages 1,4,5,8,9,10,11,12 --n 2
+    .venv/bin/python scripts/measure_length.py --stages 1,3,4,7,8,9,10,11 --n 2
     .venv/bin/python scripts/measure_length.py --json /tmp/after.json
     .venv/bin/python scripts/measure_length.py --compare /tmp/before.json /tmp/after.json
     .venv/bin/python scripts/measure_length.py --revalidate /tmp/before.json /tmp/after.json
@@ -79,7 +79,7 @@ MEASURE_TIMEOUT_S = 240.0
 #: different one would report a number no eval run can reproduce.
 DEFAULT_EFFORT = "medium"
 
-DEFAULT_STAGES = (1, 4, 5, 8, 9, 10, 11, 12)
+DEFAULT_STAGES = (1, 3, 4, 7, 8, 9, 10, 11)
 DEFAULT_THEMES = ("animals", "dragons", "space")
 
 

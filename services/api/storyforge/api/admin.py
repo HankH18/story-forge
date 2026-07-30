@@ -96,9 +96,9 @@ MAX_BUDGET_USD = 8.0
 #: what was authorised, not what was spent — the conservative direction, and the
 #: only one available while a run is in flight (9.6).
 PROCESS_BUDGET_USD = 2 * MAX_BUDGET_USD
-#: §14's matrix is 12 x 3 x 5. Nothing bigger can be asked for from a button.
+#: §14's matrix is 11 x 3 x 5. Nothing bigger can be asked for from a button.
 MAX_N = 5
-MAX_CELLS = 180
+MAX_CELLS = 165
 #: `concurrency` mirrors the CLI's default of 1 (which keeps the latency numbers
 #: answering §1.6) and is capped at what run 114 used.
 MAX_CONCURRENCY = 6
@@ -885,7 +885,7 @@ async def list_eval_runs(
 class EvalRunRequest(BaseModel):
     """§14's command line as a body, with the spend gate on top (9.4).
 
-    The defaults are §14's own matrix (`1..12`, `all`, 5) so the documented run is
+    The defaults are §14's own matrix (`1..11`, `all`, 5) so the documented run is
     the one the portal describes. Safety comes from `confirm` and `budget_usd`
     being absent by default, not from a small default matrix — a portal whose
     default is a smoke run would describe a matrix nobody can start.
@@ -927,8 +927,8 @@ async def _plan(session: AsyncSession, body: EvalRunRequest) -> dict[str, Any]:
         stages = parse_stages(body.stages)
     except SystemExit as exc:
         raise HTTPException(status_code=422, detail=f"bad stages spec: {exc}") from exc
-    if any(s < 1 or s > 12 for s in stages):
-        raise HTTPException(status_code=422, detail="stages must be within 1..12 (§4)")
+    if any(s < 1 or s > 11 for s in stages):
+        raise HTTPException(status_code=422, detail="stages must be within 1..11 (§4)")
 
     rows = (await session.execute(text("SELECT id, slug FROM themes"))).all()
     known = {slug: tid for tid, slug in rows}
@@ -950,7 +950,7 @@ async def _plan(session: AsyncSession, body: EvalRunRequest) -> dict[str, Any]:
             status_code=422,
             detail=(
                 f"{cells} cells exceeds the {MAX_CELLS}-cell ceiling (§14's matrix is "
-                f"12 x 3 x 5). Shrink the matrix, or run the CLI: "
+                f"11 x 3 x 5). Shrink the matrix, or run the CLI: "
                 f"`make eval EVAL_ARGS=\"--budget N\"`."
             ),
         )
@@ -1233,8 +1233,8 @@ async def get_eval_run(
 
 # --- GET /api/admin/allowed-words?stage=N ------------------------------------
 #
-# §5.4 expects 150-2,500 words per stage. The real table holds 157 at stage 1 and
-# **9,360 at stage 12** (64,296 rows over twelve stages), so this route is
+# §5.4 expects 150-2,500 words per stage. The renumbered table (DEVIATIONS 12.x)
+# runs 771 at stage 1 to ~4,400 at stage 11, so this route is
 # page-MANDATORY rather than page-capable (DEVIATIONS 9.12): `limit` defaults to
 # 100 and is capped at 500.
 _WORDS_SQL_TEMPLATE = """
@@ -1255,7 +1255,7 @@ _WORDS_ORDER = {
 }
 
 #: The `freq_rank` of the 400th word at this stage — §6's `PROMPT_WORD_LIMIT`
-#: boundary. One small indexed query, and it is what makes "every word a stage-3
+#: boundary. One small indexed query, and it is what makes "every word a stage-2
 #: reader may see" and "the 400 the model is actually shown" comparable in one
 #: screen (DEVIATIONS 9.12).
 _PROMPT_CUTOFF_SQL = text(
@@ -1280,7 +1280,7 @@ def _like_pattern(raw: str) -> str:
 
 @router.get("/allowed-words")
 async def list_allowed_words(
-    stage: int = Query(..., ge=1, le=12),
+    stage: int = Query(..., ge=1, le=11),
     limit: int = Query(WORDS_DEFAULT_LIMIT, ge=1, le=WORDS_MAX_LIMIT),
     offset: int = Query(0, ge=0),
     q: str = Query("", max_length=64),
@@ -1289,7 +1289,7 @@ async def list_allowed_words(
 ) -> dict[str, Any]:
     """§9: `GET /api/admin/allowed-words?stage=N` `(admin, paginated)`.
 
-    §17 step 2's screen: "every word a stage-3 reader is permitted to see —
+    §17 step 2's screen: "every word a stage-2 reader is permitted to see —
     machine-derived". `total` is the honest count for the filter, `stage_total` the
     count for the stage, and `in_prompt` marks the top `PROMPT_WORD_LIMIT` by
     frequency — the subset §6 actually puts in the generation prompt.
@@ -1352,7 +1352,7 @@ async def list_allowed_words(
         "next_offset": (offset + limit) if offset + len(rows) < int(total) else None,
         # Cumulative sight words at or below this stage (§4). Counted, not listed:
         # they are a different allowlist with a different rule, and conflating the
-        # two is how "every word a stage-3 reader may see" becomes ambiguous.
+        # two is how "every word a stage-2 reader may see" becomes ambiguous.
         "sight_word_count": int(sight_count),
         "prompt_word_limit": PROMPT_WORD_LIMIT,
         "prompt_freq_rank_cutoff": _as_int(cutoff),
@@ -1379,7 +1379,7 @@ class ColdGenerateRequest(BaseModel):
     precedent: a stage with no child in the room.
     """
 
-    stage_id: int = Field(..., ge=1, le=12)
+    stage_id: int = Field(..., ge=1, le=11)
     #: Slug or id, resolved against `themes`.
     theme: int | str
     effort: Literal["low", "medium", "high"] = "medium"

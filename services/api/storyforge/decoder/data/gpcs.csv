@@ -6,8 +6,12 @@
 # schwa_ok  may this grapheme's citation vowel match a reduced AH0/IH0 (§5.2.6)?
 #           Single letters only; vowel teams must never relax, or the rule
 #           becomes a universal solvent.
-# stage     first stage at which the GPC is mastered (Appendix A, corrected by
-#           the §5.7 goldens — see docs/DEVIATIONS.md 1.1).
+# stage     first stage at which the GPC is mastered. Appendix A's sequence,
+#           corrected by the §5.7 goldens (docs/DEVIATIONS.md 1.1) and
+#           RENUMBERED to eleven stages (docs/DECISION-stage-ladder.md,
+#           DEVIATIONS 12.1-12.3): Appendix A's stages 1 and 2 merged into
+#           stage 1, and every later stage sits one below the number the spec
+#           prints for it.
 grapheme,phonemes,kind,position,stage,schwa_ok,example
 s,S,single,any,1,0,sat
 a,AE,single,any,1,1,cat
@@ -18,101 +22,102 @@ n,N,single,any,1,0,net
 m,M,single,any,1,0,mat
 d,D,single,any,1,0,dad
 c,K,single,any,1,0,cat
-g,G,single,any,2,0,got
-o,AA,single,any,2,1,pot
-o,AO,single,any,2,1,dog
-k,K,single,any,2,0,kit
-e,EH,single,any,2,1,pet
-u,AH,single,any,2,1,duck
-r,R,single,any,2,0,run
-h,HH,single,any,2,0,hat
-b,B,single,any,2,0,bat
-f,F,single,any,2,0,fan
-l,L,single,any,2,0,lip
-ck,K,double,any,2,0,duck
-ss,S,double,any,2,0,miss
-ll,L,double,any,2,0,bell
-ff,F,double,any,2,0,off
-zz,Z,double,any,2,0,buzz
+g,G,single,any,1,0,got
+o,AA,single,any,1,1,pot
+o,AO,single,any,1,1,dog
+k,K,single,any,1,0,kit
+e,EH,single,any,1,1,pet
+u,AH,single,any,1,1,duck
+r,R,single,any,1,0,run
+h,HH,single,any,1,0,hat
+b,B,single,any,1,0,bat
+f,F,single,any,1,0,fan
+l,L,single,any,1,0,lip
+ck,K,double,any,1,0,duck
+ss,S,double,any,1,0,miss
+ll,L,double,any,1,0,bell
+ff,F,double,any,1,0,off
+zz,Z,double,any,1,0,buzz
 # The doubling convention — a doubled consonant spells one sound. Appendix A
 # lists only ck/ss/ll/ff, but without these eight, "happy", "little", "rabbit",
 # "kitten" and "carrot" are all unspellable. Same rule, same stage.
-tt,T,double,any,2,0,little
-pp,P,double,any,2,0,happy
-nn,N,double,any,2,0,funny
-dd,D,double,any,2,0,ladder
-gg,G,double,any,2,0,egg
-bb,B,double,any,2,0,rabbit
-mm,M,double,any,2,0,hammer
-rr,R,double,any,2,0,carrot
-x,K S,multi_phoneme,any,2,0,fox
-sh,SH,digraph,any,3,0,ship
-ch,CH,digraph,any,3,0,chip
-# Appendix A's stage-3 row is the digraph lesson ("sh ch th(2) ng qu") and omits
+tt,T,double,any,1,0,little
+pp,P,double,any,1,0,happy
+nn,N,double,any,1,0,funny
+dd,D,double,any,1,0,ladder
+gg,G,double,any,1,0,egg
+bb,B,double,any,1,0,rabbit
+mm,M,double,any,1,0,hammer
+rr,R,double,any,1,0,carrot
+x,K S,multi_phoneme,any,1,0,fox
+sh,SH,digraph,any,2,0,ship
+ch,CH,digraph,any,2,0,chip
+# Appendix A's digraph lesson ("sh ch th(2) ng qu"; stage 2 since the renumber)
+# omits
 # `wh`, which every synthetic-phonics sequence teaches inside that same lesson.
 # Measured BEFORE adding (docs/DEVIATIONS.md 8.13): the vacuity ratchet moves
 # 44.62% -> 44.75% against a 50.00% ceiling, 0 NEVER_DECODABLE words break, and
 # 31 words enter the allowlist — when, which, where, why, while, white, whether
 # and their inflections. `wh`->/h/ is deliberately NOT added: who/whose/whole
 # still fail on their vowels, so it would widen the gate and certify nothing.
-wh,W,digraph,any,3,0,when
-th,TH,digraph,any,3,0,thin
-th,DH,digraph,any,3,0,this
-ng,NG,digraph,any,3,0,sing
-n,NG,single,any,3,0,finger
-qu,K W,multi_phoneme,any,3,0,quick
-w,W,single,any,3,0,win
-y,Y,single,initial,3,0,yes
-z,Z,single,any,3,0,zip
-v,V,single,any,3,0,van
-j,JH,single,any,3,0,jam
-s,Z,suffix,final,4,0,dogs
-es,IH Z,suffix,final,4,0,boxes
-ed,T,suffix,final,4,0,jumped
-ed,D,suffix,final,4,0,filled
-ed,IH D,suffix,final,4,0,wanted
-ing,IH NG,suffix,final,4,0,jumping
-a_e,EY,split,any,5,0,cake
-i_e,AY,split,any,5,0,bike
-o_e,OW,split,any,5,0,bone
-u_e,UW,split,any,5,0,tube
-u_e,Y UW,split,any,5,0,cube
-e_e,IY,split,any,5,0,these
+wh,W,digraph,any,2,0,when
+th,TH,digraph,any,2,0,thin
+th,DH,digraph,any,2,0,this
+ng,NG,digraph,any,2,0,sing
+n,NG,single,any,2,0,finger
+qu,K W,multi_phoneme,any,2,0,quick
+w,W,single,any,2,0,win
+y,Y,single,initial,2,0,yes
+z,Z,single,any,2,0,zip
+v,V,single,any,2,0,van
+j,JH,single,any,2,0,jam
+s,Z,suffix,final,3,0,dogs
+es,IH Z,suffix,final,3,0,boxes
+ed,T,suffix,final,3,0,jumped
+ed,D,suffix,final,3,0,filled
+ed,IH D,suffix,final,3,0,wanted
+ing,IH NG,suffix,final,3,0,jumping
+a_e,EY,split,any,4,0,cake
+i_e,AY,split,any,4,0,bike
+o_e,OW,split,any,4,0,bone
+u_e,UW,split,any,4,0,tube
+u_e,Y UW,split,any,4,0,cube
+e_e,IY,split,any,4,0,these
 # Standalone silent final e — the same lesson as the split digraphs ("the e on
 # the end is quiet"), but for words with no long vowel: house, mouse, have.
-e,,silent,final,5,0,house
-ai,EY,vowel_team,any,6,0,rain
-ay,EY,vowel_team,any,6,0,day
-ee,IY,vowel_team,any,6,0,see
-ea,IY,vowel_team,any,6,0,read
-oa,OW,vowel_team,any,6,0,boat
-ow,OW,vowel_team,any,6,0,snow
-igh,AY,vowel_team,any,6,0,night
-er,ER,r_controlled,any,6,0,singer
-y,IY,vowel_team,final,6,0,city
-y,AY,vowel_team,final,6,0,my
-ar,AA R,r_controlled,any,7,0,car
-or,AO R,r_controlled,any,7,0,for
-ir,ER,r_controlled,any,7,0,bird
-ur,ER,r_controlled,any,7,0,turn
+e,,silent,final,4,0,house
+ai,EY,vowel_team,any,5,0,rain
+ay,EY,vowel_team,any,5,0,day
+ee,IY,vowel_team,any,5,0,see
+ea,IY,vowel_team,any,5,0,read
+oa,OW,vowel_team,any,5,0,boat
+ow,OW,vowel_team,any,5,0,snow
+igh,AY,vowel_team,any,5,0,night
+er,ER,r_controlled,any,5,0,singer
+y,IY,vowel_team,final,5,0,city
+y,AY,vowel_team,final,5,0,my
+ar,AA R,r_controlled,any,6,0,car
+or,AO R,r_controlled,any,6,0,for
+ir,ER,r_controlled,any,6,0,bird
+ur,ER,r_controlled,any,6,0,turn
 # "w changes the a" — deliberately scoped as the two-letter `wa` unit rather than
 # a bare a->/aw/, which would fire anywhere and let far too much through.
-wa,W AO,vowel_team,any,7,0,water
-oi,OY,vowel_team,any,8,0,coin
-oy,OY,vowel_team,any,8,0,boy
-ou,AW,vowel_team,any,8,0,out
-ow,AW,vowel_team,any,8,0,cow
-au,AO,vowel_team,any,8,0,haul
-aw,AO,vowel_team,any,8,0,saw
-oo,UW,vowel_team,any,8,0,moon
-oo,UH,vowel_team,any,8,0,book
-c,S,soft,any,9,0,city
-g,JH,soft,any,9,0,gem
-kn,N,silent_pair,initial,9,0,knight
-wr,R,silent_pair,initial,9,0,write
-mb,M,silent_pair,final,9,0,lamb
-ph,F,digraph,any,9,0,phone
-le,AH L,suffix,final,10,0,little
-ti,SH,soft,any,11,0,action
-si,ZH,soft,any,11,0,vision
-ture,CH ER,suffix,final,11,0,picture
+wa,W AO,vowel_team,any,6,0,water
+oi,OY,vowel_team,any,7,0,coin
+oy,OY,vowel_team,any,7,0,boy
+ou,AW,vowel_team,any,7,0,out
+ow,AW,vowel_team,any,7,0,cow
+au,AO,vowel_team,any,7,0,haul
+aw,AO,vowel_team,any,7,0,saw
+oo,UW,vowel_team,any,7,0,moon
+oo,UH,vowel_team,any,7,0,book
+c,S,soft,any,8,0,city
+g,JH,soft,any,8,0,gem
+kn,N,silent_pair,initial,8,0,knight
+wr,R,silent_pair,initial,8,0,write
+mb,M,silent_pair,final,8,0,lamb
+ph,F,digraph,any,8,0,phone
+le,AH L,suffix,final,9,0,little
+ti,SH,soft,any,10,0,action
+si,ZH,soft,any,10,0,vision
+ture,CH ER,suffix,final,10,0,picture

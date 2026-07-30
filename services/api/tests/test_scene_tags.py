@@ -23,7 +23,7 @@ from storyforge.llm.scene_tags import (
     _enforce_vocabulary,
     select_asset,
 )
-from storyforge.seed import _rows
+from storyforge.seed import SEED_DIR, _rows
 
 
 @dataclass
@@ -275,3 +275,62 @@ async def test_no_asset_row_carries_an_out_of_vocabulary_tag(session):
         {"vocab": list(sorted(TAG_VOCABULARY))},
     )
     assert not rows.all()
+
+
+# ---------------------------------------------------------------------------
+# The pool's art exists on disk (DEVIATIONS 11.20-11.23).
+#
+# For the whole life of this project `assets.csv` seeded 33 rows, `scene_tags.py`
+# tagged 839 segments, the logs said "7 with art" — and there were ZERO image
+# files in the repository. Every `<img>` 404'd, `SegmentArt.onError` demoted
+# every segment to the striped placeholder, and nothing anywhere raised, logged
+# or measured it. These two tests are the tripwire that was missing.
+# ---------------------------------------------------------------------------
+
+#: `SEED_DIR` is `<repo>/data/seed`, so two parents up is the repo root.
+WEB_PUBLIC = SEED_DIR.parents[1] / "apps/web/public"
+
+
+def test_every_asset_row_has_a_file_on_disk():
+    """A url pointing at nothing renders the placeholder forever, silently."""
+    missing = []
+    for row in ASSET_ROWS:
+        url = row["url"].strip()
+        assert url.startswith("/assets/"), f"{url}: not under the /assets mount"
+        candidate = WEB_PUBLIC / url.lstrip("/")
+        if not candidate.is_file():
+            missing.append(url)
+    assert not missing, (
+        "assets.csv rows with no art file: "
+        + ", ".join(missing)
+        + " — run `node scripts/generate-art.mjs`"
+    )
+
+
+def test_every_asset_url_is_version_pinned():
+    """`main.py` serves /assets with `immutable, max-age=1y`.
+
+    That is only safe for content-addressed names, and files copied from
+    `public/` are not hashed by Vite. So the version lives in the path and a
+    redrawn pool becomes `/assets/art/v2/...` — nothing is ever revised in place
+    (DEVIATIONS 11.23).
+    """
+    unpinned = [r["url"] for r in ASSET_ROWS if "/art/v" not in r["url"]]
+    assert not unpinned, unpinned
+
+
+def test_assets_csv_has_no_duplicate_picture():
+    """`(theme, kind, tags)` is the natural key `seed_assets` upserts on.
+
+    Two rows with the same identity are not merely redundant under that key —
+    the second silently overwrites the first's url (DEVIATIONS 11.22).
+    """
+    seen: dict[tuple[str, str, str], str] = {}
+    for row in ASSET_ROWS:
+        key = (
+            row["theme"].strip(),
+            row["kind"].strip(),
+            "|".join(sorted(t.strip() for t in row["tags"].split("|") if t.strip())),
+        )
+        assert key not in seen, f"{seen.get(key)!r} and {row['url']!r} are the same picture"
+        seen[key] = row["url"]

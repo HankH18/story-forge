@@ -1,11 +1,15 @@
 # Per-stage sight words (§4, Appendix A) — high-frequency non-decodable words.
 # Cumulative: a kid at stage N has every word with stage <= N.
 #
+# RENUMBERED to eleven stages (docs/DECISION-stage-ladder.md, DEVIATIONS
+# 12.1-12.3): Appendix A's stage-1 and stage-2 sight words merged at stage 1,
+# every later stage one lower than the spec prints it.
+#
 # Appendix A labels its sight-word column "(sample)", so this list extends it.
 # Five rows were added in Phase 8 (docs/DEVIATIONS.md 8.10, 8.11) after the §14
 # eval found `of` — the second-commonest word in written English — spending part
 # of every story's 5% violation budget. Each addition is PROVED unalignable at
-# stage 12 by the 93-GPC inventory, so a GPC could not fix it: `of` is in
+# the top stage by the 93-GPC inventory, so a GPC could not fix it: `of` is in
 # tests/decoder/test_anti_golden.py::NEVER_DECODABLE by name, and the `o`->/oʊ/
 # row that would rescue `so` trips the vacuity ratchet at 50.4%.
 #
@@ -17,43 +21,43 @@ stage,word
 1,the
 1,a
 1,i
-2,is
-2,to
-2,no
-2,go
+1,is
+1,to
+1,no
+1,go
 # `of` rank 4, bracketed by `to` (2) and `is` (8). Needs f->/v/; taught to nobody.
-2,of
+1,of
 # `so` rank 33 — more common than `no` (51) and `go` (98), same o->/oʊ/ exception.
-2,so
+1,so
 # `do` rank 50 — o->/uː/. `to` only aligns via a CMUdict schwa variant (8.11).
-2,do
-3,he
-3,she
-3,we
-3,me
-3,was
+1,do
+2,he
+2,she
+2,we
+2,me
+2,was
 # `be` rank 17 — the fifth member of he/she/we/me, and commoner than all four.
-3,be
-4,said
-4,you
-4,they
-# `from` rank 26 — o->/ʌ/. At 4, where Appendix A introduces consonant clusters.
-4,from
-5,are
-5,her
-5,all
-6,some
-6,come
-6,there
-7,little
-7,one
-7,when
-8,what
-8,out
-8,oh
-9,people
-9,your
-10,because
-10,again
-11,thought
-11,through
+2,be
+3,said
+3,you
+3,they
+# `from` rank 26 — o->/ʌ/. At the stage where Appendix A introduces consonant clusters.
+3,from
+4,are
+4,her
+4,all
+5,some
+5,come
+5,there
+6,little
+6,one
+6,when
+7,what
+7,out
+7,oh
+8,people
+8,your
+9,because
+9,again
+10,thought
+10,through

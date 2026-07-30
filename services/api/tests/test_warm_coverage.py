@@ -34,7 +34,7 @@ from sqlalchemy import text
 from storyforge import warm
 from storyforge.api.stories import SERVABLE_STATUSES
 from storyforge.db import SessionLocal
-from storyforge.mastery import MAX_STAGE, MIN_STAGE
+from storyforge.decoder import MAX_STAGE, MIN_STAGE
 
 # --- guard 1: the defaults ---------------------------------------------------
 # RED against the pre-fix defaults. Sabotage check, run against a copy of the
@@ -202,12 +202,12 @@ def test_the_gate_exits_non_zero_and_says_what_a_gap_costs_a_child(monkeypatch, 
         await_sync(warm.run_coverage_check(3))
 
     message = str(exc.value)
-    assert "1 of 36" in message
+    assert "1 of 33" in message
     assert "fallback" in message and "reports to nobody" in message
     assert "--check-coverage" in message
     out = capsys.readouterr().out
     assert "stage 9 / space: 0" in out
-    assert "35 of 36 pair(s) at target." in out
+    assert "32 of 33 pair(s) at target." in out
 
 
 def test_the_gate_exits_zero_on_a_full_pool(monkeypatch, capsys):
@@ -219,7 +219,7 @@ def test_the_gate_exits_zero_on_a_full_pool(monkeypatch, capsys):
 
     monkeypatch.setattr(warm, "pool_coverage", full)
     await_sync(warm.run_coverage_check(3))
-    assert "OK — all 36" in capsys.readouterr().out
+    assert "OK — all 33" in capsys.readouterr().out
 
 
 def test_the_gate_honours_the_target_it_is_given(monkeypatch):
@@ -241,7 +241,7 @@ def test_the_rendered_table_marks_every_short_pair():
     lines = warm.render_coverage(_matrix(**{"7:animals": 1}), 3)
     body = "\n".join(lines)
     assert "1 !" in body
-    assert "35 of 36 pair(s) at target." in body
+    assert "32 of 33 pair(s) at target." in body
     assert "stage 7 / animals: 1" in body
     # The FULL matrix, always: a table over only the requested slice is the
     # defect, not the report (DEVIATIONS 8.43).
@@ -310,7 +310,7 @@ async def test_a_sliced_run_prints_the_whole_matrix_and_still_exits_zero(monkeyp
         return 0
 
     async def mostly_empty(session):
-        return _matrix(**{f"{s}:{t}": 0 for s in range(6, 13) for t in themes})
+        return _matrix(**{f"{s}:{t}": 0 for s in range(6, MAX_STAGE + 1) for t in themes})
 
     monkeypatch.setattr(warm, "run_pipeline", good)
     monkeypatch.setattr(warm, "pool_depth", empty_pool)
@@ -323,8 +323,8 @@ async def test_a_sliced_run_prints_the_whole_matrix_and_still_exits_zero(monkeyp
 
     out = capsys.readouterr().out
     assert "POOL COVERAGE" in out
-    assert "21 below target" in out
-    assert "covered 1 of 12 stage(s)" in out
+    assert "18 below target" in out
+    assert "covered 1 of 11 stage(s)" in out
     assert "reports to nobody" in out
     assert "--check-coverage" in out
 

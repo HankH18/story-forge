@@ -38,7 +38,7 @@ const VERDICT_CLASS: Record<Verdict, string> = {
 }
 
 /**
- * The §17 demo sentence at stage 3.
+ * The §17 demo sentence at stage 2 (Digraphs, since the eleven-stage renumber).
  *
  * **These verdicts are hard-coded, and they stay hard-coded.** They are the
  * *expected* output of the validator, used here to prove the design tokens render
@@ -52,7 +52,7 @@ const VERDICT_CLASS: Record<Verdict, string> = {
  * reaching for one here would mean opening the one endpoint that accepts arbitrary
  * text to anybody (DEVIATIONS 9.38). What keeps this honest instead is the phase 1
  * golden suite, which asserts the real validator produces exactly these six
- * verdicts (`tests/decoder/golden.yaml::demo-sentence-stage-3`), and the fact that
+ * verdicts (`tests/decoder/golden.yaml::demo-sentence-stage-2`), and the fact that
  * the same sentence is on screen at `/admin` with the API's own answer beside it.
  */
 const DEMO_SENTENCE: { word: string; verdict: Verdict }[] = [
@@ -121,7 +121,7 @@ export default function Landing() {
 
         <header className="flex flex-col gap-5">
           <p className="font-mono text-[13px] uppercase tracking-[0.16em] text-ink-500">
-            Story Forge · stage 3 · digraphs
+            Story Forge · stage 2 · digraphs
           </p>
           <h1 className="font-display text-[56px] leading-[1.02] text-ink-900">
             Once upon a stage
@@ -141,7 +141,7 @@ export default function Landing() {
             id="artifact-heading"
             className="font-mono text-[13px] uppercase tracking-[0.16em] text-ink-500"
           >
-            The same sentence, checked at stage 3
+            The same sentence, checked at stage 2
           </h2>
 
           <p className="mt-6 font-read text-read text-ink-900">

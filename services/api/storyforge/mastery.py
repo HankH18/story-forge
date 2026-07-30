@@ -34,6 +34,38 @@ they can decode ``sh``. Crediting every grapheme in a two-sentence option would
 swamp the honest signal with dozens of free correct marks per reading and make
 80% trivially reachable without decoding anything. ``MASTERY_QTYPES`` names the
 types that count, so widening it is a visible decision.
+
+**It was re-examined and deliberately NOT widened** (DEVIATIONS 11.66). A
+two-option question is 50% guessable, so letting one move a counter would put an
+unearned signal behind a child's stage advance — DEVIATIONS 6.7's failure class,
+and the most serious defect this project has produced. The asymmetry a parent
+sees (two questions, one of which silently counts) is real and is answered by
+reporting, not by crediting the guessable one.
+
+**The asymmetry did hide a defect, and it was arithmetic** (DEVIATIONS 11.67).
+``MIN_GPC_OBSERVATIONS`` is a floor over the GPCs a stage *introduces*, and one
+phonics question per story credits about **one** of those. Measured over the 120
+servable stories in the live pool: 1.08 observations per story, so the floor of
+10 needs ~9.2 stories and §8 asks for 5 — the floor was silently doubling §8's
+own requirement, and a child could read five stories at 100% and not be
+promotable with nothing on the dashboard able to say why in §8's terms. The fix
+is on the supply side, where it costs no honesty: ``llm/questions.py`` now emits
+up to two `tap_word` questions per story on different sounds, composed by pure
+function from the closed list it already computes, which brings the pool to 1.95
+observations per story (~5.1 stories). Still one of three options, still §8's
+named type, still the same unchanged judge. Neither threshold here moved.
+
+Nothing in this module needed changing for that, and that is the point: the
+evidence loop in ``api/readings.py`` already iterates *every* answer whose qtype
+is in ``MASTERY_QTYPES``, and :func:`gpc_increments` already folds a list of
+:class:`WordEvidence`. Two phonics answers are two items in that list.
+
+Known limit, measured rather than assumed: it does not help where the story
+contains no current-stage sound at all. Stage 11 goes 0.22 → 0.33 observations
+per story and stage 12 stays at 0.00 (9 of 9 live stage-12 stories credit no
+stage-12 GPC). Stage 12 is the top of the ladder so promotion is moot, but
+**stage 11 remains effectively unpromotable**; that is the allowlist's
+`older_stage_fallback` rate, not this module's.
 """
 
 from __future__ import annotations
@@ -41,6 +73,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from storyforge.decoder import MAX_STAGE as _DECODER_MAX_STAGE
 from storyforge.decoder import WordVerdict, mastered_ids, validate_word
 from storyforge.decoder.tokenizer import tokenize
 
@@ -57,9 +90,15 @@ ACCURACY_THRESHOLD = 0.80
 #: read as 100% and promote a child who has demonstrated nothing. §8 gives no
 #: floor, so promotion would otherwise be decidable from a single answer.
 MIN_GPC_OBSERVATIONS = 10
-#: Appendix A's scope & sequence. Stage 12 is the end of the ladder.
-MIN_STAGE = 1
-MAX_STAGE = 12
+#: Appendix A's scope & sequence, after stage 1 was retired and the ladder
+#: renumbered to eleven (`docs/DECISION-stage-ladder.md`, DEVIATIONS 12.x).
+#:
+#: Re-exported from the decoder rather than restated. This module held 12 while
+#: `decoder.MAX_STAGE` had already moved to 11, and that divergence is what made
+#: `warm.assert_matrix_seeded` demand a twelfth stage the database no longer had.
+#: Two modules holding the same number is how a half-renumbered ladder survives a
+#: test run, so now there is one number and this name is an alias for it.
+MAX_STAGE = _DECODER_MAX_STAGE
 
 #: The question types that carry evidence about grapheme-phoneme knowledge.
 MASTERY_QTYPES = ("tap_word",)

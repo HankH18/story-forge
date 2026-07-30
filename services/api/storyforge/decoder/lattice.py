@@ -4,7 +4,7 @@ A lattice node is ``(i, j)`` — ``i`` letters and ``j`` phonemes consumed. An e
 is a :class:`Step`: one inventory-legal move. Nothing here knows about stages or
 mastery; it enumerates every way the inventory *could* spell the word. Stage
 filtering happens in :mod:`search`, which is what lets one lattice answer all
-twelve stages (§5.4's precompute budget depends on that).
+eleven stages (§5.4's precompute budget depends on that).
 
 This module is deliberately dumb. §18: when a golden case fights the inventory,
 edit ``gpcs.csv`` — never this file.
@@ -60,7 +60,7 @@ def build_lattice(word: str, pron: tuple[str, ...]) -> Lattice:
     """Enumerate every inventory-legal step for one (spelling, pronunciation).
 
     Cached: :func:`search.min_stage` walks the same lattice once per word instead
-    of rebuilding it twelve times.
+    of rebuilding it eleven times.
     """
     bases: tuple[str, ...] = tuple(strip_stress(p)[0] for p in pron)
     stresses: tuple[int | None, ...] = tuple(strip_stress(p)[1] for p in pron)

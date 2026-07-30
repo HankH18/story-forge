@@ -43,14 +43,15 @@ async def test_gpc_table_mirrors_the_decoder_inventory(session):
     assert db_ids == {g.id for g in load_gpcs()}
 
 
-async def test_all_twelve_stages_seeded(session):
-    assert await _scalar(session, "SELECT count(*) FROM stages") == 12
+async def test_all_eleven_stages_seeded(session):
+    # Eleven since the ladder renumber (docs/DECISION-stage-ladder.md, 12.1-12.3).
+    assert await _scalar(session, "SELECT count(*) FROM stages") == 11
 
 
 async def test_sight_words_are_cumulative_by_stage(session):
     """Monotonicity of decodability (§5.7c) depends on this."""
     prev: set[str] = set()
-    for stage in range(1, 13):
+    for stage in range(1, 12):
         rows = await session.execute(
             text("SELECT word FROM sight_words WHERE stage_id <= :s"), {"s": stage}
         )
@@ -113,43 +114,24 @@ async def test_allowlist_grows_monotonically_with_stage(session):
 async def test_no_stage_is_starved(session):
     """§18: a stage with almost no vocabulary starves generation.
 
-    STAGE 1 IS AN AUTHORISED EXCEPTION, and it is the only one (DEVIATIONS 11.11).
-    Its nine-GPC inventory can spell **78** child-vocabulary words — measured with
-    the adult frequency list removed from the question entirely, so that is a
-    ceiling and not a setting. The 157 rows this test used to pass on cleared 100
-    only because 27 of them were proper nouns or non-words (`nasa`, `sam`, `tampa`,
-    `im`, `ip`) and 61 more were adult register (`amid`, `admin`, `stat`, `impact`).
-    A row count cannot tell those apart from vocabulary, which is what made this
-    test green for the wrong reason.
-
-    The remedy is the ladder, not the filter, and it is the USER's decision, not
-    this suite's: stage inventories are cumulative, so retiring stage 1 makes the
-    new stage 1 today's stage 2 at 771 words. That renumbering is sequenced
-    separately (stage rows, GPC and sight-word assignments, `MAX_STAGE`, the §5.7
-    goldens, the vacuity ratchet, §17's demo, live `stage_id` data).
-
-    So the floor is asserted unchanged for every stage above 1, and stage 1 is
-    pinned to its measured ceiling rather than exempted — it still fails if stage 1
-    degrades further, and the exception list still fails if a SECOND stage ever
-    falls short, which is the case where renumbering by one would not save us.
+    The stage-1 exception 11.11 carried here is GONE, exactly the way its own
+    tripwire said it should go (justify-test-edit verdict in DEVIATIONS 12.7):
+    the exception asserted `counts[1] < 100` so that retiring stage 1 would turn
+    it into a loud failure instead of a permanent loophole, the user-authorised
+    renumber landed (docs/DECISION-stage-ladder.md), and the entry stage is now
+    the old stage-2 inventory at 771 words. The plain assertion is restored for
+    EVERY stage, and the floor is §18's own 150 rather than the softened 100 the
+    exception era used — no stage needs the discount any more, and a fresh
+    starvation anywhere would mean the FILTER broke, which renumbering cannot
+    fix (11.11).
     """
     counts = dict(
         (await session.execute(text("SELECT stage_id, count(*) FROM allowed_words GROUP BY 1")))
         .tuples()
         .all()
     )
-    starved = {stage: n for stage, n in counts.items() if n < 100}
-    assert set(starved) <= {1}, f"a stage other than 1 has under 100 allowed words: {starved}"
-    assert counts[1] >= 78, (
-        f"stage 1 holds {counts[1]} words, below its measured child-vocabulary "
-        f"ceiling of 78 — something narrowed the allowlist beyond 11.8's filter"
-    )
-    # Once stage 1 is retired the exception is dead code, and this says so out loud
-    # rather than quietly permitting a starved stage forever.
-    assert counts.get(1, 0) < 100, (
-        "stage 1 now clears the floor — delete the exception above and restore the "
-        "plain assertion, because the authorised exception no longer applies"
-    )
+    starved = {stage: n for stage, n in counts.items() if n < 150}
+    assert not starved, f"stages under §18's 150-word floor: {starved}"
 
 
 # --- syllable counting -------------------------------------------------------
@@ -176,8 +158,10 @@ async def test_validate_endpoint_reproduces_the_demo_sentence(client):
     resp = await client.post(
         "/api/validate",
         json={
+            # Stage 2 since the renumber — the same cumulative inventory the
+            # §17 demo always ran against (DEVIATIONS 12.5, 12.12).
             "text": "The knight sees a beautiful dragon",
-            "stage_id": 3,
+            "stage_id": 2,
             "story_words": ["dragon"],
         },
     )
@@ -211,7 +195,7 @@ async def test_validate_endpoint_accepts_extra_sight_words(client):
 
 async def test_validate_endpoint_rejects_an_unseeded_stage(client):
     resp = await client.post("/api/validate", json={"text": "cat", "stage_id": 99})
-    assert resp.status_code == 422  # outside the ge=1, le=12 bound
+    assert resp.status_code == 422  # outside the ge=1, le=11 bound
 
 
 async def test_validate_endpoint_rejects_overlong_text(client):

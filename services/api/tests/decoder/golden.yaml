@@ -4,44 +4,56 @@
 # implementation detail". When a case fails, edit gpcs.csv — never the aligner,
 # and never this file (see .claude skill `justify-test-edit`).
 #
+# STAGE NUMBERS FOLLOW THE ELEVEN-STAGE LADDER (docs/DECISION-stage-ladder.md,
+# DEVIATIONS 12.5). The user authorised retiring Appendix A's stage 1 and
+# renumbering — old stage N is new stage N-1, old stages 1 and 2 merged — and
+# every case below was RE-DERIVED by running the validator against the new
+# inventory, not decremented by find-and-replace. No verdict, alignment,
+# missing set or flag moved; only the stage labels did, which is exactly what
+# the cumulative-inventory argument predicts (new stage K's mastered set is
+# identical to old stage K+1's). justify-test-edit verdict recorded in
+# DEVIATIONS 12.5.
+#
 # `alignment` is asserted on the cases where the *reasoning* matters, not just
 # the verdict — without it a wrong-but-lucky path would pass.
 
 - {id: cat-1, word: cat, stage: 1, expect: decodable, alignment: [c|K, a|AE, t|T]}
-- {id: ship-2, word: ship, stage: 2, expect: violation, missing: [sh|SH]}
-- {id: ship-3, word: ship, stage: 3, expect: decodable}
+- {id: ship-1, word: ship, stage: 1, expect: violation, missing: [sh|SH]}
+- {id: ship-2, word: ship, stage: 2, expect: decodable}
 - {id: the-1, word: the, stage: 1, expect: sight}
-- {id: duck-2, word: duck, stage: 2, expect: decodable, alignment: [d|D, u|AH, ck|K]}
-- {id: cake-4, word: cake, stage: 4, expect: violation, missing: [a_e|EY]}
+- {id: duck-1, word: duck, stage: 1, expect: decodable, alignment: [d|D, u|AH, ck|K]}
+- {id: cake-3, word: cake, stage: 3, expect: violation, missing: [a_e|EY]}
 # The split digraph: 3 letters, 2 GPCs, one composite edge.
-- {id: cake-5, word: cake, stage: 5, expect: decodable, alignment: [c|K, a_e|EY, k|K]}
+- {id: cake-4, word: cake, stage: 4, expect: decodable, alignment: [c|K, a_e|EY, k|K]}
 # `x` is one grapheme consuming two phonemes.
-- {id: fox-2, word: fox, stage: 2, expect: decodable, alignment: [f|F, o|AA, x|K.S]}
-- {id: night-5, word: night, stage: 5, expect: violation, missing: [igh|AY]}
-- {id: night-6, word: night, stage: 6, expect: decodable}
+- {id: fox-1, word: fox, stage: 1, expect: decodable, alignment: [f|F, o|AA, x|K.S]}
+- {id: night-4, word: night, stage: 4, expect: violation, missing: [igh|AY]}
+- {id: night-5, word: night, stage: 5, expect: decodable}
 # singer/finger are the pair that pins the `ng|NG` vs `n|NG` distinction:
 # CMUdict gives S IH1 NG ER0 but F IH1 NG G ER0 — there is no /g/ in "singer".
-- {id: singer-6, word: singer, stage: 6, expect: decodable, alignment: [s|S, i|IH, ng|NG, er|ER]}
-- {id: finger-6, word: finger, stage: 6, expect: decodable, alignment: [f|F, i|IH, n|NG, g|G, er|ER]}
+- {id: singer-5, word: singer, stage: 5, expect: decodable, alignment: [s|S, i|IH, ng|NG, er|ER]}
+- {id: finger-5, word: finger, stage: 5, expect: decodable, alignment: [f|F, i|IH, n|NG, g|G, er|ER]}
 # Heteronym: §5.2.5 lets ANY pronunciation pass, so /riːd/ carries it. The flag
 # records that a child could still meet the /rɛd/ reading.
-- {id: read-6, word: read, stage: 6, expect: decodable, flags: {heteronym_flag: true}}
+- {id: read-5, word: read, stage: 5, expect: decodable, flags: {heteronym_flag: true}}
 # Soft c. The missing set must be exactly {c|S} — if `y|IY` were not yet mastered
-# the set would be size 2, which is how this case pins y|IY to stage 6.
-- {id: city-8, word: city, stage: 8, expect: violation, missing: [c|S]}
-- {id: city-9, word: city, stage: 9, expect: decodable, alignment: [c|S, i|IH, t|T, y|IY]}
+# the set would be size 2, which is how this case pins y|IY to stage 5.
+- {id: city-7, word: city, stage: 7, expect: violation, missing: [c|S]}
+- {id: city-8, word: city, stage: 8, expect: decodable, alignment: [c|S, i|IH, t|T, y|IY]}
 # §5.2.6 schwa relaxation: `o` matches the reduced AH0 via its citation GPC.
-- {id: dragon-4, word: dragon, stage: 4, expect: decodable, flags: {schwa_relaxed: true}}
-- {id: zorp, word: zorp, stage: 12, expect: oov}
+- {id: dragon-3, word: dragon, stage: 3, expect: decodable, flags: {schwa_relaxed: true}}
+- {id: zorp, word: zorp, stage: 11, expect: oov}
 # In CMUdict but unspellable by the inventory (B Y UW1 T AH0 F AH0 L needs `eau`).
 # VIOLATION with an empty missing set and alignable=false — NOT a seventh verdict.
-- {id: beautiful-12, word: beautiful, stage: 12, expect: violation, missing: [],
+- {id: beautiful-11, word: beautiful, stage: 11, expect: violation, missing: [],
    flags: {alignable: false}}
 
 # §17 item 1 is the thesis in one slide. Locked so it cannot regress.
-- id: demo-sentence-stage-3
+# Stage 2 since the renumber — the same cumulative inventory old stage 3 had,
+# and every verdict, missing set and count below is unchanged.
+- id: demo-sentence-stage-2
   text: The knight sees a beautiful dragon
-  stage: 3
+  stage: 2
   story_words: [dragon]
   expect_verdicts:
     the: sight

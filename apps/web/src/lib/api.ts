@@ -471,7 +471,7 @@ export async function createKid(displayName: string, stageId: number): Promise<R
 /**
  * The fallback for `GET /api/stages`, which now exists (`api/catalog.py`).
  *
- * The add-kid form has to name the twelve stages — "Stage 7" alone is not a
+ * The add-kid form has to name the eleven stages — "Stage 7" alone is not a
  * choice a parent can make — and `stageName()` below is called synchronously from
  * render, so this list is load-bearing even when the route answers. It is exactly
  * `data/seed/stages.csv`, in id order. Same pattern and same reasoning as
@@ -486,20 +486,19 @@ export async function createKid(displayName: string, stageId: number): Promise<R
 export const SEEDED_STAGES: Stage[] = [
   {
     id: 1,
-    name: 'CVC',
-    description: 'Single letters s a t p i n m d c — simple consonant-vowel-consonant words',
+    name: 'Letters & doubles',
+    description: 'All the single letters, doubled consonants (ck ss ll ff), and x — simple short-vowel words',
   },
-  { id: 2, name: 'Doubles & x', description: 'Remaining single letters, doubled consonants (ck ss ll ff), and x' },
-  { id: 3, name: 'Digraphs', description: 'Two letters one sound: sh ch th ng qu, plus w x y z v j' },
-  { id: 4, name: 'Endings', description: 'Consonant clusters and the -s -es -ed -ing endings' },
-  { id: 5, name: 'Silent e', description: 'Split digraphs a_e i_e o_e u_e e_e, and silent final e' },
-  { id: 6, name: 'Vowel teams', description: 'ai ay ee ea oa ow igh, plus er and y as a vowel' },
-  { id: 7, name: 'R-controlled', description: 'ar or ir ur, and the wa pattern' },
-  { id: 8, name: 'Diphthongs', description: 'oi oy ou ow au aw oo' },
-  { id: 9, name: 'Soft & silent', description: 'Soft c and g, plus kn wr mb ph' },
-  { id: 10, name: 'Two syllables', description: 'The -le ending; schwa relaxation becomes explicit curriculum' },
-  { id: 11, name: 'Suffixes', description: 'tion ture sion' },
-  { id: 12, name: 'Review', description: 'Cumulative review; syllable cap lifted' },
+  { id: 2, name: 'Digraphs', description: 'Two letters one sound: sh ch th ng qu, plus w x y z v j' },
+  { id: 3, name: 'Endings', description: 'Consonant clusters and the -s -es -ed -ing endings' },
+  { id: 4, name: 'Silent e', description: 'Split digraphs a_e i_e o_e u_e e_e, and silent final e' },
+  { id: 5, name: 'Vowel teams', description: 'ai ay ee ea oa ow igh, plus er and y as a vowel' },
+  { id: 6, name: 'R-controlled', description: 'ar or ir ur, and the wa pattern' },
+  { id: 7, name: 'Diphthongs', description: 'oi oy ou ow au aw oo' },
+  { id: 8, name: 'Soft & silent', description: 'Soft c and g, plus kn wr mb ph' },
+  { id: 9, name: 'Two syllables', description: 'The -le ending; schwa relaxation becomes explicit curriculum' },
+  { id: 10, name: 'Suffixes', description: 'tion ture sion' },
+  { id: 11, name: 'Review', description: 'Cumulative review; syllable cap lifted' },
 ]
 
 export async function getStages(): Promise<Stage[]> {

@@ -18,8 +18,8 @@ the ids they created.
 **And the pool is no longer consulted even to PLACE the fixture** (DEVIATIONS
 8.90-8.94). 7.16 stopped reading expected values out of the database but still
 read `max(servable stage_id) + 1` to find an unoccupied stage band, so the
-assumption survived one level down: that the real pool never reaches stage 12. A
-full `make warm` fills all twelve stages — that is what `make warm-check` demands
+assumption survived one level down: that the real pool never reaches the top
+stage. A full `make warm` fills all eleven stages — that is what `make warm-check` demands
 — so the band stopped existing and the four tests ERRORed in setup. `Pool` now
 MANUFACTURES the empty stage instead of hoping to find one: it runs the endpoint
 inside one rolled-back transaction in which the live pool has been moved out of
@@ -51,16 +51,16 @@ from tests.owned_pool import hide_servable_pool, owned_transaction
 
 DRAGONS = "dragons"
 
-#: §9 caps `POST /api/stories/request` at stage 12 (`StoryRequest.stage_id`).
-MAX_STAGE = 12
+#: §9 caps `POST /api/stories/request` at stage 11 (`StoryRequest.stage_id`).
+MAX_STAGE = 11
 
 #: The stage the `pool` fixtures build on. A CONSTANT, deliberately: the previous
 #: version of this file computed it from the live pool and that is the whole of
 #: DEVIATIONS 8.90. It has exactly one requirement — a stage below it and a stage
-#: above it, both inside §9's 1..12 — because the ladder tests place a story one
+#: above it, both inside §9's 1..11 — because the ladder tests place a story one
 #: rung down (`base - 1`) and one rung up (`base + 1`, the story the ladder must
 #: refuse to climb to). Any interior stage is as good as any other; the fixture
-#: body is decodable at all twelve (§5.7c monotonicity).
+#: body is decodable at all eleven (§5.7c monotonicity).
 FIXTURE_BASE_STAGE = 6
 assert 1 < FIXTURE_BASE_STAGE < MAX_STAGE, "the ladder tests need base - 1 and base + 1"
 
@@ -185,7 +185,7 @@ class Pool:
     justify-test-edit — VERDICT: TEST IS WRONG, and what is wrong is this FIXTURE
     PRECONDITION, not one line of what the four tests assert. The deleted
     assertion was `assert self.base + 1 <= MAX_STAGE` over `base = max(servable
-    stage_id) + 1`, which claims *§9's 1..12 ladder has two consecutive empty
+    stage_id) + 1`, which claims *§9's 1..11 ladder has two consecutive empty
     stages at the top* — a fact about the operator's database, contradicted by
     `warm-check`'s own definition of a full pool. ORIGIN: commit `559f102`,
     DEVIATIONS 7.16. REVERT CHECK: nothing to revert — the four ERRORs predate

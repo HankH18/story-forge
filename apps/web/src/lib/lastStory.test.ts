@@ -81,7 +81,7 @@ describe('a story is remembered for the reader it was served to', () => {
 
   test('a DIFFERENT reader gets nothing — never a substituted child (C9)', () => {
     saveLastStory(7, story(), storage, NOW)
-    expect(loadLastStory(8, 12, storage, NOW)).toBeNull()
+    expect(loadLastStory(8, 11, storage, NOW)).toBeNull()
   })
 
   test('an unusable kid id is refused in both directions', () => {
@@ -131,7 +131,7 @@ describe('the stage ceiling', () => {
 
   test('a story ABOVE the reader is refused — the C1/C2 shape', () => {
     const storage = memoryStorage()
-    saveLastStory(7, story({ stage_id: 12 }), storage, NOW)
+    saveLastStory(7, story({ stage_id: 11 }), storage, NOW)
     expect(loadLastStory(7, 1, storage, NOW)).toBeNull()
     expect(storage.map.size).toBe(0)
   })
@@ -165,7 +165,7 @@ describe('a hand-edited entry never reaches a child', () => {
     test(label, () => {
       const storage = memoryStorage()
       storage.map.set('sf.lastStory.v1.7', raw)
-      expect(loadLastStory(7, 12, storage, NOW)).toBeNull()
+      expect(loadLastStory(7, 11, storage, NOW)).toBeNull()
       expect(storage.map.size).toBe(0)
     })
   }
@@ -173,7 +173,7 @@ describe('a hand-edited entry never reaches a child', () => {
   test('the corpus is not vacuous: the same envelope shape DOES load when it is valid', () => {
     const storage = memoryStorage()
     storage.map.set('sf.lastStory.v1.7', JSON.stringify({ savedAt: NOW, story: story() }))
-    expect(loadLastStory(7, 12, storage, NOW)?.id).toBe(42)
+    expect(loadLastStory(7, 11, storage, NOW)?.id).toBe(42)
   })
 })
 

@@ -9,7 +9,7 @@
  *
  * They had. This test's first run found `SEEDED_STAGES[0].description` reading
  * "simple three-letter words" where the CSV says "simple
- * consonant-vowel-consonant words" (DEVIATIONS 8.61). Every other field of all 12
+ * consonant-vowel-consonant words" (DEVIATIONS 8.61). Every other field of all 11
  * stages and all 3 themes matched, which is exactly why the drift lasted: it is
  * one word on a form, and nobody diffs a comment against a CSV.
  *
@@ -92,11 +92,11 @@ describe('SEEDED_STAGES mirrors data/seed/stages.csv', () => {
   const rows = seedRows('stages.csv')
 
   test('the CSV is actually being read', () => {
-    expect(rows.length).toBe(12)
+    expect(rows.length).toBe(11)
     expect(Object.keys(rows[0]!)).toContain('description')
   })
 
-  test('same number of stages, and §4 has twelve', () => {
+  test('same number of stages, and the renumbered ladder has eleven', () => {
     expect(SEEDED_STAGES.length).toBe(rows.length)
   })
 

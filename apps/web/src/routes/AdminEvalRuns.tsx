@@ -227,7 +227,7 @@ function LaunchControl({
   busy?: boolean
   onLaunched: () => void
 }) {
-  const [stages, setStages] = useState('1..12')
+  const [stages, setStages] = useState('1..11')
   const [themes, setThemes] = useState('all')
   const [n, setN] = useState(5)
   const [budgetUsd, setBudgetUsd] = useState('')
@@ -301,8 +301,8 @@ function LaunchControl({
       <AdminLabel>launch a run · this spends money</AdminLabel>
 
       <p className="mb-4 max-w-[90ch] text-[15px] leading-[1.6] text-ink-700">
-        `make eval` is canonical (§14) and this is the same code path. A full matrix is 12 stages ×
-        3 themes × 5 stories = 180 cells; run 114 measured{' '}
+        `make eval` is canonical (§14) and this is the same code path. A full matrix is 11 stages ×
+        3 themes × 5 stories = 165 cells; run 114 (on the old twelve-stage ladder) measured{' '}
         <span className="font-mono">$5.41</span> and{' '}
         <span className="font-mono">17m49s</span>. The estimate below costs nothing —{' '}
         <span className="font-mono">POST</span> without a budget makes zero model calls.

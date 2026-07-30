@@ -69,16 +69,16 @@ precompute: ## Build the allowed_words table (§5.4)
 	cd $(API) && uv run python -m storyforge.precompute
 
 # §7's matrix is EVERY (stage, theme) pair, and the defaults now say so
-# (`--stages 1..12 --themes all`). They said `1,2,3` / `dragons` for five phases,
-# so this argument-free target filled 3 of 12 stages and 1 of 3 themes while
+# (`--stages 1..11 --themes all`). They said `1,2,3` / `dragons` for five phases,
+# so this argument-free target filled 3 stages and 1 of 3 themes while
 # docs/STATE.md claimed ">=3 per (stage,theme)" — and because §7's ladder answers
 # an empty pair by serving a LOWER stage, silently and correctly, nothing reported
-# it. §17's demo is dragons at stage 3, the one cell that was covered, so the demo
+# it. §17's demo is dragons at a low stage, a cell that was covered, so the demo
 # passed on a nine-empty-stage pool (AUDIT-PHASE7 F4, DEVIATIONS 8.40).
 #
 # Idempotent: `pool_depth` fills only the shortfall. `make warm-plan` prices it
 # first; `make warm-check` is the gate and must be run afterwards.
-warm: ## Pre-generate the warm story pool over §7's full 12 x 3 matrix (SLOW, spends money)
+warm: ## Pre-generate the warm story pool over §7's full 11 x 3 matrix (SLOW, spends money)
 	cd $(API) && uv run python -m storyforge.warm
 
 # The guard, not a reminder (DEVIATIONS 8.41). Non-zero while any (stage, theme)
@@ -93,7 +93,7 @@ warm-check: ## Refuse a partial warm pool: non-zero while any (stage, theme) is 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run
 
-# §14's documented command line, verbatim. 12 stages x 3 themes x 5 stories is
+# §14's documented command line, verbatim. 11 stages x 3 themes x 5 stories is
 # §1 item 2's acceptance matrix, so this target IS the §1 item 2 check: it exits
 # non-zero when the criterion is not met and when the spend cap is reached, and
 # writes reports/eval-{ts}.md either way. Never a silent success.
@@ -109,7 +109,7 @@ warm-plan: ## What `make warm` would generate and roughly what it would cost. No
 # `make eval EVAL_ARGS="--estimate-only"` projects the spend with no API call.
 eval: ## Full eval harness run across stages and themes (§14)
 	cd $(API) && uv run python -m storyforge.eval run \
-		--stages 1..12 --themes all --n 5 --cold $(EVAL_ARGS)
+		--stages 1..11 --themes all --n 5 --cold $(EVAL_ARGS)
 
 eval-smoke: ## Regression gate: 2 stages x 1 theme x 2 stories (§14)
 	cd $(API) && uv run python -m storyforge.eval smoke

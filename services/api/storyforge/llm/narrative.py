@@ -42,7 +42,7 @@ a fourth invariant-5 retest obligation. The stage-scaled EXPECTATION lives in th
 report that reads these numbers, never in a boolean that can refuse a child a
 story.
 
-The judge is stage-BLIND on purpose. One ruler for twelve stages, with the
+The judge is stage-BLIND on purpose. One ruler for all eleven stages, with the
 expectation applied outside it — a judge told the stage can be talked into
 leniency, and then the ladder it exists to measure is baked into the ruler.
 """

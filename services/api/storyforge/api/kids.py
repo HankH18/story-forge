@@ -67,7 +67,7 @@ class KidCreate(BaseModel):
     """
 
     display_name: DisplayName
-    stage_id: int = Field(ge=1, le=12)
+    stage_id: int = Field(ge=1, le=11)
 
     @field_validator("display_name")
     @classmethod

@@ -10,10 +10,10 @@ So this runs the same request the GENERATING node runs, with `max_retries=0` and
 a timeout large enough that nothing is cut off, and prints one row per call.
 
     services/api/.venv/bin/python scripts/measure_gen_latency.py \
-        --stages 1,5,9,12 --n 3
+        --stages 1,5,8,11 --n 3
 
 Run from the repo root, like `scripts/eval_doc.py`. Cost is real: 12 calls at the
-stage-12 rate is roughly $0.20.
+top-stage rate is roughly $0.20.
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ async def one_call(client, vocab, theme: str, effort: str):
 
 async def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stages", default="1,5,9,12")
+    ap.add_argument("--stages", default="1,5,8,11")
     ap.add_argument("--themes", default="animals,dragons,space")
     ap.add_argument("--n", type=int, default=3)
     ap.add_argument("--effort", default="medium")

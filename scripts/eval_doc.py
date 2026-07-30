@@ -176,7 +176,7 @@ REWRITE_P95_BUDGET = 2
 W(
     f"**Answer: {'YES on decodability' if thesis_ok else 'NO — the decodability claim did not hold'}"
     f", and the gate is the reason.** Of the {agg['produced']} stories the model"
-    f" actually produced across all 12 stages and 3 themes,"
+    f" actually produced across all stages and themes in the matrix,"
     f" **{agg['produced'] - d['below_gate']} reached the 95% gate and"
     f" {d['below_gate']} did not**. The worst single story measured"
     f" {_pct(d['min'])}. Median {_pct(d['p50'])}, mean {_pct(d['mean'])}. The"
@@ -446,7 +446,7 @@ W("## 2. §1 item 2 — the machine-checkable form of the thesis")
 W("")
 W(
     "§1 item 2: *\"Eval harness reports >=95% decodability (excluding declared story"
-    " words) across all 12 stages x 3 themes x 5 stories, with rewrite-loop depth"
+    " words) across the full stage x theme x story matrix, with rewrite-loop depth"
     " p95 <= 2.\"* Checked as four assertions, each with its own exit code path"
     " (DEVIATIONS 7.49):"
 )
@@ -787,7 +787,7 @@ W(
         " output tokens (r = +0.997) and barely of stage (r = +0.50), and the split"
         " above shows how much of this figure is retry rather than generation. §1.6 is"
         " recorded as unmet and unreachable as written — 12s buys roughly 1,200 tokens"
-        " and a stage-12 story is 1,700-3,300 — and the criterion is not relaxed to"
+        " and a top-stage story is 1,700-3,300 — and the criterion is not relaxed to"
         " match. Warm-pool serving is unaffected either way: §7 makes the demo path a"
         " database read, and that latency is not measured here."
     )
@@ -894,7 +894,7 @@ W(
     f" (AUDIT-PHASE7 F6, DEVIATIONS 8.34). The rates below are recomputed from this"
     f" run's own recorded counts; the recorded rows were not edited. The population"
     f" rate is flags over scored words; the mean-per-story column is beside it because"
-    f" a mean weights a 30-word stage-1 story equally with a 200-word stage-12 one."
+    f" a mean weights a 30-word stage-1 story equally with a 200-word top-stage one."
 )
 W("")
 W(
@@ -948,7 +948,7 @@ if dl["unalignable_words"]:
 else:
     W(
         "**No unalignable word appeared in any story.** §18's \"the inventory is too"
-        " small\" alarm is quiet across all 12 stages: the allowlist-constrained"
+        " small\" alarm is quiet across every stage: the allowlist-constrained"
         " prompt never induced the model to reach for a word the GPC inventory"
         " cannot spell."
     )
@@ -1117,7 +1117,7 @@ W(
     " 120-200 words came back with a mean in the 89-102 range, so the model"
     " consistently under-delivers length at the top of the ladder while staying"
     " comfortably inside the gate. Decodability is unaffected \u2014 a short story"
-    " is still a decodable story \u2014 but a stage-12 reader is being handed"
+    " is still a decodable story \u2014 but a top-stage reader is being handed"
     " roughly half the text \u00a76 specifies. \u00a718\u2019s knob order for"
     " generation compliance ends at \u201cshorten target length\u201d; this is the"
     " opposite problem and is not covered there."

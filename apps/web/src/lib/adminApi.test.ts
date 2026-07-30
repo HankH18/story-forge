@@ -70,14 +70,14 @@ describe('readDetail — an admin is shown the server’s own words (9.36)', () 
     const res = new Response(
       JSON.stringify({
         detail: [
-          { loc: ['body', 'stage_id'], msg: 'Input should be less than or equal to 12' },
+          { loc: ['body', 'stage_id'], msg: 'Input should be less than or equal to 11' },
           { loc: ['body', 'text'], msg: 'String should have at most 4000 characters' },
         ],
       }),
       { status: 422 },
     )
     const detail = await readDetail(res)
-    expect(detail).toContain('body.stage_id: Input should be less than or equal to 12')
+    expect(detail).toContain('body.stage_id: Input should be less than or equal to 11')
     expect(detail).toContain('body.text')
     expect(detail).not.toContain('{')
   })
@@ -163,11 +163,11 @@ describe('adminErrorCopy — the 403 surface 7.37 removed, with a POSITIVE contr
 })
 
 describe('normalizeAllowedWords (9.12)', () => {
-  const opts = { stage: 3, limit: 100, offset: 0 }
+  const opts = { stage: 2, limit: 100, offset: 0 }
 
   /**
    * The LIVE envelope, copied from
-   * `GET /api/admin/allowed-words?stage=3&limit=3` against a server reporting
+   * `GET /api/admin/allowed-words?stage=2&limit=3` against a server reporting
    * `demo_bypass_auth: false`. Two names in it are the corrections DEVIATIONS 9.37
    * anticipated: `stage` is an object, not a `stage_id` integer, and the prompt
    * cutoff is `prompt_word_limit`.
@@ -176,7 +176,7 @@ describe('normalizeAllowedWords (9.12)', () => {
     const page = normalizeAllowedWords(
       {
         stage: {
-          id: 3,
+          id: 2,
           name: 'Digraphs',
           description: 'Two letters one sound: sh ch th ng qu, plus w x y z v j',
           max_syllables: 2,
@@ -201,7 +201,7 @@ describe('normalizeAllowedWords (9.12)', () => {
     )
     expect(page.total).toBe(2593)
     expect(page.stage_total).toBe(2593)
-    expect(page.stage.id).toBe(3)
+    expect(page.stage.id).toBe(2)
     expect(page.stage.name).toBe('Digraphs')
     expect(page.stage.max_syllables).toBe(2)
     expect(page.sight_word_count).toBe(16)
@@ -233,7 +233,7 @@ describe('normalizeAllowedWords (9.12)', () => {
     )
     expect(page.words).toHaveLength(1)
     expect(page.total).toBe(1)
-    expect(page.stage.id).toBe(3)
+    expect(page.stage.id).toBe(2)
   })
 
   test('`items` and `results` are read too, and `syllable_count` is accepted', () => {
@@ -282,7 +282,7 @@ describe('normalizeEvalRuns (9.2, 9.3, 9.9)', () => {
           status: 'completed',
           item_count: 180,
           cells_planned: 180,
-          stages: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+          stages: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
           themes: ['animals', 'dragons', 'space'],
           n: 5,
           effort: 'medium',
@@ -342,7 +342,7 @@ describe('normalizeEvalRuns (9.2, 9.3, 9.9)', () => {
     expect(run.criteria_passed).toBe(true)
     expect(run.criteria).toHaveLength(2)
     expect(run.criteria[0].evidence).toContain('180/180')
-    expect(run.stages).toHaveLength(12)
+    expect(run.stages).toHaveLength(11)
     expect(run.themes).toEqual(['animals', 'dragons', 'space'])
     expect(run.git_commit).toBe('83d1cc8')
 
@@ -406,7 +406,7 @@ describe('normalizeEvalRun (9.10)', () => {
       {
         id: 114,
         status: 'completed',
-        config: { stages: '1..12', themes: 'all', n: 5 },
+        config: { stages: '1..11', themes: 'all', n: 5 },
         metrics: { decodability: { mean: 0.991 }, by_stage: { '1': { attempted: 15 } } },
         criteria: [
           { name: 'every story reaches >=95% decodability', ok: true, evidence: '180/180' },
@@ -465,7 +465,7 @@ describe('normalizeEstimate (9.4, 9.34)', () => {
    * will accept. All of it is rendered as the server sent it (DEVIATIONS 9.34).
    */
   const live = {
-    stages: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    stages: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
     themes: ['animals', 'dragons', 'space'],
     n: 5,
     effort: 'medium',
@@ -501,7 +501,7 @@ describe('normalizeEstimate (9.4, 9.34)', () => {
     expect(est.mode).toBe('estimate')
     expect(est.launched).toBe(false)
     expect(est.cells_planned).toBe(180)
-    expect(est.stages).toHaveLength(12)
+    expect(est.stages).toHaveLength(11)
     expect(est.themes).toEqual(['animals', 'dragons', 'space'])
     expect(est.n).toBe(5)
     // Three scenarios, not one. Showing only the middle would understate what an

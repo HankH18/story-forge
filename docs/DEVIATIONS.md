@@ -7807,11 +7807,84 @@ this change does not fix it. That is `older_stage_fallback` firing, which the
 module docstring already names as a finding about the ALLOWLIST rather than about
 this node, and generation/precompute are another agent's. Recorded as open.
 
-**11.68 — the measurement, both directions, per invariant 5.** Filled in after
-the runs: live model, stages 2/3/6/10, before and after, reporting question text
-verbatim plus leak rate, drop rate, derived rate and cost. A leak-rate
-improvement bought with a higher drop rate is a regression and is reported as
-one.
+**11.68 — the measurement, both directions, per invariant 5 — including the
+regression it found and the two things that fixed it.**
+
+Four live runs against the real model, stages 2/3/6/10, 4 stories each, BEFORE
+being the live `questions` rows the same model wrote under the old prompt. Total
+spend **$0.494**.
+
+**The improvement is unambiguous and held in every run: leaky `mcq2` 16 → 0**
+(run 1, 32 stories) and **7 → 0** (run 4, 16 stories). Not one question in any
+run contained a word that distinguishes its two answers. Verbatim, stage 2:
+
+    BEFORE  "Was the dragon glad?"  ["The dragon was glad.", "A man was glad."]
+            correct = "A man was glad."          <- names the FALSE card
+    AFTER   (dropped; two phonics questions instead)
+
+    BEFORE  "Did the dragon go into the cave?"   <- names "into" and "cave"
+    AFTER   (dropped)
+
+and the phonics instruction, which is the user's actual complaint, at the lowest
+stages:
+
+    BEFORE  "Tap it. Hint: win."        AFTER  "Tap the word that starts with
+    BEFORE  "Tap it if it begins as for."      the same sound as win."
+
+At stages 6 and 10 the model now writes the shape stage 10 used to reach by luck:
+
+    AFTER   "When did the rabbit have to turn back?"
+            ["Then it started to feel happy.", "Then it started to get dark."]
+    AFTER   "Where did the rabbit come across green food?"
+            ["It found some green food in the forest.", "... by a rock."]
+
+**The regression, reported as one.** Run 1: `mcq2` present 28 → 15 of 32 stories.
+The leak rate was bought partly with the question's existence, which 11.65 said
+would be a regression, and it is. Two causes, both found by reading the
+refusals rather than guessing:
+
+1. **My own worked example was out of inventory.** The "ask about what the two
+   answers SHARE" rule was taught with `"What did the pup get from the pot?"` — a
+   wh-question, and `readable_openers` gives stages 1-3 only `Did` and `Can`. So
+   at exactly the stages where the leak was worst the model had no in-inventory
+   model of a good question. This is the same mistake the module docstring records
+   for the old prompt ladder ("written from English rather than from the
+   inventory"), made again in a new place. Fixed with a yes/no example and a
+   request-block paragraph that fires only when no wh-opener is readable.
+2. **The retry re-rolled eight constraints to fix one.** An `mcq2` must satisfy
+   eight simultaneous constraints, and in the diagnostic run **6 of 10 failures
+   had a perfectly sound answer pair and only a leaking question**. `check_mcq2`
+   is now split so `check_mcq2_answers` judges the pair alone, and a retry whose
+   pair passed carries it back verbatim with "only the question was wrong". Same
+   judge, same acceptance criteria — this changes what the model is ASKED for.
+
+That recovered stages 6 and 10 to **7 of 8** stories holding an `mcq2`. It did
+not recover the two lowest stages, which are **1 of 8**, and the cause is
+structural rather than a wording problem: with only `Did`/`Can` readable, a
+yes/no question has to assert a proposition, and one of the two cards then agrees
+with it. Stated as an open item rather than smoothed over — the honest trade at
+the lowest stages today is that the child loses the comprehension question and
+gains a second phonics question, and a leaky comprehension question was one the
+child could answer without reading, so it was not worth much. Two candidate
+fixes, both outside this change: a fixed never-leaking `mcq2` frame (the 11.60
+argument applied to a prompt that carries no story content), or making `what` /
+`where` sight words below stage 4, which is an allowlist decision.
+
+**Evidence volume, measured on the pre-migration tree** (the numbers in 11.67:
+1.08 → 1.95 observations per story over 120 servable stories, 9.2 → 5.1 stories to
+reach the floor). Run 4 measured 0.69 → 1.00 and 14.5 → 10.0 stories, but that run
+straddled the stage-1 retirement — `gpcs.csv` was renumbered and `make seed` /
+`make precompute` had not been re-run, so stage membership and story-stage
+bindings were inconsistent. **The 11.67 numbers are the sound ones and the whole
+of 11.67 needs re-measuring once the 11-stage migration lands.** `tap_word` rows
+rose 32 → 55 (run 1) and 16 → 26 (run 4), consistently ~60-70%, in both trees.
+
+**Not done, and left for the operator on purpose:** the 125 existing `tap_word`
+rows still carry their pre-11.60 prompts. `warm.refresh_tap_word_prompts` fixes
+them in place with **no API call** and is idempotent — `test_enrich.py::
+test_backfill_re_derives_a_stale_tap_word_prompt_in_place` proves exactly that,
+and it is what caught the ladder change. It was not run here because the database
+was mid-migration.
 
 ### Gates — the narrative pass (11.40-11.59)
 
@@ -8204,13 +8277,41 @@ idempotent):
 - `stages`: rows 1..11 take the new contents (hardcoded in the migration — a
   migration is a historical record and must not depend on a CSV that will move
   again), row 12 is deleted last, after nothing references it.
-- `eval_runs.config.stages`, `eval_runs.metrics.by_stage` keys, and
-  `eval_run_items.metrics.stage_id` are renumbered in jsonb. Reasoning: the
-  measurements were made against cumulative inventories, and under the mapping
-  those inventories keep their identity — "stage 9, 96.9%" from a pre-renumber
-  run describes the inventory now NAMED stage 8, so leaving the old labels would
-  attach every historical number to the WRONG inventory. Renumbering preserves
-  the measurement's meaning; only the label moves.
+- **Eval history is NOT renumbered, and the first draft of this entry said the
+  opposite.** The plan was to renumber `eval_run_items.metrics.stage_id`,
+  `eval_runs.config.stages` and `eval_runs.metrics.by_stage` in jsonb so every
+  historical number stays attached to the inventory it measured. Looking at the
+  real rows killed it: runs 2 and 114 hold `by_stage` slices for BOTH old
+  stages 1 and 2, which collide at new stage 1, and two per-stage stat slices
+  (means, rates, p95s) cannot be merged without the underlying items —
+  re-aggregating inside a migration would mean reimplementing `eval.aggregate`
+  in SQL, the exact single-source-of-truth violation 8.7/8.25 was about; and
+  renumbering the items while leaving the aggregates makes one run's own record
+  disagree with itself. So eval rows keep the labels they were measured under:
+  a run is a RECORD (its `config` pins the git commit, which pins the ladder),
+  `reports/*` keeps the same old labels, nothing joins these rows to `stages`
+  by FK, and the admin view renders them per run. The serving state is what
+  must never lie about levels, and all of it is renumbered above.
+  `gpc_stats`, also on the blast-radius list, carries NO stage column at all
+  (PROVED: migration `97adefe67c1b` — keyed kid x gpc); its rows follow the
+  renumbered `gpcs` table automatically.
+- **`stories.decodability` is recomputed for every story at the MERGED stage,
+  and a test caught the need rather than foresight** (PROVED).
+  `test_the_gate_still_agrees_with_what_the_harness_recorded` re-runs the pure
+  gate over stored stories and went red on story 3241: recorded 0.9677 at old
+  stage 1 (its one violation was `rabbit`, which needs old-stage-2 `bb`),
+  recomputed 1.0 at merged new stage 1. That is the one class where recorded
+  and recomputed can differ — old stage-N rows for N >= 2 map to an IDENTICAL
+  cumulative inventory, so their stored numbers are provably unchanged, while
+  old stage-1 rows are now judged by a superset (more GPCs, more sight words),
+  which can only RAISE decodability: every word the merge makes newly sight was
+  a violation at old stage 1, so the denominator only loses violations. The
+  migration therefore recomputes the column for all stage-1 stories via the
+  real validator (`validate_text` against the renumbered `sight_words` table),
+  which is idempotent — a second run recomputes the same values. `stories` is
+  serving state, not a record (the 12.8 line), so the column must agree with
+  the live gate; the eval runs' jsonb keeps the old measurement, labelled by
+  the run's commit.
 - Downgrade is a refusal (`RuntimeError`), like `c4f1a2d7be03`: re-inserting a
   retired stage and re-raising every child's number is not an undo, it is a new
   wrong state.

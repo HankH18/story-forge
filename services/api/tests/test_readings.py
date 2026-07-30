@@ -27,7 +27,12 @@ from sqlalchemy import text
 
 from storyforge.db import SessionLocal
 from storyforge.main import app
-from storyforge.mastery import MIN_GPC_OBSERVATIONS, STORIES_REQUIRED_AT_STAGE, word_gpc_ids
+from storyforge.mastery import (
+    MAX_STAGE,
+    MIN_GPC_OBSERVATIONS,
+    STORIES_REQUIRED_AT_STAGE,
+    word_gpc_ids,
+)
 
 # "sit" aligns to exactly three stage-1 correspondences (s|S, i|IH, t|T), so
 # five correct readings give 15 observations — comfortably over the evidence
@@ -993,7 +998,13 @@ async def test_progress_reports_the_rule_as_well_as_the_verdict(
         "stories_required": STORIES_REQUIRED_AT_STAGE,
         "accuracy_threshold": 0.8,
         "min_observations": MIN_GPC_OBSERVATIONS,
-        "max_stage": 12,
+        # `MAX_STAGE`, not a literal, and imported from the same module as its
+        # two siblings above. This said 12, and the eleven-stage renumber turned
+        # it into a claim about the LADDER wearing the costume of a claim about
+        # the dashboard contract (DEVIATIONS 12.x). The proposition — §8's rule
+        # is published verbatim and not merely its verdict — is unchanged, and
+        # the comparison is still exact equality over the whole dict.
+        "max_stage": MAX_STAGE,
     }
     assert body["promotion"]["promote"] is False
     assert len(body["promotion"]["criteria"]) == 4

@@ -217,6 +217,7 @@ from storyforge.llm.pricing import Usage, usage_from_response
 # The GPC instances §8 will actually CREDIT for a word, imported rather than
 # reimplemented: the question generator has to target exactly what the grader
 # counts, and two copies of that definition would drift.
+from storyforge.mastery import MIN_GPC_OBSERVATIONS, STORIES_REQUIRED_AT_STAGE
 from storyforge.mastery import word_gpc_ids as graded_gpc_ids
 from storyforge.pipeline import passes_gate
 
@@ -225,6 +226,26 @@ MAX_QUESTION_ATTEMPTS = 3
 # §11.3.
 TAP_WORD_OPTIONS = 3
 MCQ2_OPTIONS = 2
+# How many phonics questions one story may carry (DEVIATIONS 11.67). §11.3 fixes
+# the number of question TYPES at two, not the number of questions, and the
+# second one is what makes `mastery.MIN_GPC_OBSERVATIONS` reachable inside §8's
+# own five stories: measured over the live pool, one `tap_word` credits 1.08
+# current-stage GPC instances per story (9.2 stories to reach the floor of 10)
+# and two credit 1.95 (5.1 stories). Raising this further is not free — each
+# question is another screen for a five-year-old — so it is a named constant
+# rather than a loop bound.
+MAX_TAP_WORDS = 2
+
+# How many §8 observations one story has to carry for the promotion floor to be
+# reachable in the number of stories §8 itself asks for. DERIVED, not chosen:
+# `MIN_GPC_OBSERVATIONS / STORIES_REQUIRED_AT_STAGE` = 10 / 5 = 2, so a story
+# whose phonics question already credits 2 current-stage GPC instances is on
+# track and gets no second question — the extra screen would buy nothing and
+# every screen costs a five-year-old's attention. Measured: this is why stage 1
+# (2.92 observations from one question) is left alone while stages 3-11 (~1.0)
+# are not. A test pins it against the two thresholds so raising either one here
+# cannot silently stop being consistent with §8.
+EVIDENCE_PER_STORY_TARGET = -(-MIN_GPC_OBSERVATIONS // STORIES_REQUIRED_AT_STAGE)
 # Keep the closed sound list short enough that the model reads all of it.
 MAX_SOUND_TARGETS = 6
 MAX_OFFERED_WORDS = 8
@@ -276,6 +297,14 @@ PROMPT_FRAMES = (
 
 # Frozen. Per-request material lives in `messages`, so this prefix (plus the
 # stage vocabulary) stays cacheable across every story at a stage.
+#
+# The worked examples below deliberately use a theme-free micro-vocabulary (`pup`,
+# `pot`, `bun`, `nut`, `shed`) rather than the live rows they were derived from,
+# which named dragons and burrows. `test_question_rules_are_frozen_of_request_detail`
+# is the tripwire and it is right to be: a frozen example naming a THEME entity is
+# indistinguishable, by inspection, from story material that leaked into the cached
+# prefix, and the next editor should not have to make that judgement. Keep examples
+# theme-free.
 QUESTION_RULES = """You write two questions about a story for a child who is \
 learning to read.
 
@@ -314,16 +343,23 @@ about the part the two answers agree on.
      child which one to pick without reading it.
    - Now find the words that are in ONE answer and not the other. Those words \
      are the whole question, so they must NOT appear in the question you write. \
-     Ask about what the two answers SHARE.
-     Good — "What did he take from the moon?" for "He took a rock from the \
-     moon." and "He took a star from the moon.": both answers say he took \
-     something from the moon, so the question may say that, and only "rock" \
-     and "star" are held back.
-     Bad — "Did the rabbit run into the burrow?" for "It ran into the burrow." \
-     and "It ran past the burrow.": the question already says "into", so the \
-     child picks the answer with the matching word and never reads the story.
-     Bad the other way — "Was the dragon glad?" for "A man was glad." and "The \
-     dragon was glad.": the question says "dragon", which points at the FALSE \
+     Ask about what the two answers SHARE. This is the rule most questions get \
+     wrong, so check it word by word before you answer.
+     Good — "What did the pup get from the pot?" for "The pup got a bun from \
+     the pot." and "The pup got a nut from the pot.": both answers say the pup \
+     got something from the pot, so the question may say that, and only "bun" \
+     and "nut" are held back.
+     Good with only yes-or-no opening words — "Did the pup dig?" for "It dug \
+     in the mud." and "It dug in the sand.": both answers agree that it dug, so \
+     the question asks just that, and "mud" and "sand" stay on the answers. \
+     Keep the question SHORT for this reason: every extra word you add is \
+     another chance to name the difference.
+     Bad — "Did the pup dig in the mud?" for "It dug in the mud." and "It dug \
+     in the sand.": the question already says "mud", so the child picks the \
+     answer with the matching word and never reads the story. Words like "in", \
+     "on", "up" and "back" count too if they are what differs.
+     Bad the other way — "Was the pup glad?" for "A man was glad." and "The \
+     pup was glad.": the question names the pup, which points at the FALSE \
      answer.
    - Never begin an answer with Yes or No. Prefer a question that asks WHICH \
      or WHERE or WHAT happened over one answered by yes or no, using only the \
@@ -413,6 +449,15 @@ class QuestionSet(BaseModel):
     #: a model returning nothing usable at all, and before this field existed the
     #: fallback would have turned that from a non-zero exit into a quiet success.
     derived: list[str] = Field(default_factory=list)
+    #: The ADDITIONAL phonics questions this module composed by pure function
+    #: (DEVIATIONS 11.67), described the same way `tap_word_target` describes the
+    #: first. Deliberately NOT folded into `derived`: that field means "the model's
+    #: retries were spent and this had to be recovered", it is read as a SET of
+    #: qtypes by `warm.enrichment_problems`, and adding a second `tap_word` to it
+    #: would raise 8.58's outage alarm on any story whose `mcq2` was merely
+    #: dropped — a false alarm in exactly the case the model did contribute.
+    #: An extra question is a designed one, not a recovery.
+    extra_tap_words: list[dict] = Field(default_factory=list)
     #: §8/§14: which sound the tap-a-word question ended up practising, and which
     #: tier of `_prefer_current_stage` produced it. Surfaced (rather than logged)
     #: so the eval harness can measure how often the fallback fires — a high
@@ -470,6 +515,19 @@ def stage_gpc_ids(stage_id: int) -> frozenset[str]:
     is measured over.
     """
     return frozenset(g.id for g in load_gpcs() if g.stage == stage_id)
+
+
+def stage_evidence(question: GeneratedQuestion, stage_id: int) -> int:
+    """How many §8 observations this question will actually credit.
+
+    The GPC instances in the credited word that `stage_id` INTRODUCES — which is
+    exactly `evaluate_promotion`'s denominator, not the cumulative set. Computed
+    from the answer key rather than from the target, so it measures what the
+    grader will count.
+    """
+    introduced = stage_gpc_ids(stage_id)
+    word = str(question.answer.get("correct", ""))
+    return sum(1 for gid in graded_gpc_ids(word, stage_id) if gid in introduced)
 
 
 def uses_stage_gpc(word: str, stage_id: int) -> bool:
@@ -996,12 +1054,23 @@ def build_question_request(
     needed: Sequence[str],
     openers: Sequence[str] = (),
     problems: Sequence[str] = (),
+    keep_answers: tuple[str, str] | None = None,
 ) -> str:
     """Per-request half of the prompt (after the cached prefix).
 
     On a retry this carries the SPECIFIC reason each question was rejected, the
     same way §6's rewrite node carries the violating words — "try again" tells
     the model nothing it can act on.
+
+    `keep_answers` narrows a retry to the one thing that was wrong (DEVIATIONS
+    11.68). An `mcq2` has to satisfy eight constraints at once — the true answer
+    a subsequence of the story in its own order, the false answer not one but
+    still built from the story's words, equal word counts, a length ratio, a
+    readable opener, no leading Yes/No, no `not`-negation, and no word that gives
+    the answer away — and measured live, the commonest failure by far is the LAST
+    one alone, with a perfectly good answer pair attached. Asking for a whole new
+    question in that case throws away the seven constraints already satisfied and
+    re-rolls all eight; asking only for a new question keeps them.
     """
     wanted = " and ".join(
         {"tap_word": "the tap-a-word question", "mcq2": "the two-choice question"}[n]
@@ -1013,9 +1082,36 @@ def build_question_request(
         f"Write {wanted}.",
     ]
     if openers and "mcq2" in needed:
-        parts.append(
+        block = (
             "Your two-choice question MUST begin with one of these words — every "
             f"other question word is unreadable at this stage: {', '.join(openers)}."
+        )
+        # DEVIATIONS 11.68. Which openers exist is a fact about the STAGE, and the
+        # first version of the "ask about what they share" rule was taught with a
+        # `What did ...` example — a shape stages 1-3 cannot write, because their
+        # only readable openers are `Did` and `Can`. So the model had no in-
+        # inventory model of a good question at exactly the stages where the leak
+        # was worst, and it wrote the yes/no question that restates one answer.
+        # Measured: `mcq2` survival at stage 3 was 1 of 8 before this paragraph
+        # existed. Naming the constraint is the same move `readable_openers` makes
+        # for the openers themselves — tell the model what it CAN write, not only
+        # what it cannot.
+        if not {o.lower() for o in openers} & {"what", "where", "why", "how", "who"}:
+            block += (
+                " None of them can ask WHAT or WHERE something happened, so ask a "
+                "yes-or-no question about the part BOTH answers agree on and keep "
+                "it short — see the 'Good with only yes-or-no opening words' "
+                "example. Do not name the thing that differs."
+            )
+        parts.append(block)
+    if keep_answers is not None:
+        parts.append(
+            "Your two answers were ACCEPTED. Send these two back exactly as they are, "
+            "word for word, and change nothing about them:\n"
+            f"- true answer: {keep_answers[0]}\n"
+            f"- false answer: {keep_answers[1]}\n"
+            "Only the question was wrong. Write a different question about what these "
+            "two answers AGREE on, using none of the words that differ between them."
         )
     if problems:
         parts.append(
@@ -1142,29 +1238,25 @@ def check_tap_word(
     )
 
 
-def check_mcq2(
-    draft: Mcq2Draft,
+def check_mcq2_answers(
+    correct: str,
+    incorrect: str,
     *,
     stage_id: int,
     story_text: str,
     sight_words: Iterable[str] = (),
     story_words: Iterable[str] = (),
-    seed: int = 0,
-) -> tuple[GeneratedQuestion | None, list[str]]:
+) -> list[str]:
+    """Everything provable about the ANSWER PAIR alone, without the question.
+
+    Split out so it has exactly one definition and two callers (DEVIATIONS
+    11.68): `check_mcq2` runs it first, and `generate_questions` runs it on a
+    refused draft to learn whether the pair was salvageable. An `mcq2` must
+    satisfy eight constraints at once and the commonest live failure is the
+    question leaking the answer while the pair is perfectly good — re-rolling all
+    eight to fix one is what was costing the comprehension question.
+    """
     problems: list[str] = []
-    prompt = _norm(draft.prompt)
-    correct = _norm(draft.correct)
-    incorrect = _norm(draft.incorrect)
-
-    if not prompt.endswith("?"):
-        problems.append("the question must end with a question mark")
-    report = readable(prompt, stage_id, sight_words, story_words)
-    if not passes_gate(report):
-        problems.append(
-            f'the question "{prompt}" uses words this child cannot read: '
-            + ", ".join(unreadable_words(report))
-        )
-
     if correct.lower() == incorrect.lower():
         problems.append("the two answers must be different")
 
@@ -1196,19 +1288,6 @@ def check_mcq2(
             f'"{incorrect}" shares no words with the story — build it from the story\'s words'
         )
 
-    # DEVIATIONS 11.64. The question must not contain the word that tells the
-    # child which card is right — 40 of 74 live rows did, which made a
-    # comprehension question answerable by letter-matching with the story unread.
-    # Same shape as `cue_leaks` for `tap_word`: the actionable instruction names
-    # the offending word, because "rewrite it" tells the model nothing.
-    leaked = prompt_leaks_answer(prompt, correct, incorrect, sight)
-    if leaked:
-        problems.append(
-            f"the question already contains {_quoted_words(leaked)}, which is what makes the "
-            "two answers different — so the child can pick the matching answer without "
-            "reading the story. Ask about what the two answers SHARE and leave the "
-            "difference to the answers"
-        )
     if negation_pair(correct, incorrect):
         problems.append(
             'the false answer is only the true answer with "not" added or removed, so the '
@@ -1217,6 +1296,54 @@ def check_mcq2(
 
     if not _length_balanced([correct, incorrect], single_word=False):
         problems.append("the two answers must be close to the same length")
+    return problems
+
+
+def check_mcq2(
+    draft: Mcq2Draft,
+    *,
+    stage_id: int,
+    story_text: str,
+    sight_words: Iterable[str] = (),
+    story_words: Iterable[str] = (),
+    seed: int = 0,
+) -> tuple[GeneratedQuestion | None, list[str]]:
+    prompt = _norm(draft.prompt)
+    correct = _norm(draft.correct)
+    incorrect = _norm(draft.incorrect)
+
+    problems = check_mcq2_answers(
+        correct,
+        incorrect,
+        stage_id=stage_id,
+        story_text=story_text,
+        sight_words=sight_words,
+        story_words=story_words,
+    )
+
+    if not prompt.endswith("?"):
+        problems.append("the question must end with a question mark")
+    report = readable(prompt, stage_id, sight_words, story_words)
+    if not passes_gate(report):
+        problems.append(
+            f'the question "{prompt}" uses words this child cannot read: '
+            + ", ".join(unreadable_words(report))
+        )
+
+    # DEVIATIONS 11.64. The question must not contain the word that tells the
+    # child which card is right — 40 of 74 live rows did, which made a
+    # comprehension question answerable by letter-matching with the story unread.
+    # Same shape as `cue_leaks` for `tap_word`: the actionable instruction names
+    # the offending word, because "rewrite it" tells the model nothing.
+    sight, _ = _sets(sight_words, ())
+    leaked = prompt_leaks_answer(prompt, correct, incorrect, sight)
+    if leaked:
+        problems.append(
+            f"the question already contains {_quoted_words(leaked)}, which is what makes the "
+            "two answers different — so the child can pick the matching answer without "
+            "reading the story. Ask about what the two answers SHARE and leave the "
+            "difference to the answers"
+        )
 
     if problems:
         return None, problems
@@ -1313,6 +1440,12 @@ async def generate_questions(
     total = Usage(model=fast_model())
     problems: list[str] = []
     attempts = 0
+    # DEVIATIONS 11.68. An `mcq2` answer pair that satisfied every constraint but
+    # whose question gave the answer away is carried into the next attempt, so the
+    # retry re-rolls one constraint instead of eight. `check_mcq2` still judges
+    # whatever comes back, in full — this changes what the model is ASKED for, not
+    # what is accepted.
+    keep_answers: tuple[str, str] | None = None
 
     common = {
         "stage_id": stage_id,
@@ -1335,6 +1468,7 @@ async def generate_questions(
                 needed=needed,
                 openers=openers,
                 problems=problems,
+                keep_answers=keep_answers,
             ),
             schema=_schema_for(needed),
         )
@@ -1356,6 +1490,7 @@ async def generate_questions(
             continue
 
         problems = []
+        keep_answers = None
         for qtype in list(needed):
             draft = getattr(parsed, qtype, None)
             if draft is None:
@@ -1371,6 +1506,19 @@ async def generate_questions(
             else:
                 problems.extend(why)
                 dropped[qtype] = why
+                if qtype == "mcq2":
+                    # Salvage the pair only if it is independently sound. Asked
+                    # again rather than inferred from `why`: matching on the
+                    # refusal strings would silently rot the moment one is reworded.
+                    pair = (_norm(draft.correct), _norm(draft.incorrect))
+                    if not check_mcq2_answers(
+                        *pair,
+                        stage_id=stage_id,
+                        story_text=story_text,
+                        sight_words=sight_words,
+                        story_words=story_words,
+                    ):
+                        keep_answers = pair
 
     for qtype in needed:
         dropped.setdefault(qtype, problems or ["retry budget exhausted"])
@@ -1416,8 +1564,59 @@ async def generate_questions(
                 break
             derived_problems = (derived_problems or []) + why
 
-    # Stable order: the phonics question first, comprehension second (§11.3).
-    questions = [accepted[q] for q in ("tap_word", "mcq2") if q in accepted]
+    # DEVIATIONS 11.67. §8's promotion rule needs ≥10 graded observations on the
+    # GPCs the CHILD'S STAGE teaches, and one phonics question per story credits
+    # 1.08 of them — so `MIN_GPC_OBSERVATIONS` silently doubled §8's own "5
+    # stories" to nine. A second `tap_word` on a different sound brings it to 1.95
+    # (5.1 stories), which makes the floor consistent with §8 rather than moving
+    # either number.
+    #
+    # Nothing about guessability changes: still one of three options, still §8's
+    # named type (`mastery.MASTERY_QTYPES`), still judged by the UNCHANGED
+    # `check_tap_word`. Letting the 50%-guessable `mcq2` move a counter instead is
+    # refused in 11.66 — that is DEVIATIONS 6.7's failure class, an unearned
+    # signal advancing a child's stage.
+    #
+    # Zero tokens and zero new prompt surface: `sound_targets` already returns up
+    # to `MAX_SOUND_TARGETS` ranked targets, every one of which `tap_word_options`
+    # can provably answer, and until now all but the first were discarded.
+    extra: list[GeneratedQuestion] = []
+    first = accepted.get("tap_word")
+    if first is not None and stage_evidence(first, stage_id) < EVIDENCE_PER_STORY_TARGET:
+        # Guards against counting one word's GPCs twice, and against re-showing a
+        # word the child just judged: the second question's answer must be a new
+        # word that appeared nowhere in the first question's options.
+        used_graphemes = {first.answer.get("target_grapheme")}
+        used_words = set(first.payload.get("options", ())) | {first.answer.get("correct")}
+        for target in targets:
+            if len(extra) >= MAX_TAP_WORDS - 1:
+                break
+            if target.grapheme in used_graphemes:
+                continue
+            options = tap_word_options(target)
+            if options is None or options[0] in used_words:
+                continue
+            question, _why = check_tap_word(
+                TapWordDraft(
+                    target_grapheme=target.grapheme,
+                    correct_word=options[0],
+                    other_words=list(options[1:]),
+                ),
+                targets=targets,
+                **common,
+            )
+            if question is None:
+                continue
+            extra.append(question)
+            used_graphemes.add(target.grapheme)
+            used_words |= set(question.payload["options"])
+
+    # Stable order: the phonics questions first, comprehension last (§11.3).
+    questions = [
+        *([first] if first is not None else []),
+        *extra,
+        *([accepted["mcq2"]] if "mcq2" in accepted else []),
+    ]
     for idx, question in enumerate(questions):
         question.idx = idx
 
@@ -1427,6 +1626,9 @@ async def generate_questions(
         attempts=attempts,
         dropped={k: v for k, v in dropped.items() if k not in accepted},
         derived=derived,
+        extra_tap_words=[
+            describe_target(q, targets, stage_id, source="derived") for q in extra
+        ],
         tap_word_target=describe_target(
             accepted.get("tap_word"),
             targets,

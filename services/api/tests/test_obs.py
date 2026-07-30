@@ -25,7 +25,11 @@ from storyforge.llm.moderate import ModerationResult
 from storyforge.llm.pricing import Usage
 
 GOOD = "Sam sat. The cat sat."  # 100% decodable at stage 1 with "the" as a sight word
-BAD = "Sam ran. Pat ran."  # "ran" is not yet taught at stage 1 -> forces a rewrite
+# "ship" needs `sh|SH`, taught at stage 2 -> forces a rewrite at stage 1. (The
+# fixture was "Sam ran. Pat ran." until the ladder renumber merged `r|R` into
+# stage 1 — the contract, a first attempt that fails the gate, is unchanged; the
+# word had to move to stay on the violating side. DEVIATIONS 12.6.)
+BAD = "Sam had a ship. Pat had a ship."
 
 GEN_USAGE = Usage(
     model="claude-sonnet-5",
@@ -287,7 +291,7 @@ async def test_a_failed_attempt_produces_a_rewriting_span(stub_pipeline, monkeyp
     # hide exactly the runs worth looking at.
     first_validate = client.spans[2]["updates"][0]
     assert first_validate["level"] == "WARNING"
-    assert "ran" in first_validate["output"]["violations"]
+    assert "ship" in first_validate["output"]["violations"]
 
 
 async def test_llm_spans_carry_tokens_and_cost(stub_pipeline, monkeypatch):

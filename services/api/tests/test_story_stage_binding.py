@@ -240,7 +240,9 @@ async def test_a_parent_may_not_choose_the_stage(client, local_clerk, parent, sa
     # is read at all, which is why this test never needed the pool to have a shape.
     resp = await client.post(
         "/api/stories/request",
-        json={"stage_id": 12, "theme_id_or_slug": DRAGONS},
+        # 11: the stage must be SCHEMA-valid so the 422 comes from
+        # `_resolve_stage`'s kid_id rule, not from Pydantic's le=11 bound.
+        json={"stage_id": 11, "theme_id_or_slug": DRAGONS},
         headers=parent,
     )
     assert resp.status_code == 422, resp.text

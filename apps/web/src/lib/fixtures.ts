@@ -14,7 +14,7 @@
  * Two guards keep it out of the child's way: the query parameter, and
  * `import.meta.env.DEV`, which Vite replaces with `false` at build time so the
  * whole module is dropped by dead-code elimination. Nothing here is content —
- * it is the shape of content, written at roughly stage 3 so it renders at a
+ * it is the shape of content, written at roughly stage 2 so it renders at a
  * believable size. Delete it once the generator emits branches.
  */
 
@@ -30,7 +30,7 @@ export function isFixtureRequested(search: string): boolean {
 export function branchFixture(): Story {
   return {
     id: -1,
-    stage_id: 3,
+    stage_id: 2,
     theme_id: 1,
     theme_slug: 'dragons',
     theme_display_name: 'Dragons',

@@ -1,5 +1,13 @@
 # Story Forge — §14 eval report
 
+> **Ladder note (2026-07-30).** This report records run 114, measured on the
+> TWELVE-stage ladder that predates the renumber (docs/DECISION-stage-ladder.md,
+> DEVIATIONS 12.11): its "stage N" labels are Appendix A's, one higher than the
+> current ladder's for N >= 2. The §14 matrix is now **11 x 3 x 5 = 165 cells**
+> (`--stages 1..11`), and the next `make eval` will supersede this file with
+> current-ladder numbers. The measurements below are the run's own record and
+> are deliberately NOT re-labelled.
+
 **The question this document answers:** §0 claims that a constrained LLM plus a pure-function gate yields reliably decodable stories. Does it?
 
 **Answer: YES on decodability, and the gate is the reason.** Of the 180 stories the model actually produced across all 12 stages and 3 themes, **180 reached the 95% gate and 0 did not**. The worst single story measured 95.0%. Median 100.0%, mean 98.9%. The rewrite loop did most of that work at depth 0 — p95 was 2, against §1's budget of 2 — which is the budget exactly, with no headroom. The gate held and no story shipped below it, but at p95 = 2 the rewrite loop is carrying weight §6 assigns to the allowlist, and a further prompt change that costs one more rewrite would breach §1 rather than merely crowd it. Read this as a pass with the margin spent, not as a comfortable one. No story in the matrix contained a single out-of-vocabulary word, and none exceeded the story-word cap.

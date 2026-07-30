@@ -20,7 +20,7 @@ real pool had not reached — `base = max(servable stage_id) + 1` in
 claiming nothing lives above stage 5 in `test_story_stage_binding.py` (9.65),
 `stage = min(12, max(stage_id) + 1)` in `test_eval.py` (9.63). All three are the
 same bet: that the product is incomplete. `make warm-check` demands >=3 servable
-stories in all 36 (stage,theme) pairs, stage 12 included, so the bet is against
+stories in all 33 (stage,theme) pairs, the top stage included, so the bet is against
 the product working and a full `make warm` settles it — loudly in the first case
 (four fixture ERRORs) and **silently** in the other two, which is worse.
 

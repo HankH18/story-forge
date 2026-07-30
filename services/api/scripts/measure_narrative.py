@@ -74,9 +74,9 @@ MEASURE_TIMEOUT_S = 240.0
 DEFAULT_EFFORT = "medium"
 
 #: 1 and 2 are the two stages §18 pre-excuses, 6 is the stage the user complained
-#: about with 5,392 allowed words and no excuse available, 9 and 12 are the 120-200
+#: about with thousands of allowed words and no excuse available, 8 and 11 are the 120-200
 #: word band where the padding clause bites hardest.
-DEFAULT_STAGES = (1, 2, 6, 9, 12)
+DEFAULT_STAGES = (1, 2, 5, 8, 11)
 DEFAULT_THEMES = ("animals", "dragons", "space")
 
 #: The `before` arm's reconstruction, verbatim on both sides. DEVIATIONS 11.41: the

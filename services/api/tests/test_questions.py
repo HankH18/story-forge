@@ -11,8 +11,14 @@ from __future__ import annotations
 
 import pytest
 
+# From the DECODER, not from `mastery`: `tap_word_prompt` validates against
+# `mastered_ids(stage_id)`, so the decoder's ladder is the authoritative one here
+# and these tests follow it through a renumbering of the stages.
+from storyforge.decoder import MAX_STAGE, MIN_STAGE
+from storyforge.decoder import load_gpcs as _load_gpcs
 from storyforge.llm.pricing import Usage
 from storyforge.llm.questions import (
+    INSTRUCTION_WORDS,
     PROMPT_FRAMES,
     QUESTION_RULES,
     GeneratedQuestion,
@@ -45,7 +51,14 @@ STORY = (
     "A man ran back. He was glad. The dragon went into the cave."
 )
 TITLE = "The Dragon And Fire"
-STAGE = 3
+# Derived, not asserted. This was `STAGE = 3` and broke when stage 1 retired and
+# the ladder renumbered to eleven (DEVIATIONS 12.x): `w` moved to stage 2, so a
+# fixture naming 3 was making a claim about the inventory that had stopped being
+# true, and the failure read as a bug in the node rather than a stale datum. The
+# tests below assert the node returns a target from the story's OWN stage — that
+# proposition is unchanged; only which stage teaches /w/ moved. Deriving it means
+# the next renumber cannot make these lie.
+STAGE = next(g.stage for g in _load_gpcs() if g.grapheme == "w")
 SIGHT = ["a", "go", "he", "i", "is", "me", "no", "she", "the", "to", "was", "we"]
 STORY_WORDS = ["cave", "dragon", "fire"]
 # Frequency-ordered, as `allowed_words` arrives from the precompute table.
@@ -395,14 +408,23 @@ def test_a_story_with_no_usable_sound_offers_nothing():
 # the pool and accumulate zero evidence toward promotion (§8 measures accuracy
 # over the GPCs introduced AT the current stage, and only `tap_word` counts).
 
-# Stage 4 teaches ONLY final suffixes — ed, es, ing, s|Z — so no word can start
-# with one and the onset tier is structurally impossible there.
-STAGE4_STORY = "The man went up. He jumped fast. A big dog runs and digs."
+# One stage teaches ONLY final suffixes — ed, es, ing, s|Z — so no word can START
+# with one and the onset tier is structurally impossible there. That is the whole
+# point of the fixture, and it is a property of the inventory, not of a number:
+# this was hard-coded to 4 and the eleven-stage renumber moved it to 3, at which
+# point the tests below failed with `older_stage_fallback` and read as a bug in
+# the tier logic rather than a stale constant (DEVIATIONS 12.x). Derived now.
+SUFFIX_STAGE = next(
+    st
+    for st in sorted({g.stage for g in _load_gpcs()})
+    if {g.position for g in _load_gpcs() if g.stage == st} == {"final"}
+)
+SUFFIX_STORY = "The man went up. He jumped fast. A big dog runs and digs."
 
 
-def stage4_targets():
+def suffix_stage_targets():
     return sound_targets(
-        story_text=STAGE4_STORY, stage_id=4, allowed_words=ALLOWED, sight_words=SIGHT
+        story_text=SUFFIX_STORY, stage_id=SUFFIX_STAGE, allowed_words=ALLOWED, sight_words=SIGHT
     )
 
 
@@ -418,31 +440,31 @@ def test_the_offered_sound_is_the_one_this_stage_teaches():
 
 
 def test_the_correct_word_earns_evidence_at_the_stage_that_teaches_suffixes():
-    """Tier 2, and the only tier that can ever fire at stage 4.
+    """Tier 2, and the only tier that can ever fire at the suffix-only stage.
 
     No word STARTS with `ed`/`ing`/`s|Z`, so the onset tier is empty by
-    construction. The correct word must therefore be one that uses a stage-4
+    construction. The correct word must therefore be one that uses a suffix-stage
     sound somewhere — `jumped`, `runs` — or the child reads a question that
     teaches nothing new.
     """
-    offered = stage4_targets()
-    assert offered, "the stage-4 story must still offer a question"
+    offered = suffix_stage_targets()
+    assert offered, "the suffix-only stage must still offer a question"
     for target in offered:
         assert target.scope == "current_stage_word"
         assert target.onset_words
         for word in target.onset_words:
-            assert uses_stage_gpc(word, 4), word
+            assert uses_stage_gpc(word, SUFFIX_STAGE), word
 
 
 def test_a_correct_word_that_earns_no_evidence_is_rejected_at_that_tier():
     """The scope is ENFORCED, not merely offered. `went` is a fine tap-a-word
-    answer and contains no stage-4 GPC, so at this tier it is not one."""
-    target = next(t for t in stage4_targets() if t.grapheme == "j")
+    answer and contains no suffix-stage GPC, so at this tier it is not one."""
+    target = next(t for t in suffix_stage_targets() if t.grapheme == "j")
     question, problems = check_tap_word(
         TapWordDraft(target_grapheme="j", correct_word="jumped", other_words=["went", "fast"]),
         targets=[target],
-        stage_id=4,
-        story_text=STAGE4_STORY,
+        stage_id=SUFFIX_STAGE,
+        story_text=SUFFIX_STORY,
         sight_words=SIGHT,
     )
     assert problems == [] and question is not None
@@ -452,8 +474,8 @@ def test_a_correct_word_that_earns_no_evidence_is_rejected_at_that_tier():
     question, problems = check_tap_word(
         TapWordDraft(target_grapheme="j", correct_word="went", other_words=["up", "man"]),
         targets=[swapped],
-        stage_id=4,
-        story_text=STAGE4_STORY,
+        stage_id=SUFFIX_STAGE,
+        story_text=SUFFIX_STORY,
         sight_words=SIGHT,
     )
     assert question is None
@@ -483,10 +505,13 @@ async def test_the_node_reports_which_tier_produced_the_target(monkeypatch):
     # first attempt passed, so nothing was composed locally.
     assert result.tap_word_target == {
         "grapheme": "w",
-        "stage": 3,
+        # `STAGE`, not a literal: /w/ sat at stage 3 until the eleven-stage
+        # renumber moved it to 2, and a hard-coded 3 here asserted a fact about
+        # the INVENTORY while claiming to assert one about the node's reporting.
+        "stage": STAGE,
         "scope": "current_stage_onset",
         "offered": 1,
-        "stage_id": 3,
+        "stage_id": STAGE,
         "earns_stage_evidence": True,
         "source": "model",
         "model_dropped": [],
@@ -515,29 +540,59 @@ def test_the_richest_readable_frame_wins():
     assert prompt in [f.format(cue="had") for f in PROMPT_FRAMES]
 
 
-def test_early_stages_fall_back_to_the_terse_frame():
-    """No English instruction is decodable at stage 1. The gate holds and the
-    sentence shortens — never the other way round.
+def test_the_instruction_names_the_comparison_at_the_lowest_stage():
+    """The lowest stage gets a full English instruction, not a shortened one.
 
-    The literal used to be `"Tap: sat."` — `PROMPT_FRAMES[-1]`. That pinned the
-    ladder's CONTENTS, which the §11.3 fix necessarily changes, and it never
-    asserted the docstring's actual claim: that the shortening is FORCED by the
-    decoder rather than chosen. Both are asserted now, and the second one is
-    what a future edit must not be able to sneak past — lowering the gate to let
-    a richer frame through at stage 1 would fail here even if the floor string
-    were updated to match.
+    **This replaces `test_early_stages_fall_back_to_the_terse_frame`, whose
+    contract was deliberately retired** (DEVIATIONS 11.60/11.63). That test
+    asserted `tap_word_prompt("sat", 1, ...) == "Tap it: sat."` AND that every
+    richer rung must FAIL the gate at the lowest stage — i.e. it asserted the
+    decodable-instruction constraint itself, as a requirement. §11.3 does not
+    impose it: it attaches "validated decodable" to `mcq2`'s OPTIONS and to
+    nothing else, its own example instruction ("tap the word that says /sh/ip")
+    fails the gate at every stage, and §8 credits only the option the child taps,
+    so no grapheme of any prompt was ever counted. What the constraint cost was
+    measurable: 71 of 125 live rows carried an instruction that named no task.
+
+    The proposition kept and strengthened is the one that still has a job — the
+    CUE is what the exemption must not cover, and `test_the_cue_is_still_gated_
+    under_the_instruction_exemption` below is where that now lives. Here the
+    assertion is what a regression would break: the youngest child is TOLD what
+    to compare. It fails against the old behaviour, where the answer was
+    `Tap it: sat.`
     """
-    stage_one = ["a", "i", "the"]
-    assert tap_word_prompt("sat", 1, stage_one) == "Tap it: sat."
+    lowest = ["a", "i", "the"]
+    prompt = tap_word_prompt("sat", MIN_STAGE, lowest)
+    assert prompt is not None
+    assert prompt != PROMPT_FRAMES[-1].format(cue="sat"), (
+        "the lowest stage fell back to the bare cue — it names nothing to compare "
+        "on a screen holding three options, which is what 11.60 retired"
+    )
+    assert "same sound as" in prompt and "sat" in prompt
 
-    chosen = tap_word_prompt("sat", 1, stage_one)
-    richer = PROMPT_FRAMES[: [f.format(cue="sat") for f in PROMPT_FRAMES].index(chosen)]
-    assert richer, "the stage-1 floor must not be the richest frame"
-    for frame in richer:
-        text = frame.format(cue="sat")
-        assert not passes_gate(readable(text, 1, stage_one)), (
-            f"{text!r} is claimed unreadable at stage 1 but passes the gate — "
-            "either the ladder or the gate moved"
+
+def test_the_cue_is_still_gated_under_the_instruction_exemption():
+    """`INSTRUCTION_WORDS` exempts the FRAME. It must not exempt the cue.
+
+    New assertion, and the one that makes 11.60 safe rather than merely
+    convenient: the cue word is the phonics content — the sound the child
+    compares against — so it stays proved decodable at the child's own stage. If
+    the exemption ever leaked into cue validation, an undecodable cue would ship
+    and the question would be unanswerable as intended.
+    """
+    lowest = ["a", "i", "the"]
+    for cue in ("beautiful", "thought", "through"):
+        assert tap_word_prompt(cue, MIN_STAGE, lowest) is None, (
+            f"cue {cue!r} is not decodable at stage {MIN_STAGE} but a prompt was built "
+            "for it — the instruction exemption has leaked into the cue"
+        )
+    # And the exemption is a closed list, not a rule: it holds only function and
+    # instruction words, so it can never make a content word readable.
+    assert INSTRUCTION_WORDS.isdisjoint({"beautiful", "thought", "through", "sat", "cat"})
+    for member in INSTRUCTION_WORDS:
+        assert member in " ".join(PROMPT_FRAMES).lower(), (
+            f"{member!r} is exempted but no frame uses it — the lexicon may only "
+            "hold words the instructions actually need"
         )
 
 
@@ -547,24 +602,23 @@ def test_every_frame_in_the_ladder_is_reachable_at_some_stage():
     contained "word" or "one", which are undecodable/not-yet-sight-words at
     every stage the ladder is used at, so only the floor ever fired.
 
-    Reachability is checked against the REAL sight-word ladder, cumulative per
-    stage, with a cue that is decodable everywhere.
+    Reachability is checked with a cue that is decodable everywhere, over the
+    real stage ladder (`MIN_STAGE`..`MAX_STAGE`, so this survives a renumbering
+    of the stages rather than pinning 1-12).
+
+    Sight words are no longer passed in per stage, and their absence is now part
+    of what is being asserted: under DEVIATIONS 11.60 the frame's readability
+    depends on `INSTRUCTION_WORDS` and the cue alone, so the instruction is
+    immune to churn in the sight-word ladder AND in `allowed_words`. If a rung
+    ever needed a per-stage sight word again, this test would go red.
     """
-    sight_by_stage = {
-        1: ["a", "i", "the"], 2: ["go", "is", "no", "to"], 3: ["he", "me", "she", "was", "we"],
-        4: ["said", "they", "you"], 5: ["all", "are", "her"], 6: ["come", "some", "there"],
-        7: ["little", "one", "when"], 8: ["oh", "out", "what"], 9: ["people", "your"],
-        10: ["again", "because"], 11: ["thought", "through"], 12: [],
-    }
-    # `sat` is decodable at stage 1 and, the inventory being cumulative, at every
-    # stage above it — so a rung that never fires here is unreachable for a
-    # reason that has nothing to do with the cue.
+    # `sat` is decodable at the lowest stage and, the inventory being cumulative,
+    # at every stage above it — so a rung that never fires here is unreachable
+    # for a reason that has nothing to do with the cue.
     cue = "sat"
     reached = set()
-    cumulative: list[str] = []
-    for stage in range(1, 13):
-        cumulative += sight_by_stage[stage]
-        prompt = tap_word_prompt(cue, stage, list(cumulative))
+    for stage in range(MIN_STAGE, MAX_STAGE + 1):
+        prompt = tap_word_prompt(cue, stage)
         assert prompt is not None, f"stage {stage} can ask nothing at all"
         reached.add(next(f for f in PROMPT_FRAMES if f.format(cue=cue) == prompt))
 
@@ -572,10 +626,21 @@ def test_every_frame_in_the_ladder_is_reachable_at_some_stage():
     # The floor is allowed to be unreachable: it exists for the cue word that
     # breaks the rung above it, not for a stage.
     assert unreachable in ([], [PROMPT_FRAMES[-1]]), (
-        f"dead rungs — no stage 1-12 can read {unreachable}"
+        f"dead rungs — no stage {MIN_STAGE}-{MAX_STAGE} can read {unreachable}"
     )
-    # And the ladder must really be a ladder: more than one rung actually fires.
-    assert len(reached) >= 4, f"only {len(reached)} distinct prompt(s) across 12 stages"
+    # `len(reached) >= 4` used to stand here. It was a PROXY for this test's own
+    # requirement ("a frame no stage can read is dead code") and it
+    # over-approximated: it additionally required the instruction to VARY by
+    # stage, which is only true while the gate makes readability
+    # stage-dependent — the constraint DEVIATIONS 11.60 retires. The requirement
+    # it was proxying for is the `unreachable` assertion above, which is
+    # unchanged and still catches what it caught. What replaces the proxy is
+    # stronger about the thing that now matters: every child gets the SAME fully
+    # spelled-out instruction, so a silent regression to a per-stage degrading
+    # ladder fails here (DEVIATIONS 11.63).
+    assert len(reached) == 1, f"the instruction must not vary by stage: {sorted(reached)}"
+    only = next(iter(reached))
+    assert "same sound as" in only, f"{only!r} does not name the comparison"
 
 
 def test_the_ladder_names_the_cue_and_never_the_answer():
@@ -910,8 +975,16 @@ BAD_TAP = TapWordDraft(target_grapheme="w", correct_word="ran", other_words=["ma
 async def test_both_questions_pass_on_the_first_attempt(monkeypatch):
     result, calls = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)])
     assert result.attempts == 1 and len(calls) == 1
-    assert [q.qtype for q in result.questions] == ["tap_word", "mcq2"]
-    assert [q.idx for q in result.questions] == [0, 1]
+    # Both types, phonics first and comprehension last (§11.3). The literal was
+    # `== ["tap_word", "mcq2"]`, which also pinned the COUNT at two; a story may
+    # now carry a second phonics question when the first does not reach §8's
+    # per-story evidence target on its own (DEVIATIONS 11.67). What this test is
+    # about — one attempt, nothing dropped, both types present, contiguous idx —
+    # is asserted directly instead.
+    qtypes = [q.qtype for q in result.questions]
+    assert set(qtypes) == {"tap_word", "mcq2"}
+    assert qtypes[0] == "tap_word" and qtypes[-1] == "mcq2"
+    assert [q.idx for q in result.questions] == list(range(len(qtypes)))
     assert result.dropped == {}
 
 
@@ -942,8 +1015,12 @@ async def test_a_tap_word_the_model_never_gets_right_is_composed_here_instead(mo
     result, calls = await _run(monkeypatch, [QuestionDraft(tap_word=BAD_TAP, mcq2=GOOD_MCQ)])
     assert len(calls) == 3  # one generation plus two retries, then stop
 
-    assert [q.qtype for q in result.questions] == ["tap_word", "mcq2"]
-    assert [q.idx for q in result.questions] == [0, 1]
+    # Count deliberately not pinned (DEVIATIONS 11.67) — see
+    # `test_both_questions_pass_on_the_first_attempt`.
+    qtypes = [q.qtype for q in result.questions]
+    assert set(qtypes) == {"tap_word", "mcq2"}
+    assert qtypes[0] == "tap_word" and qtypes[-1] == "mcq2"
+    assert [q.idx for q in result.questions] == list(range(len(qtypes)))
 
     # The model's draft was refused, and what survived is not it. BAD_TAP claims
     # `ran` starts with `w`; the accepted question's answer must be a word that
@@ -981,7 +1058,13 @@ async def test_a_never_valid_mcq2_is_still_dropped(monkeypatch):
     )
     result, calls = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=bad_mcq)])
     assert len(calls) == 3
-    assert [q.qtype for q in result.questions] == ["tap_word"]
+    # The proposition is that the `mcq2` did not survive, asserted directly. The
+    # literal used to be `== ["tap_word"]`, which additionally pinned the question
+    # COUNT at one — a story may now carry a second phonics question when the
+    # first does not on its own reach §8's per-story evidence target (DEVIATIONS
+    # 11.67), so the count is not what this test is about.
+    assert "mcq2" not in [q.qtype for q in result.questions]
+    assert {q.qtype for q in result.questions} == {"tap_word"}
     assert "mcq2" in result.dropped
     assert result.derived == []
 
@@ -998,7 +1081,11 @@ async def test_an_accepted_question_survives_the_retry(monkeypatch):
     )
     assert len(calls) == 2
     assert calls[1]["schema"] is TapWordOnly
-    assert [q.qtype for q in result.questions] == ["tap_word", "mcq2"]
+    # Both TYPES survived. The count is not pinned: a story may carry a second
+    # phonics question (DEVIATIONS 11.67), and what this test is about is that the
+    # already-accepted `mcq2` was not re-litigated by the retry.
+    assert {q.qtype for q in result.questions} == {"tap_word", "mcq2"}
+    assert [q.qtype for q in result.questions][-1] == "mcq2"
 
 
 async def test_the_retry_prompt_carries_the_rejection_reason(monkeypatch):
@@ -1059,7 +1146,9 @@ async def test_an_unparseable_response_fails_closed(monkeypatch):
     # Nothing the model returned became a question, and the survivor is ours.
     assert result.derived == ["tap_word"]
     assert result.tap_word_target["source"] == "derived"
-    assert [q.qtype for q in result.questions] == ["tap_word"]
+    # Count deliberately not pinned — see `test_a_never_valid_mcq2_is_still_dropped`.
+    assert "mcq2" not in [q.qtype for q in result.questions]
+    assert {q.qtype for q in result.questions} == {"tap_word"}
 
 
 async def test_the_node_is_reproducible_for_a_seed(monkeypatch):
@@ -1110,11 +1199,207 @@ def test_no_served_payload_field_identifies_the_correct_option():
 
 @pytest.mark.parametrize("qtype", ["tap_word", "mcq2"])
 def test_every_option_would_pass_the_pipeline_gate(qtype):
-    """The invariant in one assertion: nothing ships that the story validator
-    would have rejected."""
-    from storyforge.llm.questions import readable
-    from storyforge.pipeline import passes_gate
+    """The invariant in one assertion: nothing the child must READ ships that the
+    story validator would have rejected.
 
+    Every OPTION of both types, and the whole of an `mcq2` prompt, is judged by
+    the unchanged gate — an `mcq2` prompt is the comprehension content, so the
+    child has to read it to answer.
+
+    The `tap_word` PROMPT is the one exemption (DEVIATIONS 11.60), and it is
+    asserted here in its bounded form rather than dropped: the frame's own words
+    come from `INSTRUCTION_WORDS`, and with those exempted the string must still
+    pass the same gate — which is what proves the CUE is decodable at this stage.
+    So this test still refuses an undecodable cue, and it now also refuses a
+    frame that reaches outside the committed lexicon.
+    """
     question, _ = check_tap(GOOD_TAP) if qtype == "tap_word" else check_two(GOOD_MCQ)
-    for text in [question.prompt, *question.payload["options"]]:
+    for text in question.payload["options"]:
         assert passes_gate(readable(text, STAGE, SIGHT, STORY_WORDS))
+
+    exempt = [*SIGHT, *INSTRUCTION_WORDS] if qtype == "tap_word" else SIGHT
+    assert passes_gate(readable(question.prompt, STAGE, exempt, STORY_WORDS))
+
+
+# --- mcq2: the question must not give the answer away (DEVIATIONS 11.64) ------
+# Every shape below is a live defect from the `questions` table, restated in this
+# module's own stage-3 story vocabulary: 40 of 74 live rows (54%) contained a word
+# that distinguishes the two answers, so the child could pick the matching card
+# with the story unread. That is `cue_leaks` for `tap_word` all over again, and it
+# gets the same medicine — a pure function refuses it, rather than a rule in a
+# prompt asking the model not to.
+def test_a_question_naming_the_true_answers_own_word_is_refused():
+    """Live shape: "Did the rabbit run into the burrow?" over "into the burrow" /
+    "past the burrow". The question states the discriminator, so matching letters
+    against the two cards answers it without reading the story."""
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run back?",
+            correct="The man ran back.",
+            incorrect="The man ran up.",
+        )
+    )
+    assert question is None
+    assert any('"back"' in p and "without reading the story" in p for p in problems)
+
+
+def test_a_question_naming_the_false_answers_word_is_refused_too():
+    """The same defect with a worse sign, and also a live row: "Was the dragon
+    glad?" whose TRUE answer is "A man was glad." Letter-matching points at the
+    WRONG card, so the question actively misleads. The rule is symmetric for that
+    reason — it is about discrimination, not about which card is right."""
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run up?",
+            correct="The man ran back.",
+            incorrect="The man ran up.",
+        )
+    )
+    assert question is None
+    assert any('"up"' in p for p in problems)
+
+
+def test_a_question_may_restate_what_both_answers_SHARE():
+    """The positive case, and the shape the fix teaches. Live stage-10 row: "What
+    did he take from the moon?" over "a rock" / "a star" — the shared premise is
+    in the question and only the difference is on the cards. `GOOD_MCQ` is exactly
+    that shape ("Did the man run?" over "ran back" / "ran up"), and a check that
+    refused it would leave no workable question at any stage."""
+    question, problems = check_two(GOOD_MCQ)
+    assert problems == []
+    assert question is not None and question.qtype == "mcq2"
+
+
+def test_a_false_answer_built_by_adding_not_is_refused():
+    """`QUESTION_RULES` has forbidden this since 8.55 and **3 live rows do it
+    anyway** — "The moon was white and high." / "The moon was white and not
+    high." — because nothing enforced it. `story_supports` catches a negated
+    distractor only when the negation happens to break the subsequence, which is
+    an accident rather than a guarantee."""
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did the man run?",
+            correct="The man ran back.",
+            incorrect="The man ran not back.",
+        )
+    )
+    assert question is None
+    assert any('"not" added or removed' in p for p in problems)
+
+
+def test_a_true_answer_that_legitimately_says_not_is_still_allowed():
+    """The other direction, so the rule cannot creep into "no answer may say
+    not". Live row: "Sam and Kim did not stop." is what the story says, and its
+    false answer differs in CONTENT rather than in polarity."""
+    story = "The man did not run. He sat on the hill. A cat ran fast."
+    question, problems = check_two(
+        Mcq2Draft(
+            prompt="Did it run?",
+            correct="The man did not run.",
+            incorrect="A cat did not run.",
+        ),
+        story_text=story,
+    )
+    assert problems == [], problems
+    assert question is not None
+
+
+def test_the_answer_pair_is_judged_separately_from_the_question():
+    """The split `check_mcq2_answers` exists for (DEVIATIONS 11.68): a pair that
+    satisfies all seven of its own constraints, with only a leaking question
+    attached, is salvageable — and the retry keeps it instead of re-rolling
+    everything. Measured live, that is the commonest single failure."""
+    from storyforge.llm.questions import check_mcq2_answers
+
+    correct, incorrect = GOOD_MCQ.correct, GOOD_MCQ.incorrect
+    # The pair alone is sound...
+    assert (
+        check_mcq2_answers(
+            correct,
+            incorrect,
+            stage_id=STAGE,
+            story_text=STORY,
+            sight_words=SIGHT,
+            story_words=STORY_WORDS,
+        )
+        == []
+    )
+    # ...and only the question is at fault.
+    question, problems = check_two(
+        Mcq2Draft(prompt="Did the man run back?", correct=correct, incorrect=incorrect)
+    )
+    assert question is None and problems
+
+
+def test_a_salvageable_pair_is_handed_back_to_the_model_verbatim():
+    """The retry must ask for ONE thing. `build_question_request` therefore names
+    the two accepted answers and says to return them unchanged — the seven
+    constraints already satisfied are not re-rolled to fix the eighth."""
+    block = build_question_request(
+        story_title=TITLE,
+        story_text=STORY,
+        targets=targets(),
+        needed=["mcq2"],
+        keep_answers=("The man ran back.", "The man ran up."),
+    )
+    assert "The man ran back." in block and "The man ran up." in block
+    assert "ACCEPTED" in block and "Only the question was wrong" in block
+
+
+def test_no_answers_are_pinned_when_the_pair_itself_was_wrong():
+    """The salvage must not resurrect a bad pair. A draft whose false answer is
+    also true in the story fails `check_mcq2_answers`, so nothing is carried."""
+    block = build_question_request(
+        story_title=TITLE, story_text=STORY, targets=targets(), needed=["mcq2"]
+    )
+    assert "ACCEPTED" not in block
+
+
+# --- §8 evidence volume (DEVIATIONS 11.67) -----------------------------------
+def test_the_evidence_target_is_derived_from_section_8s_own_thresholds():
+    """`EVIDENCE_PER_STORY_TARGET` is not a tuning knob. It is
+    `MIN_GPC_OBSERVATIONS / STORIES_REQUIRED_AT_STAGE` — how much evidence one
+    story must carry for the promotion floor to be reachable in the number of
+    stories §8 asks for. Pinned against both thresholds so that moving either one
+    cannot silently leave this inconsistent with §8, which is exactly how the
+    floor came to double §8's story requirement unnoticed.
+    """
+    from storyforge.llm.questions import EVIDENCE_PER_STORY_TARGET
+    from storyforge.mastery import MIN_GPC_OBSERVATIONS, STORIES_REQUIRED_AT_STAGE
+
+    assert EVIDENCE_PER_STORY_TARGET * STORIES_REQUIRED_AT_STAGE >= MIN_GPC_OBSERVATIONS
+    assert (EVIDENCE_PER_STORY_TARGET - 1) * STORIES_REQUIRED_AT_STAGE < MIN_GPC_OBSERVATIONS
+
+
+async def test_a_second_phonics_question_never_re_credits_the_same_word(monkeypatch):
+    """Two `tap_word` rows are two §8 observations only if they are about
+    different things. `gpc_increments` counts GPC instances per graded word, so a
+    second question on the same grapheme — or crediting a word the first question
+    already showed — would inflate the counters rather than add evidence, which is
+    the one way this change could manufacture an unearned promotion.
+    """
+    result, _ = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)])
+    taps = [q for q in result.questions if q.qtype == "tap_word"]
+    graphemes = [q.answer["target_grapheme"] for q in taps]
+    credited = [q.answer["correct"] for q in taps]
+    assert len(set(graphemes)) == len(graphemes), f"same sound asked twice: {graphemes}"
+    assert len(set(credited)) == len(credited), f"same word credited twice: {credited}"
+    # And a word shown as a DISTRACTOR is not then made the answer.
+    for i, tap in enumerate(taps[1:], start=1):
+        assert tap.answer["correct"] not in taps[i - 1].payload["options"]
+
+
+async def test_an_extra_phonics_question_is_not_reported_as_derived(monkeypatch):
+    """DEVIATIONS 8.58's outage alarm reads `questions_derived` as a SET and fails
+    a story whose every surviving question was composed locally. An extra
+    `tap_word` is a DESIGNED question, not a recovery from a spent retry budget —
+    folding it into `derived` would raise that alarm on any story whose `mcq2` was
+    merely dropped, which is a false alarm in exactly the case the model did
+    contribute. It is reported separately instead.
+    """
+    result, _ = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)])
+    taps = [q for q in result.questions if q.qtype == "tap_word"]
+    assert result.derived == [], "the model wrote the first tap_word; nothing was recovered"
+    assert len(result.extra_tap_words) == len(taps) - 1
+    for extra in result.extra_tap_words:
+        assert extra["source"] == "derived"

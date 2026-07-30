@@ -12,7 +12,7 @@ LLM is an untrusted generator. A pure function is the gate.
 make install   # uv sync (API, Python 3.12) + bun install (web)
 make dev       # Postgres via Docker, API on :8000, web on :5173
 make test      # API + decoder tests, plus a web typecheck
-make eval      # §14 harness: 12 stages x 3 themes x 5 stories, real API
+make eval      # §14 harness: 11 stages x 3 themes x 5 stories, real API
 make help      # all targets
 ```
 

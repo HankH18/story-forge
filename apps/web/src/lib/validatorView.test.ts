@@ -49,9 +49,9 @@ function word(w: string, verdict: Verdict, over: Partial<WordReport> = {}): Word
 }
 
 /**
- * The §17 demo sentence, exactly as the live API returned it at stage 3 with
+ * The §17 demo sentence, exactly as the live API returned it at stage 2 with
  * `story_words: ["dragon"]`. This is the locked fixture
- * (`tests/decoder/golden.yaml::demo-sentence-stage-3`) seen from the client.
+ * (`tests/decoder/golden.yaml::demo-sentence-stage-2`) seen from the client.
  */
 const DEMO_WORDS: WordReport[] = [
   word('the', 'sight'),
@@ -83,10 +83,12 @@ describe('§5.6 constants', () => {
 
   test('the prefilled demo is §17 step 1 including the story word', () => {
     // Measured: without `story_words` the same sentence is 0.25 decodable with
-    // zero story words, because `dragon` IS decodable at stage 3 (§5.2.6). The
+    // zero story words, because `dragon` IS decodable at stage 2 (§5.2.6). The
     // fixture is only reproducible with the story word set (DEVIATIONS 9.24).
     expect(DEMO_TEXT).toBe('The knight sees a beautiful dragon')
-    expect(DEMO_STAGE_ID).toBe(3)
+    // 2 since the eleven-stage renumber: the same cumulative inventory the
+    // old stage-3 demo ran against (DEVIATIONS 12.12).
+    expect(DEMO_STAGE_ID).toBe(2)
     expect(DEMO_STORY_WORDS).toBe('dragon')
   })
 })

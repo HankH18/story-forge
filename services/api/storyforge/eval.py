@@ -3,7 +3,7 @@
 Two entry points, one implementation:
 
     python -m storyforge.eval smoke                      # §14 regression gate
-    python -m storyforge.eval run --stages 1..12 --themes all --n 5 [--cold]
+    python -m storyforge.eval run --stages 1..11 --themes all --n 5 [--cold]
 
 Both run the REAL pipeline against the REAL API — that is the entire point. A
 green suite built on a fake client would prove nothing about the one question
@@ -87,10 +87,10 @@ from storyforge.pipeline import (
 )
 from storyforge.warm import _split_segments
 
-#: §14's own default matrix is §1 item 2's acceptance matrix: 12 stages x 3
-#: themes x 5 stories. Spelled as the spec spells it (`1..12`, `all`) so the
+#: §14's own default matrix is §1 item 2's acceptance matrix: 11 stages x 3
+#: themes x 5 stories. Spelled the way the CLI spells a range (`1..11`, `all`) so the
 #: documented command line is the one that actually runs.
-DEFAULT_STAGES = "1..12"
+DEFAULT_STAGES = "1..11"
 DEFAULT_THEMES = "all"
 DEFAULT_N = 5
 
@@ -146,11 +146,11 @@ _HAZARD_HINTS = (
 
 
 def parse_stages(spec: str) -> list[int]:
-    """`"1..12"`, `"3,6"`, `"1..4,7,9..12"` -> a sorted, deduplicated list.
+    """`"1..11"`, `"3,6"`, `"1..4,7,9..11"` -> a sorted, deduplicated list.
 
-    §14 writes the range form (`--stages 1..12`) so it has to parse. Bad input
+    §14 writes the range form (`--stages 1..11`) so it has to parse. Bad input
     raises rather than silently yielding a smaller matrix than the operator
-    asked for — a run over 9 stages reported as a run over 12 is the exact class
+    asked for — a run over 9 stages reported as a run over 11 is the exact class
     of quiet mis-measurement this file exists to avoid.
     """
     out: set[int] = set()
@@ -462,7 +462,7 @@ def decoder_limitation_rates(items: Sequence[dict]) -> dict:
     re-derived without touching run 2's rows. And it reports the POPULATION rate —
     total flags over total scored words — beside the mean of per-story rates,
     because a mean weights a 30-word stage-1 story equally with a 200-word
-    stage-12 one. That is defensible for "the typical story" and wrong for "how
+    top-stage one. That is defensible for "the typical story" and wrong for "how
     often does this happen", which is the question §18 asks.
 
     Pure. `items` are metric rows; nothing here reads a clock, a model or the DB.
@@ -2846,7 +2846,7 @@ def main() -> None:
     s.add_argument("--effort", default="medium")
 
     f = sub.add_parser("run", help="§14 full run: writes eval_runs + a markdown report")
-    f.add_argument("--stages", default=DEFAULT_STAGES, help="'1..12', '3,6', '1..4,9..12'")
+    f.add_argument("--stages", default=DEFAULT_STAGES, help="'1..11', '3,6', '1..4,9..11'")
     f.add_argument("--themes", default=DEFAULT_THEMES, help="'all' or comma-separated slugs")
     f.add_argument("-n", "--n", type=int, default=DEFAULT_N, dest="n")
     f.add_argument("--effort", default="medium")

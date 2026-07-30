@@ -501,12 +501,12 @@ async def test_allowed_words_marks_what_the_prompt_actually_sees(client):
     assert all(w["in_prompt"] for w in body["words"])
     # A page BEYOND the prompt window must report `in_prompt: False`. The offset is
     # DERIVED from the limit rather than hard-coded: it was 8000, which only held
-    # while stage 12 carried 9,360 rows, and DEVIATIONS 11.8's register filter takes
+    # while the top stage carried the most rows, and DEVIATIONS 11.8's register filter takes
     # that to 4,397. The claim under test is "past the window", not "row 8000".
     deep = (
         await client.get(
             "/api/admin/allowed-words",
-            params={"stage": 12, "offset": PROMPT_WORD_LIMIT + 100},
+            params={"stage": 11, "offset": PROMPT_WORD_LIMIT + 100},
         )
     ).json()
     assert deep["words"] and not any(w["in_prompt"] for w in deep["words"])
@@ -568,7 +568,7 @@ async def test_the_default_post_is_an_estimate_and_spends_nothing(client):
     body = resp.json()
     assert body["mode"] == "estimate"
     assert body["launched"] is False
-    assert body["cells_planned"] == 180  # 12 stages x 3 themes x 5
+    assert body["cells_planned"] == 165  # 11 stages x 3 themes x 5
     assert body["projection"]["with_one_rewrite_each_usd"] > 0
     assert body["requires"]["confirm"] is True
     assert "No API call was made" in body["detail"]
@@ -580,7 +580,7 @@ async def test_the_estimate_quotes_a_comparable_real_run(client):
     completed run of the same size is what makes it readable."""
     body = (await client.post("/api/admin/eval-runs", json={})).json()
     reference = body["reference_run"]
-    if reference is not None:  # the shared database may hold no 180-cell run
+    if reference is not None:  # the shared database may hold no 165-cell run
         assert reference["id"] > 0
         assert reference["cost_usd"] > 0
 
@@ -618,8 +618,8 @@ async def test_a_budget_under_the_projection_is_refused_before_any_call(client):
 
 
 async def test_a_matrix_bigger_than_14s_is_refused(client):
-    resp = await client.post("/api/admin/eval-runs", json={"stages": "1..12", "n": 5})
-    assert resp.status_code == 200  # 180 cells is §14's matrix exactly
+    resp = await client.post("/api/admin/eval-runs", json={"stages": "1..11", "n": 5})
+    assert resp.status_code == 200  # 165 cells is §14's matrix exactly
     assert resp.json()["cells_planned"] == admin.MAX_CELLS
     assert (
         await client.post("/api/admin/eval-runs", json={"n": admin.MAX_N + 1})
@@ -630,8 +630,8 @@ async def test_a_matrix_bigger_than_14s_is_refused(client):
     ("body", "fragment"),
     [
         ({"stages": "nope"}, "bad stages spec"),
-        ({"stages": "1..40"}, "within 1..12"),
-        ({"stages": "0"}, "within 1..12"),
+        ({"stages": "1..40"}, "within 1..11"),
+        ({"stages": "0"}, "within 1..11"),
         ({"themes": "unicorns"}, "unknown theme"),
         ({"themes": ","}, "no themes"),
     ],
@@ -679,7 +679,7 @@ async def test_the_process_ceiling_blocks_a_repeated_click(client):
     for i in range(2):
         launch = admin.EvalLaunch(
             launch_id=f"el_done{i}",
-            stages_spec="1..12",
+            stages_spec="1..11",
             themes_spec="all",
             n=5,
             effort="medium",
@@ -706,7 +706,7 @@ async def test_the_process_ceiling_blocks_a_repeated_click(client):
 async def test_cold_generate_refuses_an_unknown_stage_or_theme(client):
     assert (
         await client.post("/api/admin/cold-generate", json={"stage_id": 13, "theme": "dragons"})
-    ).status_code == 422  # outside §4's 1..12 at the schema
+    ).status_code == 422  # outside §4's 1..11 at the schema
     resp = await client.post(
         "/api/admin/cold-generate", json={"stage_id": 3, "theme": "unicorns"}
     )

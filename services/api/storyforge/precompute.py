@@ -3,7 +3,7 @@
 Runs every candidate word through the validator per stage and writes
 ``allowed_words``. The output is three things at once: input to the generation
 prompt (§6), a browsable admin artifact, and a demo exhibit — "here is every word
-a stage-3 reader is permitted to see, machine-derived."
+a stage-2 reader is permitted to see, machine-derived."
 
     frequency-en.csv (top ~20k, pinned) ∪ child-vocabulary.txt
       └─ ∩ CMUdict ─────────────────────────► candidates
@@ -40,7 +40,7 @@ Two deliberate choices:
 
 **Word-outer, stage-inner.** ``build_lattice`` is ``lru_cache(maxsize=8192)`` but
 there are ~19k candidates. Looping stage-outer would evict every lattice between
-passes and rebuild each word twelve times. Word-outer builds each lattice once
+passes and rebuild each word eleven times. Word-outer builds each lattice once
 while it is hot.
 
 **Staging table, then one transaction.** A reader must never observe a partial
@@ -61,40 +61,24 @@ from pathlib import Path
 from sqlalchemy import text
 
 from storyforge.db import SessionLocal
-from storyforge.decoder import load_lexicon, mastered_ids
+from storyforge.decoder import MAX_STAGE, load_lexicon, mastered_ids
 from storyforge.decoder.lexicon_util import min_syllables
 from storyforge.decoder.search import align
 
 DATA = Path(__file__).resolve().parents[3] / "data"
-MAX_STAGE = 12
 
 # DEVIATIONS 11.11. Every stage at or above this gets the child-vocabulary register
 # filter. It is **1**: the filter applies everywhere, chosen on word quality and not
 # tuned to protect a row count.
 #
-# The knob exists because stage 1 is the one stage where the right answer costs
-# something. Its GPC inventory is nine letters, and there are only **78**
-# child-vocabulary words those nine letters can spell — measured with the frequency
-# list removed from the question entirely, so 78 is a CEILING, not a setting. That
-# is below §5.4's "~150-2,500 words/stage" and below `test_no_stage_is_starved`'s
-# floor, and no arrangement of honest filters returns 150: stage 1's old 157 rows
-# only cleared it because 27 were proper nouns or non-words (`nasa`, `sam`,
-# `tampa`, `im`, `ip`) and 61 more were adult register (`amid`, `admin`, `stat`,
-# `midst`, `impact`, `insist`, `static`, `tactic`).
-#
-# The remedy is the ladder, not the filter: **the user has authorised retiring
-# stage 1**, because stage inventories are cumulative and today's stage 2 already
-# contains stage 1's `s a t p i n m d` plus `g o c k e u r h b f l ck ss ll ff x`.
-# So "new stage 1 = old stage 2" is a larger starting inventory, not a deletion,
-# and it starts at **771** words. Stage 1 is the ONLY stage the filter takes below
-# 150 — every other stage lands between 771 and 4,397 — so renumbering by one is
-# sufficient and the filter does not need rethinking. That renumbering is sequenced
-# separately: it touches stage rows, GPC and sight-word assignments, `MAX_STAGE`,
-# the §5.7 goldens, the vacuity ratchet, §17's demo and live `stage_id` data.
-#
-# Setting this to 2 restores stage 1 to 136 rows and readmits `amid` there. That is
-# the escape hatch if the ladder work is deferred, and it is a regression in word
-# quality at the one stage §7's fallback ladder can serve to any child.
+# The knob dates from the TWELVE-stage ladder, where old stage 1 was the one stage
+# the right answer cost something: its nine-letter inventory could spell only **78**
+# child-vocabulary words, a measured CEILING, against §5.4's "~150-2,500
+# words/stage". The remedy was the ladder, not the filter — the user authorised
+# retiring that stage (docs/DECISION-stage-ladder.md, DEVIATIONS 12.1-12.2), and
+# since the renumber the entry stage is the old stage 2 inventory at **771** words.
+# Every stage now clears the floor, so this knob has no stage left to protect;
+# raising it would only readmit adult register (`amid`) somewhere. It stays 1.
 REGISTER_FILTER_FROM_STAGE = 1
 
 # DEVIATIONS 11.10. Child-vocabulary words that the adult frequency list ranks
@@ -320,7 +304,7 @@ def compute_rows(max_syllables: dict[int, int]) -> list[dict]:
         syllables = min_syllables(prons)
 
         # min_stage: first stage whose mastered set admits a complete alignment.
-        # One lattice per word answers all twelve stages (the lru_cache is why
+        # One lattice per word answers all eleven stages (the lru_cache is why
         # this loop is word-outer).
         first = next(
             (s for s in range(1, MAX_STAGE + 1) if align(word, prons, mastered_ids(s))[0]),
@@ -416,24 +400,13 @@ def main() -> None:
         f"{REGISTER_FILTER_FROM_STAGE} (11.8, 11.11)"
     )
     # §18: a stage with almost no vocabulary starves generation. Say so loudly
-    # rather than letting it surface later as "the stories got boring".
+    # rather than letting it surface later as "the stories got boring". Since the
+    # renumber (DEVIATIONS 12.1-12.2) EVERY stage must clear this: the entry stage
+    # starts at 771 words, so a thin stage is never expected and renumbering again
+    # would not fix one — the filter itself would need rethinking (11.11).
     thin = [s for s, n in counts.items() if n < 150]
     if thin:
         print(f"WARNING: stages {thin} have under 150 words — generation may starve (§18)")
-        if thin == [1]:
-            print(
-                "  Expected, and stage 1 is the ONLY stage below the floor. Its nine-GPC "
-                "inventory can spell 78 child-vocabulary words and that is a ceiling, not "
-                "a setting; the old 157 cleared 150 only because 27 were proper nouns and "
-                "61 were adult register. The remedy is retiring stage 1 (inventories are "
-                "cumulative, so new stage 1 = old stage 2 = 771 words) — see "
-                "docs/DEVIATIONS.md 11.11."
-            )
-        else:
-            print(
-                "  UNEXPECTED: a stage other than 1 is starved. Renumbering the ladder by "
-                "one does NOT fix this — the filter itself needs rethinking (11.11)."
-            )
 
 
 if __name__ == "__main__":

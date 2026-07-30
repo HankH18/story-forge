@@ -14,7 +14,7 @@ C10 is the whole reason this file is worth five lines of SQL.
 
 **Public — no ``require_parent``.** This and ``/api/health`` are the only routes
 in the service that take no principal, which is §9's own division. What they
-return is ``data/seed/*.csv``: twelve stage names and three theme names, all of
+return is ``data/seed/*.csv``: eleven stage names and three theme names, all of
 them committed to the repository. There is no child in either payload (§13), an
 auth requirement would buy nothing, and it would make the theme picker's first
 paint wait on Clerk having loaded.
@@ -144,7 +144,7 @@ async def list_stages(
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> list[StageOut]:
-    """§4's twelve stages in id order — which is curriculum order."""
+    """§4's eleven stages in id order — which is curriculum order."""
     response.headers["cache-control"] = CACHE_CONTROL
     rows = (await session.execute(_STAGES_SQL)).all()
     return [StageOut(id=int(r.id), name=str(r.name), description=str(r.description)) for r in rows]

@@ -166,8 +166,8 @@ def _serve_attempt_budget(stage_id: int) -> int:
     AUDIT-PHASE7 **F4**: three unservable rows at the top rung spent the entire
     budget there, so §7's ladder **never descended** and the child was answered
     **503** while a correct story sat one stage down. Measured: four
-    undecodable-but-answerable `warm` stories planted at stage 12 with stages 1-11
-    full of good ones returned `503 no story at or below stage 12 passes §1's 95%
+    undecodable-but-answerable `warm` stories planted at the top stage with every
+    lower stage full of good ones returned `503 no story at or below the top stage passes §1's 95%
     gate for this reader`. §01 says a child never sees an error and §7 makes the
     warm pool the answer to *every* failure path; a 503 is the worst version of one.
 
@@ -181,7 +181,7 @@ def _serve_attempt_budget(stage_id: int) -> int:
     Derived rather than chosen: §7's four rungs are (stage, theme-match) pairs —
     two theme tiers at each of the at most `stage_id` stages at or below the reader
     — so this is `SERVE_ATTEMPTS` per rung, and it is bounded (72 picks for a
-    stage-12 reader in the worst case, exactly 1 on a healthy pool). A pool that
+    top-stage reader in the worst case, exactly 1 on a healthy pool). A pool that
     exhausts it is systematically broken, which is the case the 503 below is for.
 
     Rejected: filtering `_SERVE_SQL` on `stories.decodability >= :gate`. It would
@@ -364,7 +364,7 @@ class StoryRequest(BaseModel):
     """
 
     kid_id: int | None = Field(default=None, ge=1)
-    stage_id: int | None = Field(default=None, ge=1, le=12)
+    stage_id: int | None = Field(default=None, ge=1, le=11)
     # Kid mode holds slugs (`GET /api/themes`); the admin portal holds ids.
     theme_id_or_slug: int | str
 

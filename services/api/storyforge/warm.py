@@ -4,11 +4,12 @@
 pipeline and marks them `status='warm'`. **Every stage and every theme** — that
 sentence was in this docstring, in `docs/STATE.md` and in §7 for five phases while
 the CLI defaulted to `--stages 1,2,3 --themes dragons` and the Makefile target
-passed no arguments, so `make warm` filled 3 of 12 stages and 1 of 3 themes. §17's
-demo is dragons at stage 3, the one cell that was covered, and the §7 ladder
+passed no arguments, so `make warm` filled a corner of the matrix. §17's
+demo (dragons, now stage 2 under the eleven-stage ladder) was a cell that was
+covered, and the §7 ladder
 answers an empty pair by serving a LOWER stage — correctly, and reporting to
 nobody. So a first deploy shipped nine empty stages and the demo passed
-(AUDIT-PHASE7 F4, DEVIATIONS 8.40-8.48). The defaults are now `1..12` / `all`, and
+(AUDIT-PHASE7 F4, DEVIATIONS 8.40-8.48). The defaults are now `1..11` / `all`, and
 because a correct default is still only a default there is a gate:
 
     python -m storyforge.warm --check-coverage   # non-zero while any pair is short
@@ -83,7 +84,7 @@ from sqlalchemy import select, text
 from storyforge import obs
 from storyforge.api.stories import ANSWERABLE_SQL, SERVABLE_STATUSES
 from storyforge.db import SessionLocal
-from storyforge.decoder import mastered_ids
+from storyforge.decoder import MAX_STAGE, MIN_STAGE, mastered_ids
 from storyforge.llm.client import fast_model
 from storyforge.llm.moderate import (
     UNGRAMMATICAL_PREFIX,
@@ -108,7 +109,7 @@ from storyforge.llm.scene_tags import SceneTagResult, select_asset, tag_segments
 # §8's evidence rule, imported rather than restated: `tap_word` is the only
 # question type that ever moved `gpc_stats`, so it is the only one whose row is
 # irreplaceable once a child has answered it.
-from storyforge.mastery import MASTERY_QTYPES, MAX_STAGE, MIN_STAGE
+from storyforge.mastery import MASTERY_QTYPES
 from storyforge.models import Asset, Question, Story, StorySegment
 from storyforge.pipeline import PipelineResult, load_vocabulary, run_pipeline
 
@@ -120,17 +121,17 @@ TARGET_PER_PAIR = 3
 #:
 #: These were `"1,2,3"` and `"dragons"` for five phases (DEVIATIONS 8.40). The
 #: `warm` Makefile target and `docs/DEPLOY.md`'s first-deploy step both pass no
-#: arguments, so a fresh deployment got 9 stories across 3 of 12 stages and 1 of 3
+#: arguments, so a fresh deployment got 9 stories across 3 stages and 1 of 3
 #: themes — while this module's own docstring, `docs/STATE.md` and §7 all promised
-#: the full matrix. §17's demo is dragons at stage 3, the one cell that was
+#: the full matrix. §17's demo is dragons at one low stage, a cell that was
 #: covered, and the §7 ladder degrades to a lower stage silently and correctly, so
 #: the demo passed and nine empty stages were invisible.
-DEFAULT_STAGES = "1..12"
+DEFAULT_STAGES = "1..11"
 DEFAULT_THEMES = "all"
 
 
 def parse_stages(spec: str) -> list[int]:
-    """`"1..12"`, `"all"`, `"3,6"`, `"1..4,7,9..12"` -> a sorted, deduplicated list.
+    """`"1..11"`, `"all"`, `"3,6"`, `"1..4,7,9..11"` -> a sorted, deduplicated list.
 
     A second implementation of `eval.parse_stages` on purpose, not an oversight
     (DEVIATIONS 8.46): `eval.py` imports `warm._split_segments`, so importing the
@@ -801,6 +802,12 @@ async def enrich(
             # so "does the mastery loop close at this stage?" is answerable from
             # the database instead of by re-running the node.
             meta["tap_word_target"] = qset.tap_word_target
+            # DEVIATIONS 11.67. The ADDITIONAL phonics questions, which exist so
+            # §8's ≥10-observation floor is reachable inside §8's own 5 stories.
+            # Kept out of `questions_derived` on purpose — see `QuestionSet` —
+            # because that field is read as a set and would raise 8.58's outage
+            # alarm on any story whose `mcq2` was merely dropped.
+            meta["extra_tap_words"] = qset.extra_tap_words
 
         meta["cost_usd"] = round(cost, 6)
         meta["trace_id"] = enriching.trace_id
@@ -1923,7 +1930,7 @@ def main() -> None:
     p.add_argument(
         "--stages",
         default=DEFAULT_STAGES,
-        help=f"'1..12', 'all', '3,6', '1..4,9..12' (default: {DEFAULT_STAGES} — §7's full matrix)",
+        help=f"'1..11', 'all', '3,6', '1..4,9..11' (default: {DEFAULT_STAGES} — §7's full matrix)",
     )
     p.add_argument(
         "--themes",

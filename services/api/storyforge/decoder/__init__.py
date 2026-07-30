@@ -17,8 +17,21 @@ from storyforge.decoder.resources import load_gpcs, load_lexicon
 from storyforge.decoder.types import GPC, TextReport, WordReport, WordVerdict
 from storyforge.decoder.validate import mastered_ids, validate_text, validate_word
 
+#: The scope & sequence ladder (§4, Appendix A — renumbered to ELEVEN stages,
+#: docs/DECISION-stage-ladder.md / DEVIATIONS 12.1-12.4: Appendix A's stages 1
+#: and 2 merged into stage 1). The canonical home of the stage count; it lives
+#: with the decoder because the decoder owns stage semantics (`mastered_ids`).
+#: The top stage is review — it introduces no GPCs, only lifts the syllable
+#: cap — so `MAX_STAGE == max(g.stage for g in load_gpcs()) + 1`, and
+#: `tests/decoder/test_inventory.py` pins that relationship so the constant
+#: and the inventory cannot drift apart.
+MIN_STAGE = 1
+MAX_STAGE = 11
+
 __all__ = [
     "GPC",
+    "MAX_STAGE",
+    "MIN_STAGE",
     "TextReport",
     "WordReport",
     "WordVerdict",

@@ -117,7 +117,7 @@ export async function readDetail(res: Response): Promise<string> {
     if (typeof detail === 'string') return detail
     if (Array.isArray(detail)) {
       // Pydantic: `[{loc: [...], msg: "...", type: "..."}]`. Rendered as
-      // `body.stage_id: input should be less than or equal to 12` — the field
+      // `body.stage_id: input should be less than or equal to 11` — the field
       // name is the useful half and JSON.stringify buries it.
       return detail
         .map((e) => {

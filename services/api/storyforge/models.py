@@ -259,9 +259,17 @@ class Asset(Base):
 class Question(Base):
     """Comprehension question (§8, §11).
 
-    Exactly two types (§11.3): `tap_word` ("tap the word that says /sh/ip") and
-    `mcq2` (two-choice story question). Both render as decodable text, so the
-    prompt and options are validated like any other child-facing string.
+    Exactly two TYPES (§11.3): `tap_word` ("tap the word that says /sh/ip") and
+    `mcq2` (two-choice story question) — not exactly two rows. A story may carry
+    two `tap_word` rows, because §8's ≥10-observation floor is unreachable inside
+    §8's own five stories on one phonics question (DEVIATIONS 11.67). `idx`
+    orders them; nothing here is unique per (story, qtype).
+
+    Every OPTION of either type is validated decodable, as is the whole of an
+    `mcq2` prompt — the child must read it to answer. The `tap_word` prompt is
+    the one child-facing string that is not: it is a fixed human-authored
+    instruction, spoken aloud on mount, and §11.3 attaches "validated decodable"
+    to options alone (DEVIATIONS 11.60).
     """
 
     __tablename__ = "questions"

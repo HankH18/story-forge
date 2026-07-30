@@ -1,15 +1,17 @@
-# Scope & sequence (§4, Appendix A). Story length is stage-scaled per §6.
-# max_syllables feeds the §5.4 allowlist filter.
+# Scope & sequence (§4, Appendix A — RENUMBERED to eleven stages, see
+# docs/DECISION-stage-ladder.md and docs/DEVIATIONS.md 12.1-12.3: Appendix A's
+# stages 1 and 2 merged into stage 1, every later stage one lower than the spec
+# prints it). Story length is stage-scaled per §6. max_syllables feeds the §5.4
+# allowlist filter.
 id,name,description,target_len_min,target_len_max,max_syllables
-1,CVC,"Single letters s a t p i n m d c — simple consonant-vowel-consonant words",30,60,2
-2,"Doubles & x","Remaining single letters, doubled consonants (ck ss ll ff), and x",30,60,2
-3,Digraphs,"Two letters one sound: sh ch th ng qu, plus w x y z v j",30,60,2
-4,Endings,"Consonant clusters and the -s -es -ed -ing endings",30,60,2
-5,"Silent e","Split digraphs a_e i_e o_e u_e e_e, and silent final e",60,120,2
-6,"Vowel teams","ai ay ee ea oa ow igh, plus er and y as a vowel",60,120,2
-7,"R-controlled","ar or ir ur, and the wa pattern",60,120,2
-8,"Diphthongs","oi oy ou ow au aw oo",60,120,2
-9,"Soft & silent","Soft c and g, plus kn wr mb ph",120,200,3
-10,"Two syllables","The -le ending; schwa relaxation becomes explicit curriculum",120,200,3
-11,"Suffixes","tion ture sion",120,200,3
-12,Review,"Cumulative review; syllable cap lifted",120,200,9
+1,"Letters & doubles","All the single letters, doubled consonants (ck ss ll ff), and x — simple short-vowel words",30,60,2
+2,Digraphs,"Two letters one sound: sh ch th ng qu, plus w x y z v j",30,60,2
+3,Endings,"Consonant clusters and the -s -es -ed -ing endings",30,60,2
+4,"Silent e","Split digraphs a_e i_e o_e u_e e_e, and silent final e",60,120,2
+5,"Vowel teams","ai ay ee ea oa ow igh, plus er and y as a vowel",60,120,2
+6,"R-controlled","ar or ir ur, and the wa pattern",60,120,2
+7,Diphthongs,"oi oy ou ow au aw oo",60,120,2
+8,"Soft & silent","Soft c and g, plus kn wr mb ph",120,200,3
+9,"Two syllables","The -le ending; schwa relaxation becomes explicit curriculum",120,200,3
+10,Suffixes,"tion ture sion",120,200,3
+11,Review,"Cumulative review; syllable cap lifted",120,200,9

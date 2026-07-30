@@ -180,15 +180,15 @@ def _item(
 
 
 def test_parse_stages_accepts_the_range_form_the_spec_documents():
-    """§14's own command line is `--stages 1..12`, so that has to parse."""
-    assert parse_stages("1..12") == list(range(1, 13))
+    """§14's own command line is `--stages 1..11`, so that has to parse."""
+    assert parse_stages("1..11") == list(range(1, 12))
     assert parse_stages("3,6") == [3, 6]
-    assert parse_stages("1..4,9..12,6") == [1, 2, 3, 4, 6, 9, 10, 11, 12]
+    assert parse_stages("1..4,9..11,6") == [1, 2, 3, 4, 6, 9, 10, 11]
     assert parse_stages(" 5 ") == [5]
 
 
 def test_parse_stages_refuses_input_it_cannot_honour():
-    """A run over 9 stages reported as a run over 12 is the failure mode."""
+    """A run over 9 stages reported as a run over 11 is the failure mode."""
     for bad in ("", "abc", "5..1", "1..x"):
         with pytest.raises(SystemExit):
             parse_stages(bad)
@@ -480,7 +480,7 @@ def test_an_incomplete_matrix_cannot_report_as_a_pass():
     """A budget stop or a crash leaves fewer items than cells. Reporting that as
     a pass is exactly the false green DEVIATIONS 0.5 forbids."""
     items = [_item(_result(moderation=APPROVED), "accepted", index=i) for i in range(3)]
-    agg = aggregate(items, on=ON, cells_planned=180)
+    agg = aggregate(items, on=ON, cells_planned=165)
     completed = next(v for v in criteria_verdict(agg) if "matrix" in v[0])
     assert completed[1] is False
 
@@ -502,7 +502,7 @@ def test_a_cell_that_never_produced_text_cannot_report_as_a_pass():
 
 
 def test_an_empty_run_is_never_a_pass():
-    agg = aggregate([], on=ON, cells_planned=180)
+    agg = aggregate([], on=ON, cells_planned=165)
     assert not all(good for _, good, _ in criteria_verdict(agg))
 
 
@@ -612,7 +612,7 @@ def test_the_same_tokens_cost_more_after_the_intro_rate_expires():
 
 
 def test_the_projection_grows_with_the_matrix_and_never_undercuts_the_worst_case():
-    v = [_vocab(1, lo=30, hi=60), _vocab(12, lo=120, hi=200)]
+    v = [_vocab(1, lo=30, hi=60), _vocab(11, lo=120, hi=200)]
     small = project_cost(v[:1], 5, ON)
     big = project_cost(v, 5, ON)
     assert big["no_rewrites_usd"] > small["no_rewrites_usd"]
@@ -1008,7 +1008,7 @@ def _run_meta(agg: dict) -> dict:
         "finished_at": "2026-07-29T00:10:00+00:00",
         "status": "completed",
         "config": {
-            "stages_spec": "1..12",
+            "stages_spec": "1..11",
             "themes_spec": "all",
             "stages": [1, 2, 3],
             "themes": ["dragons"],

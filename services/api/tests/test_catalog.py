@@ -50,9 +50,9 @@ async def test_themes_returns_every_seeded_theme_in_id_order(client):
         )
 
 
-async def test_stages_returns_all_twelve_stages_in_curriculum_order(client):
+async def test_stages_returns_all_eleven_stages_in_curriculum_order(client):
     body = (await client.get("/api/stages")).json()
-    assert [s["id"] for s in body] == list(range(1, 13))
+    assert [s["id"] for s in body] == list(range(1, 12))
     assert all(s["name"] and s["description"] for s in body)
     # Generation parameters are not a public payload (DEVIATIONS 8.60).
     assert set(body[0]) == {"id", "name", "description"}

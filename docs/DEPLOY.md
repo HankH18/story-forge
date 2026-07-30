@@ -137,7 +137,7 @@ python -m storyforge.warm --check-coverage   # MANDATORY. Non-zero = partial poo
   without a warm pool, `POST /api/stories/request` returns **503** telling you to
   run it (DEVIATIONS 4.11). Run it in a `tmux`/`screen` or expect the console to
   disconnect.
-- **It generates the full §7 matrix: 12 stages x every theme x 3 stories = 108 on
+- **It generates the full §7 matrix: 11 stages x every theme x 3 stories = 99 on
   an empty database.** `--dry-run` prints the plan and extrapolates the spend from
   whatever the pool already holds before you commit to it; on the observed
   ~$0.02–0.04 per story a first fill is single-digit dollars. Both figures are
@@ -159,8 +159,8 @@ it is working.
 This is not hypothetical. For five phases `make warm` defaulted to
 `--stages 1,2,3 --themes dragons`, this page told the first-deploy operator to run
 exactly that, and `docs/STATE.md` claimed it filled ">=3 per (stage,theme)". A
-fresh deploy got **9 stories across 3 of 12 stages and 1 of 3 themes** — and §17's
-demo item 3 is *dragons at stage 3*, the one cell that was covered, so the demo
+fresh deploy got **9 stories across 3 stages and 1 of 3 themes** — and §17's
+demo item 3 is *dragons at a low stage*, a cell that was covered, so the demo
 passed on a deployment where nine stages held nothing (AUDIT-PHASE7 F4, DEVIATIONS
 8.40–8.48).
 

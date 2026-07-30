@@ -353,7 +353,7 @@ async def test_no_innocent_word_was_collateral(session):
 
 
 async def test_no_proper_noun_reaches_the_allowlist_at_any_stage(session):
-    """11.9. `lebron` and `nixon` were in the live table at stages 9-12."""
+    """11.9. `lebron` and `nixon` were in the live table at the top stages."""
     rows = await session.execute(
         text("SELECT DISTINCT stage_id, word FROM allowed_words WHERE word = ANY(:w)"),
         {

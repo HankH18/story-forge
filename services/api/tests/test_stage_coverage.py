@@ -3,9 +3,10 @@
 §8 promotes on accuracy over the GPCs introduced AT the child's stage, and the
 only thing that moves those counters is a tap-a-word question — which can only
 ask about a grapheme the STORY already contains. 5.16 fixed the question node's
-*choice*; nothing had yet fixed what it was choosing from. Stage 4 teaches only
-word-final `-s -es -ed -ing`, so a story with no suffixed word makes promotion
-unreachable however well the child reads.
+*choice*; nothing had yet fixed what it was choosing from. Stage 3 — the
+suffix stage since the eleven-stage renumber (DEVIATIONS 12.1-12.5) — teaches
+only word-final `-s -es -ed -ing`, so a story with no suffixed word makes
+promotion unreachable however well the child reads.
 
 These tests pin the generation-side half: the prompt names the allowlist words
 that carry the stage's new sounds, it names only words the *grader* would credit,
@@ -24,7 +25,7 @@ import pytest
 from sqlalchemy import text
 
 from storyforge.db import SessionLocal
-from storyforge.decoder import load_gpcs
+from storyforge.decoder import MAX_STAGE, load_gpcs
 from storyforge.llm.generate import (
     PRACTICE_HEADER,
     PRACTICE_WORD_LIMIT,
@@ -35,19 +36,19 @@ from storyforge.llm.generate import (
     practice_words,
 )
 from storyforge.llm.questions import sound_targets
-from storyforge.mastery import MAX_STAGE, word_gpc_ids
+from storyforge.mastery import word_gpc_ids
 from storyforge.precompute import load_blocklist
 
-# A stage-4-shaped allowlist: mostly stages 1-3, with the handful of suffixed
-# words that stage 4 is the first to make readable. Frequency-ordered, as the
-# `allowed_words` table delivers it.
+# A suffix-stage-shaped allowlist: mostly stages 1-2, with the handful of
+# suffixed words that stage 3 is the first to make readable. Frequency-ordered,
+# as the `allowed_words` table delivers it.
 STAGE4_ALLOWED = [
     "and", "in", "it", "at", "can", "did", "man", "sat", "cat", "dad",
     "sit", "camp", "hat", "top", "run", "big", "red", "let", "must", "back",
     "get", "him", "not", "but", "for", "up", "had", "van", "job", "that",
     "with", "this", "will", "just", "them", "then", "much", "long", "thing", "went",
-    # stage 4 lives here — plus two sight words and one blocklisted word that
-    # the aligner is perfectly happy to call stage 4.
+    # the suffix stage lives here — plus two sight words and one blocklisted
+    # word that the aligner is perfectly happy to call stage 3.
     "is", "was", "dogs", "kids", "hands", "runs", "jumped", "asked", "helped",
     "killed", "things",
 ]
@@ -58,12 +59,12 @@ STAGE4_SIGHT = ["the", "a", "i", "is", "to", "no", "go", "he", "she", "we", "me"
 # unavoidable — the section has nothing to add.
 STAGE1_ALLOWED = ["and", "in", "it", "at", "can", "did", "man", "sat", "cat", "dad"]
 
-# Takes the hint: "kids" and "jumped" both need a stage-4 suffix GPC.
+# Takes the hint: "kids" and "jumped" both need a stage-3 suffix GPC.
 STAGE4_STORY_WITH = (
     "The kids ran up a hill. A big dog sat on a mat. "
     "The kids jumped and did not stop. The dog ran back."
 )
-# Same shape, same length, no stage-4 word anywhere.
+# Same shape, same length, no stage-3 word anywhere.
 STAGE4_STORY_WITHOUT = (
     "The man ran up a hill. A big dog sat on a mat. "
     "The man did not stop. The dog ran back."
@@ -94,7 +95,7 @@ def test_every_offered_word_would_earn_evidence():
     words = offered()
     assert words
     for word in words:
-        assert stage_gpcs(4) & set(word_gpc_ids(word, 4)), word
+        assert stage_gpcs(3) & set(word_gpc_ids(word, 3)), word
 
 
 def test_offers_the_suffixed_words_the_stage_actually_teaches():
@@ -108,7 +109,7 @@ def test_nothing_is_invented():
 
 
 def test_sight_words_are_never_offered():
-    """`is` and `was` need `s|Z` and so look like stage-4 evidence to the
+    """`is` and `was` need `s|Z` and so look like stage-3 evidence to the
     aligner, but `sound_targets` refuses sight words as tap-a-word options — the
     child recognised the shape, they did not sound it out. A story that
     satisfied the ask with `is` would satisfy nothing."""
@@ -117,9 +118,9 @@ def test_sight_words_are_never_offered():
 
 def test_blocklisted_words_are_never_offered():
     """A shortlist the writer is told to PREFER must clear §13's deterministic
-    layer. `killed` is stage-4 by suffix and blocklisted; both are true."""
+    layer. `killed` is stage-3 by suffix and blocklisted; both are true."""
     assert "killed" in load_blocklist()
-    assert stage_gpcs(4) & set(word_gpc_ids("killed", 4))
+    assert stage_gpcs(3) & set(word_gpc_ids("killed", 3))
     assert "killed" not in offered()
 
 
@@ -169,7 +170,7 @@ def test_the_section_is_appended_not_interleaved():
     to stay byte-identical — otherwise every stage's cache entry is orphaned."""
     block = build_vocabulary_block("Endings", STAGE4_ALLOWED, STAGE4_SIGHT)
     section = build_practice_block(STAGE4_ALLOWED, STAGE4_SIGHT)
-    assert section, "the stage-4 block must carry the practice section"
+    assert section, "the suffix-stage block must carry the practice section"
     assert block.endswith(section)
 
     head = block[: -len(section)]
@@ -208,7 +209,7 @@ def test_the_ask_is_a_preference():
 
 # --- reading the stage off the allowlist -------------------------------------
 def test_the_stage_is_read_off_the_allowlist():
-    assert allowlist_stage(tuple(STAGE4_ALLOWED)) == 4
+    assert allowlist_stage(tuple(STAGE4_ALLOWED)) == 3
     assert allowlist_stage(tuple(STAGE1_ALLOWED)) == 1
     assert allowlist_stage(()) is None
 
@@ -217,7 +218,7 @@ def test_the_stage_is_read_off_the_allowlist():
 def _scope(story: str) -> str:
     targets = sound_targets(
         story_text=story,
-        stage_id=4,
+        stage_id=3,
         allowed_words=STAGE4_ALLOWED,
         sight_words=STAGE4_SIGHT,
     )
@@ -238,8 +239,9 @@ def test_the_same_story_without_a_stage_word_falls_back():
 # --- against the real precomputed allowlist ----------------------------------
 async def test_the_real_allowlists_are_recognised(session):
     """Offline fixtures prove the logic; this proves it against the artifact the
-    prompt is actually built from. Stage 12 introduces no GPCs at all, so its
-    allowlist genuinely looks like stage 11's — documented, not silently wrong."""
+    prompt is actually built from. The top stage (11, review) introduces no
+    GPCs at all, so its allowlist genuinely looks like stage 10's — documented,
+    not silently wrong."""
     for stage in range(1, MAX_STAGE + 1):
         rows = [
             r[0]
@@ -252,28 +254,28 @@ async def test_the_real_allowlists_are_recognised(session):
             )
         ]
         assert rows, f"stage {stage} has no allowlist — run `make precompute`"
-        expected = 11 if stage == MAX_STAGE else stage
+        expected = MAX_STAGE - 1 if stage == MAX_STAGE else stage
         assert allowlist_stage(tuple(rows)) == expected, stage
 
 
-async def test_stage_four_really_has_words_to_offer(session):
+async def test_the_suffix_stage_really_has_words_to_offer(session):
     """5.17's premise, measured rather than assumed: the top-400 window for the
     one stage that could not close the loop does contain suffixed words."""
     rows = [
         r[0]
         for r in await session.execute(
             text(
-                "SELECT word FROM allowed_words WHERE stage_id = 4 ORDER BY freq_rank LIMIT 400"
+                "SELECT word FROM allowed_words WHERE stage_id = 3 ORDER BY freq_rank LIMIT 400"
             )
         )
     ]
     sight = {
         r[0]
         for r in await session.execute(
-            text("SELECT word FROM sight_words WHERE stage_id <= 4")
+            text("SELECT word FROM sight_words WHERE stage_id <= 3")
         )
     }
     words = practice_words(tuple(rows), frozenset(sight))
     assert len(words) == PRACTICE_WORD_LIMIT
     for word in words:
-        assert stage_gpcs(4) & set(word_gpc_ids(word, 4)), word
+        assert stage_gpcs(3) & set(word_gpc_ids(word, 3)), word

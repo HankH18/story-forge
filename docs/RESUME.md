@@ -56,7 +56,7 @@ route back to the adult. Decide and justify it.
 `POST /api/stories/request` takes `stage_id` from the body with no `kid_id` and
 no ownership check. `{"stage_id": 12}` returns a stage-5 story measuring **13.0%
 decodable** for a stage-1 reader, reachable with no tooling via
-`/read/1648?stage=12`. `storyforge/api/stories.py:40-47` argues ownership binds
+`/read/1648?stage=12 (pre-renumber example)`. `storyforge/api/stories.py:40-47` argues ownership binds
 later at `POST /api/readings`; that endpoint does not check the stage either — a
 stage-1 kid + a stage-5 story files a reading with `201`.
 
@@ -144,7 +144,7 @@ verdict at the edit site.
 ## JOB D — Phase 7 remainder
 
 ### `make eval` + the §14 report — DONE. Read `docs/EVAL.md`.
-Full 12 stages x 3 themes x 5 stories against the live model. **169 of 169
+Full-matrix (then 12 stages) x 3 themes x 5 stories against the live model. **169 of 169
 stories that the model produced cleared the 95% gate; 0 finished below it.** p95
 rewrite depth 1 (§1 budget 2), 0 OOV, 0 over the story-word cap. Cost **$2.7958**
 at 2026-07-29 pricing (Sonnet 5 intro rate), $0.0178 per accepted story excluding

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import pytest
 
+from storyforge.decoder import MAX_STAGE as LADDER_MAX_STAGE
 from storyforge.mastery import (
     ACCURACY_THRESHOLD,
     MAX_STAGE,
@@ -193,9 +194,9 @@ def test_gpcs_come_from_the_decoders_alignment():
     """§8's evidence is the correspondences the aligner actually used — never a
     guess from the spelling."""
     assert word_gpc_ids("cat", 1) == ["c|K", "a|AE", "t|T"]
-    assert word_gpc_ids("ship", 3) == ["sh|SH", "i|IH", "p|P"]
+    assert word_gpc_ids("ship", 2) == ["sh|SH", "i|IH", "p|P"]
     # A split digraph is two edges over three letters (DEVIATIONS 1.2).
-    assert word_gpc_ids("gave", 5) == ["g|G", "a_e|EY", "v|V"]
+    assert word_gpc_ids("gave", 4) == ["g|G", "a_e|EY", "v|V"]
 
 
 def test_a_repeated_gpc_counts_once_per_instance():
@@ -204,25 +205,28 @@ def test_a_repeated_gpc_counts_once_per_instance():
 
 
 def test_a_word_not_decodable_at_the_storys_stage_yields_no_evidence():
-    """"ran" needs `r|R`, which is taught at stage 2. A stage-1 story cannot be
-    evidence about a correspondence its reader has not met."""
-    assert word_gpc_ids("ran", 1) == []
-    assert word_gpc_ids("ran", 2) == ["r|R", "a|AE", "n|N"]
+    """"ship" needs `sh|SH`, taught at stage 2 of the eleven-stage ladder. A
+    stage-1 story cannot be evidence about a correspondence its reader has not
+    met. (The example was "ran"@1 until the renumber merged `r|R` into stage 1
+    — the CONTRACT is unchanged, the word had to move to stay on the boundary;
+    justify-test-edit verdict in DEVIATIONS 12.x.)"""
+    assert word_gpc_ids("ship", 1) == []
+    assert word_gpc_ids("ship", 2) == ["sh|SH", "i|IH", "p|P"]
     # A word the inventory cannot spell at any stage (DEVIATIONS 1.6), and a
     # word CMUdict has never heard of, are both simply no evidence.
-    assert word_gpc_ids("beautiful", 12) == []
-    assert word_gpc_ids("zzzz", 12) == []
+    assert word_gpc_ids("beautiful", 11) == []
+    assert word_gpc_ids("zzzz", 11) == []
 
 
 def test_a_word_that_is_a_sight_word_but_also_decodable_still_counts():
     """`word_gpc_ids` asks the aligner, not the sight list, and that is
-    deliberate. "the" is a stage-1 sight word, but by stage 3 `th|DH` and `e|EH`
+    deliberate. "the" is a stage-1 sight word, but by stage 2 `th|DH` and `e|EH`
     are both taught and the aligner can genuinely sound it out — at which point
     a correct tap IS evidence. This never arises for a real tap_word option
     (llm/questions.sound_targets excludes sight words from the option pool), so
     the choice only shows up if a hand-written question reaches the grader."""
     assert word_gpc_ids("the", 1) == []
-    assert word_gpc_ids("the", 12) == ["th|DH", "e|EH"]
+    assert word_gpc_ids("the", 11) == ["th|DH", "e|EH"]
 
 
 def test_single_word_rejects_anything_that_is_not_one_word():
@@ -290,7 +294,12 @@ def _decide(stories=STORIES_REQUIRED_AT_STAGE, seen=100, correct=90, stage=2):
 def test_the_thresholds_are_the_ones_section_8_specifies():
     assert STORIES_REQUIRED_AT_STAGE == 5
     assert ACCURACY_THRESHOLD == 0.80
-    assert MAX_STAGE == 12
+    # The ladder pin moved to the decoder when the constant got one canonical
+    # home (DEVIATIONS 12.4): tests/decoder/test_inventory.py asserts the value
+    # (11); THIS asserts mastery agrees with it. RED means `mastery.py`'s
+    # `MAX_STAGE` has not been updated to match — the exact one-line change the
+    # renumber hands to that module's owner.
+    assert MAX_STAGE == LADDER_MAX_STAGE
     # Published as data so the dashboard can print the rule (§8).
     assert THRESHOLDS.stories_required == STORIES_REQUIRED_AT_STAGE
     assert THRESHOLDS.accuracy_threshold == ACCURACY_THRESHOLD
@@ -343,7 +352,8 @@ def test_no_evidence_at_all_is_not_an_accuracy_of_zero():
 
 
 def test_the_last_stage_never_promotes():
-    """There is no stage 13 in Appendix A's scope & sequence."""
+    """There is no stage above the top of the scope & sequence (11 since the
+    renumber, DEVIATIONS 12.1-12.4)."""
     decision = _decide(stage=MAX_STAGE, stories=99, seen=999, correct=999)
     assert decision.promote is False
     assert decision.to_stage is None

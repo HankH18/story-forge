@@ -33,11 +33,11 @@ export const VALIDATE_DEBOUNCE_MS = 300
  * without it the same sentence at stage 3 returns 0.25 decodability, zero story
  * words and `dragon` as DECODABLE via §5.2.6's schwa relaxation — `dragon`
  * genuinely is decodable at stage 3. The repo's locked fixture
- * (`tests/decoder/golden.yaml::demo-sentence-stage-3`) is 0.0%, three violations
+ * (`tests/decoder/golden.yaml::demo-sentence-stage-2`) is 0.0%, three violations
  * and one story word, and the story word is how it gets there (DEVIATIONS 9.24).
  */
 export const DEMO_TEXT = 'The knight sees a beautiful dragon'
-export const DEMO_STAGE_ID = 3
+export const DEMO_STAGE_ID = 2
 export const DEMO_STORY_WORDS = 'dragon'
 
 // --- the report, as the API returns it ---------------------------------------

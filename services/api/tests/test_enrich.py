@@ -866,7 +866,16 @@ async def test_backfill_re_derives_a_stale_tap_word_prompt_in_place(session, sto
         # Idempotent: the second run changes nothing.
         again, skipped = await warm.refresh_tap_word_prompts(s, only=[story.id])
     assert len(rows) == 1
-    assert rows[0]["prompt"] == "Tap it: sat.", "the stale frame survived the ladder rebuild"
+    # The expected literal is the CURRENT ladder's output for this cue, and it
+    # moved because DEVIATIONS 11.60/11.62 deliberately replaced the ladder: the
+    # instruction is no longer gated by the child's own inventory, so it is one
+    # spelled-out sentence rather than six degrading rungs. This test's own
+    # proposition is untouched — and it is what PROVED the migration works, by
+    # re-deriving this row in place with no API call. `Tap: sat.` (the pre-11.60
+    # floor, and the stale value inserted above) must not survive.
+    assert rows[0]["prompt"] == "Tap the word that starts with the same sound as sat.", (
+        "the stale frame survived the ladder rebuild"
+    )
     assert rows[0]["payload"]["options"] == ["cat", "sam", "sit"], "the row was replaced"
     assert (again, skipped) == (0, [])
 

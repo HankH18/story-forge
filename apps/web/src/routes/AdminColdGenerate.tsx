@@ -51,7 +51,7 @@ import StatePill, { PillArrow, toneFor, type PillTone } from '../ui/StatePill'
 const EXPECTED_SECONDS = '25–60s'
 
 export default function AdminColdGenerate() {
-  const [stageId, setStageId] = useState(3)
+  const [stageId, setStageId] = useState(2)
   const [theme, setTheme] = useState('dragons')
   const [moderate, setModerate] = useState(true)
 

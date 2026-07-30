@@ -9,7 +9,13 @@ import sys
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from storyforge.decoder import load_lexicon, mastered_ids, validate_text, validate_word
+from storyforge.decoder import (
+    MAX_STAGE,
+    load_lexicon,
+    mastered_ids,
+    validate_text,
+    validate_word,
+)
 from storyforge.decoder.types import WordVerdict
 
 WORDS = sorted(w for w in load_lexicon() if w.isalpha() and 2 <= len(w) <= 9)
@@ -18,7 +24,7 @@ SLOW = settings(max_examples=150, deadline=None, suppress_health_check=[HealthCh
 
 def _min_stage(word: str) -> int | None:
     """Lowest stage at which ``word`` is decodable, or None."""
-    for stage in range(1, 13):
+    for stage in range(1, MAX_STAGE + 1):
         if validate_word(word, mastered_ids(stage)).verdict is WordVerdict.DECODABLE:
             return stage
     return None
@@ -41,7 +47,7 @@ def test_min_stage_is_a_genuine_boundary(word):
 
 
 # --- (b) --------------------------------------------------------------------
-@given(st.sampled_from(WORDS), st.integers(min_value=1, max_value=12))
+@given(st.sampled_from(WORDS), st.integers(min_value=1, max_value=MAX_STAGE))
 @SLOW
 def test_validator_is_deterministic(word, stage):
     mastered = mastered_ids(stage)
@@ -70,7 +76,7 @@ def test_deterministic_across_hash_seeds():
 
 
 # --- (c) --------------------------------------------------------------------
-@given(st.sampled_from(WORDS), st.integers(min_value=1, max_value=11))
+@given(st.sampled_from(WORDS), st.integers(min_value=1, max_value=MAX_STAGE - 1))
 @SLOW
 def test_decodability_is_monotonic_in_stage(word, stage):
     """Only holds because stages and sight lists are cumulative — see
@@ -83,7 +89,7 @@ def test_decodability_is_monotonic_in_stage(word, stage):
 @SLOW
 def test_text_decodability_never_decreases(text):
     lo = validate_text(text, mastered_ids(3)).decodability
-    hi = validate_text(text, mastered_ids(12)).decodability
+    hi = validate_text(text, mastered_ids(MAX_STAGE)).decodability
     assert hi >= lo - 1e-9
 
 

@@ -28,7 +28,7 @@ import random
 
 import pytest
 
-from storyforge.decoder import load_lexicon, mastered_ids, validate_word
+from storyforge.decoder import MAX_STAGE, load_lexicon, mastered_ids, validate_word
 from storyforge.decoder.types import WordVerdict
 
 # Words whose spelling-to-sound mapping is genuinely beyond a K-5 decodable
@@ -63,7 +63,7 @@ def test_stays_undecodable_at_every_stage(word):
     point here is narrower: the *aligner* must never claim to have sounded them
     out.
     """
-    for stage in range(1, 13):
+    for stage in range(1, MAX_STAGE + 1):
         verdict = validate_word(word, mastered_ids(stage)).verdict
         assert verdict is not WordVerdict.DECODABLE, (
             f"{word!r} became decodable at stage {stage}. It requires "
@@ -73,11 +73,13 @@ def test_stays_undecodable_at_every_stage(word):
 
 
 # Words that were unspellable before the doubling / silent-e / `wa` rules landed.
-# Locked so the fix cannot silently regress.
+# Locked so the fix cannot silently regress. Stages follow the eleven-stage
+# ladder (DEVIATIONS 12.6); each boundary below is re-proved every run, because
+# the test also asserts NOT-decodable one stage earlier.
 MUST_BE_DECODABLE = {
-    "happy": 6, "funny": 6, "sunny": 6, "bunny": 6, "puppy": 6,
-    "water": 7, "house": 8, "mouse": 8, "little": 10,
-    "rabbit": 2, "kitten": 2, "carrot": 2, "egg": 2, "have": 5,
+    "happy": 5, "funny": 5, "sunny": 5, "bunny": 5, "puppy": 5,
+    "water": 6, "house": 7, "mouse": 7, "little": 9,
+    "rabbit": 1, "kitten": 1, "carrot": 1, "egg": 1, "have": 4,
 }
 
 
@@ -123,7 +125,11 @@ def test_gate_has_not_dissolved():
     words = sorted(w for w in lexicon if w.isalpha() and 2 <= len(w) <= 9)
     sample = random.Random(VACUITY_SEED).sample(words, VACUITY_SAMPLE_SIZE)
 
-    top = mastered_ids(12)
+    # The TOP stage — the whole cumulative inventory. The ladder renumber
+    # (DEVIATIONS 12.6) moved the top label from 12 to 11 without moving the
+    # set: the top stage's mastered set is the full 93-GPC inventory either
+    # way, so the measured ratio did not move (re-measured, not assumed).
+    top = mastered_ids(MAX_STAGE)
     decodable = sum(
         1 for w in sample if validate_word(w, top).verdict is WordVerdict.DECODABLE
     )
