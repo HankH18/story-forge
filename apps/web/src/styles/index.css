@@ -83,6 +83,61 @@
   text-decoration: line-through;
 }
 
+/* Style guide §09: the SAME locked mapping, rendered for the admin playground.
+
+   §02 colours the WORD (the `.verdict-*` block above, which is what `/` renders).
+   §09's playground fills the BACKGROUND in the verdict tint and leaves the word
+   in ink-900 — 13.4:1 on paper — because a 26px reading line an adult is scanning
+   for reds is a different job from a six-word artifact on a landing page. Both
+   renderings are in the style guide; this is the second one, not a replacement
+   for the first (DEVIATIONS 9.27).
+
+   Same "outside `@layer utilities`" rule as every block around it, and the same
+   reason: these class names are chosen from response data, and Tailwind only
+   emits layered rules whose literal names it finds while scanning `content`.
+   Layered, they are purged from the production build and all six verdicts
+   collapse to plain ink — STATE invariant 7, and the "colour alone" failure §11
+   forbids. They are ALSO written as literals in a `Record` in ui/VerdictMark.tsx,
+   so the two defences are independent.
+
+   Colour is never the sole signal here either: the underline STYLE differs per
+   verdict (solid / dotted / double / wavy / strikethrough), and the legend and
+   the per-word reason line both name the verdict in words. */
+.sf-tok {
+  padding: 2px 4px;
+  border-radius: 3px;
+  color: var(--sf-ink-900);
+}
+.sf-tok-decodable {
+  background: var(--sf-v-decodable-bg);
+  border-bottom: 3px solid var(--sf-v-decodable);
+}
+.sf-tok-sight {
+  background: var(--sf-v-sight-bg);
+  border-bottom: 3px dotted var(--sf-v-sight);
+}
+.sf-tok-story {
+  background: var(--sf-v-story-bg);
+  border-bottom: 3px double var(--sf-v-story);
+}
+.sf-tok-violation {
+  background: var(--sf-v-violation-bg);
+  text-decoration: var(--sf-v-violation) wavy underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
+/* §02: "OOV → #6F5B45 on #F1E4C8, strikethrough". */
+.sf-tok-oov {
+  background: var(--sf-v-oov-bg);
+  color: var(--sf-v-oov);
+  text-decoration: line-through;
+}
+/* §02: "PUNCT → inherit ink-900, never highlighted". No fill, no rule. */
+.sf-tok-punct {
+  background: transparent;
+  padding: 0;
+}
+
 /* ---------------------------------------------------------------------------
    Kid-mode primitives (style guide §04, §05, §07).
 

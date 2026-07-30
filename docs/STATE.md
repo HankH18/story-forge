@@ -1,11 +1,11 @@
-# Story Forge — build state (end of Phase 4)
+# Story Forge — build state (phases 0-7 done, phase 8 in flight)
 
 Spec: `.context/attachments/D8l1e3/story-forge-build-doc.md` — all § refs are to it.
 Style: `.context/attachments/Lln7Af/Story Forge Style Guide.dc.html`.
-Every deviation with rationale: `docs/DEVIATIONS.md` (~45 entries).
+Every deviation with rationale: `docs/DEVIATIONS.md` (~150 entries, numbered by phase).
 Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 
-## Done — phases 0–4, every claim verified live
+## Done — phases 0-7, every claim verified live
 
 | Phase | State |
 |---|---|
@@ -13,10 +13,10 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 | 1 decoder | Pure validator, **93**-GPC inventory, vendored SHA-pinned CMUdict. 18/18 §5.7 goldens. Anti-golden suite + vacuity ratchet (**44.75%**, ceiling 50%) — both sabotage-tested, and the ratchet has now refused a real proposed row (DEVIATIONS 8.12). `wh`→/w/ added at stage 3 (8.13). |
 | 2 precompute | `make seed` idempotent; `make precompute` → **64,296** rows / 12 stages in 1.5s (stage 1 = 157, the tightest, above §18's 150 floor). `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **223** entries, **38** sight words (DEVIATIONS 8.10–8.17, 8.73–8.74, 8.81). |
 | 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` **targets** ≥3 per (stage,theme) over all 12 stages × 3 themes, idempotent — see the pool row below for what the database actually holds. Moderation = free blocklist + Haiku judge. |
-| warm pool | **`make warm-check` is RED and that is the honest state: 13 of 36 (stage,theme) pairs hold ≥3 servable stories (53 servable in all); stages 7–12 hold none, stage 6 holds one dragons story.** The earlier version of this row said "`make warm` fills ≥3 per (stage,theme)" — false about the command (it defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories over 3 of 12 stages) and still false about the database. The command is fixed and gated (DEVIATIONS 8.40–8.48); the pool needs one `make warm` run, ~$1.30 by `make warm-plan`'s projection (a floor — the high stages are longer), and until then §7's ladder serves those children a lower stage silently and correctly. |
+| warm pool | **`make warm-check` is GREEN: 36 of 36 (stage,theme) pairs hold ≥3 servable stories.** Filled in three passes for **$0.35** total, because `make warm` fills only the shortfall — it is not a re-run. Two earlier versions of this row were wrong in opposite directions and both are worth remembering: the first claimed "`make warm` fills ≥3 per (stage,theme)" when the command defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories across 3 of 12 stages — and §17's demo is dragons-at-stage-3, so **the demo would have passed with nine stages empty**. The second recorded the pool as 13/36 with the gate red, which was honest when written and is now stale. The lesson is the gate, not the number: `make warm-check` exits non-zero and is the only claim here that cannot rot (DEVIATIONS 8.40–8.48). |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
 
-**API: 686 passed, 2 skipped** (`cd services/api && uv run pytest`; the suite uses
+**API: 775 passed, 2 skipped** (`cd services/api && uv run pytest`; the suite uses
 pytest-randomly and has pre-existing order-dependent failures under a random seed
 — use `-p no:randomly` for a clean baseline).
 **The suite shares one live Postgres, so a concurrent writer makes it lie.** Two
@@ -25,9 +25,9 @@ agents running it at once produced *moving* failures — `test_eval.py` x7, then
 sweep real rows (`SELECT … WHERE status = ANY(SERVABLE_STATUSES)`) and delete by id
 window. Before believing a red suite, re-run it against a private copy:
 `docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfscratch'`
-then `DATABASE_URL=…/sfscratch uv run pytest`. The 686/2 above is from exactly that
+then `DATABASE_URL=…/sfscratch uv run pytest`. The 775/2 above is from exactly that
 (DEVIATIONS 8.47).
-**Web: 110 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers.
+**Web: 137 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers.
 `make test` = `test-api` + `test-web`, and **`test-web` is now typecheck AND
 tests** — it was typecheck alone for five phases, which is why the "395 tests
 green" line that used to sit here described 395 *Python* tests and zero lines of

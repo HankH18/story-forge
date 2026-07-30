@@ -38,10 +38,16 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from storyforge.api.stories import RATE_LIMIT_PER_MINUTE, SERVABLE_STATUSES, limiter
-from storyforge.db import SessionLocal, engine, get_session
+from storyforge.api.stories import (
+    RATE_LIMIT_PER_MINUTE,
+    SERVABLE_STATUSES,
+    SERVE_ATTEMPTS,
+    limiter,
+)
+from storyforge.db import SessionLocal
 from storyforge.llm.questions import SoundTarget, TapWordDraft, check_tap_word, cue_conflict
 from storyforge.main import app
+from tests.owned_pool import hide_servable_pool, owned_transaction
 
 DRAGONS = "dragons"
 
@@ -69,6 +75,15 @@ FIXTURE_SEGMENTS = (
     "The dragon did nap in the sand.",
 )
 FIXTURE_STORY_WORDS = ["cave", "dragon"]
+
+#: Real English that no stage of §4's cumulative inventory can spell, and not a
+#: sight word in it — so a story carrying this body is refused by the serve-time
+#: decodability re-check at every stage. Measured in the one test that uses it
+#: rather than asserted from here.
+UNSERVABLE_SEGMENT = (
+    "The knight thought the enormous creature might be dangerous, "
+    "although its enthusiasm suggested otherwise entirely."
+)
 
 #: Material for `tap_word` rows written by the NODE'S OWN writer rather than by
 #: hand — `check_tap_word` composes the payload and the answer key, so what this
@@ -200,34 +215,10 @@ class Pool:
         if not self.exclusive:
             return self
 
-        # `rejected` because it is the one existing status `SERVABLE_STATUSES`
-        # excludes; DELETE would cascade through `story_segments`, `questions`,
-        # `readings` and `answers` for no gain, since what `_SERVE_SQL` reads is
-        # `status`. Inside the doomed transaction either way (DEVIATIONS 8.93).
-        self.hidden = (
-            await self.session.execute(
-                text("UPDATE stories SET status = 'rejected' WHERE status = ANY(:s)"),
-                {"s": list(SERVABLE_STATUSES)},
-            )
-        ).rowcount
-
-        # Measured, not assumed, and it catches the one failure mode that would be
-        # SILENT: an `UPDATE` that did not cover everything the serving path counts
-        # as servable. The tests could still pass in that state — against the live
-        # pool, which is the defect this class exists to end. (An override that
-        # stopped taking effect is the loud failure mode: the endpoint then cannot
-        # see the fixture's uncommitted rows at all and all four tests fail.)
-        left = (
-            await self.session.execute(
-                text("SELECT count(*) FROM stories WHERE status = ANY(:s)"),
-                {"s": list(SERVABLE_STATUSES)},
-            )
-        ).scalar_one()
-        assert left == 0, (
-            f"the fixture does not own the pool: {left} servable stories are still "
-            f"visible after hiding {self.hidden} — the ladder tests below would be "
-            "measuring the live pool instead of their own rows"
-        )
+        # The hide, and the assertion that it covered everything the serving path
+        # counts as servable, both live in `tests/owned_pool.py` now — three files
+        # need them (DEVIATIONS 9.62). Nothing about the mechanism changed.
+        self.hidden = await hide_servable_pool(self.session)
         return self
 
     async def theme(self, name: str) -> int:
@@ -255,8 +246,15 @@ class Pool:
         status: str = "warm",
         story_words: list[str] | None = None,
         questions: bool = True,
+        segments: tuple[str, ...] = FIXTURE_SEGMENTS,
     ) -> int:
         """A fixture story that is actually servable, question included.
+
+        `segments` defaults to text the decoder measures at 1.000 at stage 1, so a
+        fixture story clears §1's gate at every stage and the serve-time re-check
+        cannot refuse it for a reason the test did not intend. It is a parameter for
+        exactly one caller — `test_the_ladder_descends_past_a_rung_the_serve_gate_
+        refuses` needs rows the gate WILL refuse, which is the state F4 is about.
 
         **`questions=True` is the default because a story with none is no longer
         servable at all** (`api/stories.py::ANSWERABLE_SQL`, DEVIATIONS 8.50): six
@@ -290,7 +288,7 @@ class Pool:
                 },
             )
         ).scalar_one()
-        for idx, body in enumerate(FIXTURE_SEGMENTS):
+        for idx, body in enumerate(segments):
             await self.session.execute(
                 text(
                     "INSERT INTO story_segments (story_id, idx, body, scene_tags) "
@@ -299,6 +297,11 @@ class Pool:
                 {"s": story_id, "i": idx, "b": body},
             )
         if questions:
+            # Composed from `FIXTURE_SEGMENTS` even when `segments` overrides them:
+            # the only job this row has is to satisfy `ANSWERABLE_SQL` so the story
+            # reaches the serve-time gate, and `check_tap_word` proves its own
+            # correctness against the text it was given (§11.3), which the
+            # deliberately-undecodable override cannot supply an onset word from.
             draft, target = _NODE_WRITTEN_TAP_WORDS[0]
             question, problems = check_tap_word(
                 draft,
@@ -336,51 +339,11 @@ class Pool:
 async def _owned_pool(*, exclusive: bool) -> AsyncIterator[Pool]:
     """One transaction, shared by the test and by the endpoint, then rolled back.
 
-    Three pieces, and each is load-bearing:
-
-    1. **A connection out of the API's own engine, with one transaction on it.**
-       Not `SessionLocal()`: the fixture's rows have to be visible to
-       `POST /api/stories/request` without being committed, and the only way two
-       parties see the same uncommitted rows is if they are the same connection.
-    2. **`get_session` overridden**, so the endpoint runs on that connection.
-       `join_transaction_mode="create_savepoint"` is what makes the endpoint's own
-       `await session.commit()` a SAVEPOINT release instead of a real commit — the
-       request path commits mid-handler (it must; `_SERVE_SQL` is an `UPDATE …
-       RETURNING` under `FOR UPDATE SKIP LOCKED`) and that must not escape.
-    3. **REPEATABLE READ.** The snapshot is fixed at the fixture's first
-       statement, so a story `make warm` commits *while the test runs* cannot
-       appear in the ladder underneath it. Under READ COMMITTED it could, and
-       STATE.md is explicit that a concurrent writer makes this suite lie. The
-       cost is stated in DEVIATIONS 8.91: a genuine write/write race surfaces as a
-       loud serialization failure rather than as a silent flake.
-
-    Teardown rolls back, so the four tests using this leave the database exactly
-    as they found it — including `last_served_at`, which they used to stamp on real
-    rows.
+    The mechanism and the three reasons each of its pieces is load-bearing are in
+    `tests/owned_pool.py`, which two other files now share (DEVIATIONS 9.62).
     """
-    conn = await engine.connect()
-    conn = await conn.execution_options(isolation_level="REPEATABLE READ")
-    try:
-        outer = await conn.begin()
-        session = AsyncSession(
-            bind=conn, join_transaction_mode="create_savepoint", expire_on_commit=False
-        )
-
-        async def _shared_session() -> AsyncIterator[AsyncSession]:
-            # No `finally: close()` — FastAPI resumes generator dependencies after
-            # the response, and closing here would end the transaction the rest of
-            # the test still runs in.
-            yield session
-
-        app.dependency_overrides[get_session] = _shared_session
-        try:
-            yield await Pool(session, exclusive=exclusive).start()
-        finally:
-            app.dependency_overrides.pop(get_session, None)
-            await session.close()
-            await outer.rollback()
-    finally:
-        await conn.close()
+    async with owned_transaction() as session:
+        yield await Pool(session, exclusive=exclusive).start()
 
 
 @pytest.fixture
@@ -701,13 +664,57 @@ async def test_least_recently_served_rotation(client, session):
     assert (await _request(client, 1))["id"] == served[0]
 
 
-async def test_rejected_stories_are_never_served(client, session):
-    """Child-safety invariant: rejected failed the gate or moderation (§7)."""
+async def test_rejected_stories_are_never_served(client, shared_pool):
+    """Child-safety invariant: rejected failed the gate or moderation (§7).
+
+    justify-test-edit — VERDICT: TEST IS WRONG, and what was wrong was WHICH ROW it
+    fetched. The by-id half read `assert (await
+    client.get(f"/api/stories/{min(rejected)}")).status_code == 404`, and
+    `min(id) WHERE status = 'rejected'` is story **1**, which carries **0**
+    `questions` rows — so after DEVIATIONS 8.50 the 404 came from `stories.py:734`
+    (answerability) and the status refusal at `:730` was never reached. ORIGIN:
+    commit `b857860` (Phase 4), written before `ANSWERABLE_SQL` existed, so the
+    choice of `min()` was harmless when it was made. REVERT CHECK: nothing to
+    revert — it is green on pristine code AND green against a build with `:730`
+    replaced by `if False:`, while `GET /api/stories/8` (a rejected story that DOES
+    carry questions) returns **200** on that same build. 4 of the 21 rejected rows
+    are answerable, so a row with teeth existed and `min()` did not pick it
+    (AUDIT-PHASE7 F2, DEVIATIONS 9.60-9.61).
+
+    Not weakened — the row is now CREATED rather than selected, and the test asserts
+    its own premise so it cannot go quiet again. Created rather than searched for
+    because on a correctly warmed database there is nothing to find: STATE invariant
+    11 runs enrichment only after the gate AND moderation, so a story that gets
+    rejected is never enriched. The four answerable rejected rows here are grammar-
+    backfill casualties, and selecting on them would be 8.90's mistake with the sign
+    flipped — a fixture betting the database keeps a historical accident (9.64).
+
+    `shared_pool` and not `pool`: the request-endpoint sweep below reads the LIVE
+    pool for stages 1-3, and hiding it would leave that half with nothing to sweep
+    (DEVIATIONS 8.92). The rollback means neither half stamps a real
+    `last_served_at` any more.
+    """
+    session = shared_pool.session
+
+    # A rejected story that is answerable in every respect except its status, so
+    # `status` is the only thing that can produce the 404 below.
+    poison = await shared_pool.story(
+        stage=1, theme="alpha", title="Rejected But Answerable", status="rejected"
+    )
+    assert (
+        await session.execute(
+            text("SELECT EXISTS (SELECT 1 FROM questions WHERE story_id = :i)"), {"i": poison}
+        )
+    ).scalar_one(), (
+        f"story {poison} carries no question, so a 404 on it would be "
+        "`ANSWERABLE_SQL`'s and this test would prove nothing about `status`"
+    )
+
     rejected = {
         r[0]
         for r in await session.execute(text("SELECT id FROM stories WHERE status = 'rejected'"))
     }
-    assert rejected, "no rejected stories in the pool — this test would be vacuous"
+    assert poison in rejected
 
     for stage in (1, 2, 3):
         for _ in range(3):
@@ -716,8 +723,25 @@ async def test_rejected_stories_are_never_served(client, session):
             assert body["status"] != "rejected"
             limiter.clear()
 
-    # Nor by id: a rejected story is an eval artifact, not content.
-    assert (await client.get(f"/api/stories/{min(rejected)}")).status_code == 404
+    # Nor by id: a rejected story is an eval artifact, not content. `poison` is the
+    # deterministic floor; any live rejected row that is also answerable is swept
+    # too, because those are the rows that caught this in the first place.
+    live_answerable = [
+        r[0]
+        for r in await session.execute(
+            text(
+                "SELECT s.id FROM stories s WHERE s.status = 'rejected' AND s.id <> :p "
+                "AND EXISTS (SELECT 1 FROM questions q WHERE q.story_id = s.id) ORDER BY s.id"
+            ),
+            {"p": poison},
+        )
+    ]
+    for story_id in (poison, *live_answerable):
+        resp = await client.get(f"/api/stories/{story_id}")
+        assert resp.status_code == 404, (
+            f"rejected story {story_id} is fetchable by id ({resp.status_code}) — it "
+            "failed the decodability gate or moderation (§7)"
+        )
 
 
 # --- fallback ladder ---------------------------------------------------------
@@ -810,6 +834,72 @@ async def test_a_stage_with_no_pool_falls_back_to_the_nearest_lower_stage(client
     body = await _request(client, asked, theme=pool.slug("alpha"))
     assert body["id"] == below
     assert body["stage_id"] == pool.base < asked
+    assert body["fallback"]["kind"] == "lower_stage"
+    assert body["fallback"]["requested_stage_id"] == asked
+
+
+async def test_the_ladder_descends_past_a_rung_the_serve_gate_refuses(client, pool, session):
+    """AUDIT-PHASE7 F4: a rung of unservable rows must not answer the child a 503.
+
+    §01 says a child never sees an error and §7 makes the warm pool the answer to
+    *every* failure path, so a 503 with a correct story one stage down is the worst
+    version of one. `SERVE_ATTEMPTS` was the budget for the whole request, so
+    `SERVE_ATTEMPTS` bad rows at the top rung spent it before the ladder descended;
+    it is now the budget PER RUNG (`_serve_attempt_budget`, DEVIATIONS 9.66).
+
+    The bad rows are answerable and claim `decodability 1.0` in their own column —
+    exactly what a mis-persisted story looks like, and the reason a SQL filter on
+    that column cannot replace the serve-time decoder pass (9.67). `SERVE_ATTEMPTS +
+    1` of them, derived rather than a literal, so this cannot rot if the constant
+    moves.
+    """
+    from storyforge.decoder import mastered_ids, validate_text
+
+    asked = pool.base + 1
+    for i in range(SERVE_ATTEMPTS + 1):
+        await pool.story(
+            stage=asked,
+            theme="alpha",
+            title=f"Undecodable {i}",
+            story_words=[],
+            segments=(UNSERVABLE_SEGMENT,),
+        )
+    good = await pool.story(stage=pool.base, theme="alpha", title="One Rung Down")
+    # The rung the ladder must never climb to, whatever else it refuses (STATE
+    # invariant 6). Decodable, so only `stage_id <= :stage` can be keeping it out.
+    never = await pool.story(stage=asked + 1, theme="alpha", title="Never Climb To This")
+
+    # The premise, measured rather than asserted from a constant.
+    sight = frozenset(
+        r[0]
+        for r in await session.execute(
+            text("SELECT word FROM sight_words WHERE stage_id <= :s"), {"s": asked}
+        )
+    )
+    measured = validate_text(
+        UNSERVABLE_SEGMENT, mastered_ids(asked), sight, frozenset()
+    ).decodability
+    assert measured < 0.95, f"the bad rows measure {measured:.3f}; they prove nothing"
+
+    # Posted directly rather than through `_request`, so the 503 this test exists to
+    # forbid is reported in the words of the requirement it breaks.
+    resp = await client.post(
+        "/api/stories/request",
+        json={"stage_id": asked, "theme_id_or_slug": pool.slug("alpha")},
+    )
+    assert resp.status_code == 200, (
+        f"the ladder did not descend past {SERVE_ATTEMPTS + 1} rows the serve-time "
+        f"gate refuses ({measured:.1%} decodable): {resp.status_code} {resp.text}. §01 "
+        "says a child never sees an error and §7 makes the warm pool the answer to "
+        "every failure path, and a correct story was sitting one stage down"
+    )
+    body = resp.json()
+
+    assert body["id"] != never and body["stage_id"] < asked, (
+        f"the ladder climbed a stage (STATE invariant 6): asked for {asked}, served "
+        f"{body['id']} at stage {body['stage_id']}"
+    )
+    assert body["id"] == good, f"expected the story one rung down, got {body['id']}"
     assert body["fallback"]["kind"] == "lower_stage"
     assert body["fallback"]["requested_stage_id"] == asked
 

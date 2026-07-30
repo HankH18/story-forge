@@ -173,6 +173,229 @@ def test_request_block_stays_free_of_stage_material():
         assert leak not in block
 
 
+# --- the rewrite block (DEVIATIONS 9.40-9.45, docs/AUDIT-PHASE7-FIXES.md F1) ---
+# `passes_gate` fails on three conditions and this prompt could describe two. A
+# story-word-cap-only failure produced `PROBLEMS (0):` followed by "change only
+# what is listed" — a false premise, an empty list, and an instruction to change
+# nothing. In §14 run 114 all 9 stories that took that path ended with ZERO story
+# words, 8 of them dragons, and story 1661 was serving a stage-1 child a dragons
+# story with no dragon in it. These pin every part of the fix.
+def _rw_vocab(**over):
+    from storyforge.pipeline import Vocabulary
+
+    kw = dict(
+        stage_id=4,
+        stage_name="Stage 4",
+        target_min=30,
+        target_max=60,
+        allowed_words=["dog", "cat", "hill", "ran", "big", "sat"],
+        sight_words=["the", "a", "to", "and", "it", "is"],
+        story_words={
+            "dragon": "a big animal that breathes fire",
+            "cave": "a hole in a hill",
+            "wings": "what it flies with",
+            "fire": "hot flames",
+        },
+    )
+    kw.update(over)
+    return Vocabulary(**kw)
+
+
+#: 100% decodable, zero OOV, FOUR distinct story words. The only `passes_gate`
+#: condition it can fail is the cap, which is what makes it the F1 reproduction.
+CAP_ONLY_BODY = (
+    "The dragon sat in the cave. It had big wings. The dragon had fire. "
+    "The cat ran up the hill to the cave. The dragon and the cat had fun."
+)
+CAP_ONLY_CLAIM = ["dragon", "cave", "wings", "fire"]
+
+
+def _rw(body, claim, vocab=None, theme="dragons"):
+    from storyforge.pipeline import build_rewrite_block, validate_draft
+
+    vocab = vocab or _rw_vocab()
+    report = validate_draft(vocab, body, claim)
+    return report, build_rewrite_block(report, vocab, body, theme=theme)
+
+
+def test_a_cap_only_failure_is_a_gate_failure_this_prompt_can_describe():
+    """The F1 reproduction, verbatim from the audit. Before the fix this printed
+    `PROBLEMS (0):` beside "change only what is listed"."""
+    from storyforge.pipeline import passes_gate
+
+    report, block = _rw(CAP_ONLY_BODY, CAP_ONLY_CLAIM)
+    assert report.decodability == 1.0
+    assert report.counts["oov"] == 0
+    assert report.distinct_story_words == ["cave", "dragon", "fire", "wings"]
+    assert passes_gate(report) is False  # the cap, and nothing else
+
+    assert "PROBLEMS (0)" not in block
+    assert "PROBLEMS (1)" in block
+    # ...and it must not tell a 100%-decodable story that it is unreadable.
+    assert "used words this child cannot read" not in block
+
+
+def test_no_gate_failure_can_produce_an_empty_problem_list():
+    """DEVIATIONS 9.45 — the guard is against the CLASS, not the instance. Every
+    way `passes_gate` can say no, enumerated, and each must name something."""
+    from storyforge.pipeline import passes_gate
+
+    cases = {
+        # a violation: `shed` needs `sh`, taught at stage 3
+        "violation": (_rw_vocab(stage_id=2), "The dog ran to the shed.", []),
+        "oov": (_rw_vocab(), "The dog ran to the zorp.", []),
+        "cap": (_rw_vocab(), CAP_ONLY_BODY, CAP_ONLY_CLAIM),
+        "violation+cap": (
+            _rw_vocab(stage_id=2),
+            CAP_ONLY_BODY + " The dog ran to the shed.",
+            CAP_ONLY_CLAIM,
+        ),
+        "oov+cap": (
+            _rw_vocab(),
+            CAP_ONLY_BODY + " The dog ran to the zorp.",
+            CAP_ONLY_CLAIM,
+        ),
+    }
+    for name, (vocab, body, claim) in cases.items():
+        report, block = _rw(body, claim, vocab=vocab)
+        assert passes_gate(report) is False, f"{name} was supposed to fail the gate"
+        assert "PROBLEMS (0)" not in block, name
+        # every listed problem is a bullet, and there is at least one
+        stated = block.split("PROBLEMS (", 1)[1].split("):\n", 1)[1]
+        assert stated.lstrip().startswith("- "), name
+
+
+def test_the_cap_instruction_drops_one_word_and_keeps_the_rest():
+    """§5.5 and STATE invariant 3. The cap counts DISTINCT words and repetition is
+    correct decodable-reader behaviour, so "use fewer story words" is the defect
+    being fixed, not a resolution of it. The ask is drop one, keep repeating."""
+    _report, block = _rw(CAP_ONLY_BODY, CAP_ONLY_CLAIM)
+    assert "KEEP" in block
+    assert 'Remove every use of "wings"' in block
+    assert "Do NOT drop the story words you are keeping" in block
+    # the three kept words are named individually, not left to be inferred
+    for kept in ('"dragon"', '"cave"', '"fire"'):
+        assert kept in block.split("KEEP", 1)[1].split("Remove every use", 1)[0]
+    # and repetition is restated as free, where the model is being asked to cut
+    assert "repeating a story word is free" in block
+
+
+def test_the_word_dropped_is_the_least_repeated_one_and_the_choice_is_the_codes():
+    """DEVIATIONS 9.42. The model has already proved it resolves ambiguity in this
+    prompt by deleting the theme, so the choice is not left to it. `dragon` appears
+    three times and `wings` once, so `wings` goes."""
+    from storyforge.pipeline import story_word_verdict, validate_draft
+
+    vocab = _rw_vocab()
+    report = validate_draft(vocab, CAP_ONLY_BODY, CAP_ONLY_CLAIM)
+    keep, drop = story_word_verdict(report)
+    assert drop == ["wings"]
+    assert keep[0] == "dragon"  # most repeated first
+    assert set(keep) == {"dragon", "cave", "fire"}
+    # ties break alphabetically, so the same report always yields the same answer
+    assert story_word_verdict(report) == (keep, drop)
+
+
+def test_a_satisfied_cap_drops_nothing():
+    from storyforge.pipeline import story_word_verdict, validate_draft
+
+    vocab = _rw_vocab()
+    report = validate_draft(vocab, "The dragon sat in the cave.", ["dragon", "cave"])
+    assert story_word_verdict(report) == (["cave", "dragon"], [])
+
+
+def test_the_rewrite_block_carries_the_story_word_bank_and_the_theme():
+    """DEVIATIONS 9.40. `_call` sends a SINGLE user message and the rewrite block
+    replaces the request block, so whatever is not restated here is gone. The
+    cached `system` half holds PERMITTED and SIGHT words only — story words are
+    per-request. Measured in run 114: 0 of 108 un-rewritten stories lost their
+    story words; 23 of 72 rewritten ones did."""
+    _report, block = _rw("The dog ran to the shed.", [], vocab=_rw_vocab(stage_id=2))
+    assert "dragon: a big animal that breathes fire" in block
+    assert "wings: what it flies with" in block
+    assert "dragons story" in block
+    assert "30-60 words" in block
+
+
+def test_the_rewrite_block_omits_the_bank_when_the_stage_offers_none():
+    """Stages 1-2 may have no offerable story words. An empty header would read as
+    an instruction to use nothing."""
+    _report, block = _rw(
+        "The dog ran to the shed.", [], vocab=_rw_vocab(stage_id=2, story_words={})
+    )
+    assert "STORY WORDS" not in block
+    assert "dragons story" in block
+
+
+def test_the_rewrite_block_does_not_resend_the_cached_vocabulary():
+    """The cost half of DEVIATIONS 9.46. The bank is ~8 lines and has to be here;
+    the 400-word allowlist is in the cached `system` prefix and must NOT be, or
+    every rewrite pays fresh input price for material it already has."""
+    _report, block = _rw(CAP_ONLY_BODY, CAP_ONLY_CLAIM)
+    for leak in ("PERMITTED WORDS", "SIGHT WORDS", PRACTICE_HEADER):
+        assert leak not in block
+
+
+def test_a_lexical_failure_keeps_the_sentence_that_is_true_of_it():
+    """The headline is conditional (DEVIATIONS 9.44), not replaced. A story with a
+    real violation genuinely did use words this child cannot read."""
+    _report, block = _rw("The dog ran to the shed.", [], vocab=_rw_vocab(stage_id=2))
+    assert block.startswith("Your story used words this child cannot read.")
+    assert '"shed"' in block
+    assert "letter-sounds not yet taught" in block
+
+
+def test_the_rewrite_block_still_says_change_only_what_is_listed():
+    """Kept deliberately: it is correct once something IS listed, and it is the
+    line that stops a rewrite rewriting the whole story. F1 was the empty list
+    beside it, not the sentence."""
+    _report, block = _rw(CAP_ONLY_BODY, CAP_ONLY_CLAIM)
+    assert "Change only what is listed" in block
+    assert block.rstrip().endswith(
+        "Every replacement must come from the permitted, sight, or story lists."
+    )
+
+
+async def test_the_pipeline_hands_the_theme_to_the_rewrite_node(monkeypatch):
+    """Behavioural, not source-read: the block is built inside `run_pipeline`, so a
+    correct `build_rewrite_block` that is called without the theme still ships the
+    defect. Real validator, real gate, fake API call."""
+    from storyforge import pipeline as pl
+    from storyforge.llm.generate import StoryDraft, StorySegment
+    from storyforge.llm.moderate import ModerationResult
+    from storyforge.llm.pricing import Usage
+
+    vocab = _rw_vocab(stage_id=2, allowed_words=["dog", "cat", "hill", "ran", "big", "sat"])
+    # attempt 0 fails on a violation, attempt 1 is clean — so exactly one rewrite
+    bodies = ["The dog ran to the shed.", "The dog ran to the hill."]
+    seen: list[str] = []
+
+    async def fake_load(session, stage_id, theme_slug):
+        return vocab
+
+    async def fake_call(_vocab, _theme, user_block, _effort):
+        seen.append(user_block)
+        body = bodies[min(len(seen) - 1, len(bodies) - 1)]
+        return (
+            StoryDraft(title="A Dog", segments=[StorySegment(text=body)], story_words_used=[]),
+            Usage(model="claude-sonnet-5", input_tokens=1, output_tokens=1),
+        )
+
+    async def fake_moderate(_body):
+        return ModerationResult(approved=True, reason="fine", layer="model")
+
+    monkeypatch.setattr(pl, "load_vocabulary", fake_load)
+    monkeypatch.setattr(pl, "_call", fake_call)
+    monkeypatch.setattr(pl, "moderate", fake_moderate)
+    result = await pl.run_pipeline(None, 2, "dragons")
+
+    assert result.passed is True
+    assert len(seen) == 2, "expected exactly one rewrite"
+    rewrite_block = seen[1]
+    assert "dragons story" in rewrite_block
+    assert "dragon: a big animal that breathes fire" in rewrite_block
+
+
 # --- appearance (DEVIATIONS 8.29) --------------------------------------------
 # The vocabulary work removed `fat` from the blocklist (DEVIATIONS 8.16), and it
 # was right to: a blocklist hit SHORT-CIRCUITS `moderate()`, so an innocuous entry

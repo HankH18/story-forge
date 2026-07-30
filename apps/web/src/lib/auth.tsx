@@ -124,6 +124,33 @@ export function RequireParent({ children }: { children: ReactNode }) {
 }
 
 /**
+ * §9's `(admin)` routes: the `/admin` tree (DEVIATIONS 9.20-9.23).
+ *
+ * **This guard checks a SESSION, not a role, and that is deliberate.** The file
+ * docstring above is explicit that roles come from the signed token and never from
+ * here — `auth.py` re-reads `public_metadata.role` from the JWT on every request
+ * so the Clerk dashboard can revoke admin immediately. A client-side role test
+ * would be a second opinion able to disagree with the only one that matters, and
+ * it would disagree in the dangerous direction the first time Clerk's client cache
+ * is ahead of a revocation.
+ *
+ * It would also have to read a claim that is frequently not there. Clerk's DEFAULT
+ * session token carries NO metadata (DEVIATIONS 6.13, measured by minting a real
+ * token and decoding it), so a guard reading `user.publicMetadata.role` would
+ * either lock every admin out of a portal the API is willing to serve them, or —
+ * falling back to "allow" — let every parent in. Neither is a gate.
+ *
+ * So the role gate is the API's 403, rendered by `ui/AdminShell`: it asks the API
+ * once and renders nothing else until the answer arrives. This function's only job
+ * is the signed-out case, and its answer is the parent routes' answer — a redirect
+ * carrying the deep link, because an admin who followed a link to
+ * `/admin/evals/114` should land there after signing in.
+ */
+export function RequireAdmin({ children }: { children: ReactNode }) {
+  return <RequireParent>{children}</RequireParent>
+}
+
+/**
  * `/read/:kidId` — the same check, the opposite failure.
  *
  * §01: kid mode has no error state. A child handed a tablet cannot type an

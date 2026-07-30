@@ -40,11 +40,20 @@ const VERDICT_CLASS: Record<Verdict, string> = {
 /**
  * The §17 demo sentence at stage 3.
  *
- * PHASE 0 NOTE: these verdicts are hard-coded. They are the *expected* output of
- * the validator, used here to prove the design tokens render — they are NOT
- * validator output. The admin playground (§5.6, phase 8) is where the live
- * `POST /api/validate` result is shown; the phase 1 golden suite asserts the
- * real validator produces exactly this.
+ * **These verdicts are hard-coded, and they stay hard-coded.** They are the
+ * *expected* output of the validator, used here to prove the design tokens render
+ * — they are NOT validator output. The live `POST /api/validate` result is now
+ * shown by the admin playground at `/admin` (§5.6, §17 step 1), which exists as of
+ * the Phase 8 portal.
+ *
+ * The obvious tidy-up — point this page at the live endpoint and delete the
+ * constant — is refused on purpose: `/` is public and `/api/validate` is
+ * admin-only (§9), so a signed-out visitor cannot be shown a live validation, and
+ * reaching for one here would mean opening the one endpoint that accepts arbitrary
+ * text to anybody (DEVIATIONS 9.38). What keeps this honest instead is the phase 1
+ * golden suite, which asserts the real validator produces exactly these six
+ * verdicts (`tests/decoder/golden.yaml::demo-sentence-stage-3`), and the fact that
+ * the same sentence is on screen at `/admin` with the API's own answer beside it.
  */
 const DEMO_SENTENCE: { word: string; verdict: Verdict }[] = [
   { word: 'The', verdict: 'sight' },

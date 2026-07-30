@@ -79,7 +79,7 @@ services:
     # for the two supported paths. The GitHub mirror is the simpler one.
     github:
       repo: HankH18/story-forge
-      branch: main
+      branch: master
       deploy_on_push: true
 
     http_port: 8080
@@ -180,7 +180,7 @@ static_sites:
     source_dir: apps/web
     github:
       repo: HankH18/story-forge
-      branch: main
+      branch: master
       deploy_on_push: true
 
     environment_slug: node-js
@@ -220,7 +220,7 @@ jobs:
     dockerfile_path: services/api/Dockerfile
     github:
       repo: HankH18/story-forge
-      branch: main
+      branch: master
       deploy_on_push: true
     instance_count: 1
     instance_size_slug: apps-s-1vcpu-1gb

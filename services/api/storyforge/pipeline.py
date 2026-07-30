@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from storyforge import obs
-from storyforge.decoder import TextReport, mastered_ids, validate_text
+from storyforge.decoder import TextReport, WordVerdict, mastered_ids, validate_text
 from storyforge.llm.client import generation_model, generation_timeout, get_client
 from storyforge.llm.generate import (
     MAX_OUTPUT_TOKENS,
@@ -216,9 +216,65 @@ def nearest_allowed(word: str, allowed: list[str], limit: int = 5) -> list[str]:
     return same[:limit]
 
 
-def build_rewrite_block(report: TextReport, vocab: Vocabulary, body: str) -> str:
+def _quoted(words: list[str]) -> str:
+    return ", ".join(f'"{w}"' for w in words)
+
+
+def story_word_verdict(
+    report: TextReport, cap: int = MAX_STORY_WORDS
+) -> tuple[list[str], list[str]]:
+    """Split the DISTINCT story words into (keep, drop) against the cap.
+
+    DEVIATIONS 9.42: the code decides which word goes, not the model. Ranked by
+    occurrence count descending — the most-repeated word is the one the story
+    leans on, so dropping the rarest is the smallest edit — with alphabetical
+    tie-breaking so the choice is deterministic and a test can assert it.
+
+    `drop` is empty whenever the cap is satisfied, which is what makes this safe
+    to call unconditionally.
+    """
+    counts: dict[str, int] = {}
+    for w in report.words:
+        if w.verdict is WordVerdict.STORY:
+            counts[w.word] = counts.get(w.word, 0) + 1
+    ranked = sorted(report.distinct_story_words, key=lambda w: (-counts.get(w, 0), w))
+    return ranked[:cap], ranked[cap:]
+
+
+def build_rewrite_block(
+    report: TextReport, vocab: Vocabulary, body: str, theme: str = ""
+) -> str:
     """§6: the rewrite node sees only the violating words, why each failed, and
-    concrete replacements — not the whole story and not a bare 'try again'."""
+    concrete replacements — not the whole story and not a bare 'try again'.
+
+    **Three things this block used to be unable to say, all fixed together
+    (DEVIATIONS 9.40-9.45, `docs/AUDIT-PHASE7-FIXES.md` F1).**
+
+    `passes_gate` fails on three conditions and this function could describe two.
+    When a draft failed on the story-word cap ALONE — 100% decodable, zero OOV, one
+    story word too many — `lines` came out empty and the model was sent a false
+    premise ("used words this child cannot read"), an empty `PROBLEMS (0):` list,
+    and "change only what is listed". Measured in the §14 run 114 matrix: 9 stories
+    took that path and **all 9 ended with zero story words**, 8 of them dragons;
+    6 of 15 dragons stories at stages 2-4 shipped with no dragon in them; one draft
+    came back WORSE than the 100% it was rejected at.
+
+    The wider cause is that the rewrite block REPLACES `build_request_block` in a
+    single-message conversation (`_call` sends `messages=[user_block]`, no history),
+    and the cached `system` half carries only PERMITTED and SIGHT words. So from
+    attempt 1 onward the prompt demanded replacements "from the permitted, sight,
+    or story lists" with the story list, the theme and the length target all
+    absent. Run 114: 0 of 108 un-rewritten stories lost their story words; 23 of 72
+    rewritten ones did. The bank, the theme and the bounds are therefore restated
+    here — all inside `messages`, after the cache breakpoint, so invariant 10 is
+    untouched.
+
+    §5.5 / STATE invariant 3 dictate the SHAPE of the cap instruction: the cap
+    counts DISTINCT words and repetition is correct decodable-reader behaviour, so
+    the ask is "drop the extra one, keep repeating the rest" and never "use fewer
+    story words". Removing the theme from a themed story is the defect, not a
+    resolution of it.
+    """
     lines = []
     for w in report.violations:
         if w.missing_gpcs:
@@ -235,12 +291,61 @@ def build_rewrite_block(report: TextReport, vocab: Vocabulary, body: str) -> str
     if oov:
         lines.append(f"- Unknown words that must be removed entirely: {', '.join(oov)}")
 
+    keep, drop = story_word_verdict(report)
+    if drop:
+        lines.append(
+            f"- You used {len(keep) + len(drop)} DIFFERENT story words "
+            f"({_quoted(keep + drop)}), and at most {MAX_STORY_WORDS} different ones "
+            f"are allowed. KEEP {_quoted(keep)} and use each of them as often as you "
+            f"like — repeating a story word is free and costs nothing. Remove every "
+            f"use of {_quoted(drop)} instead, and say that part with a permitted or "
+            f"sight word. Do NOT drop the story words you are keeping: the story "
+            f"still has to be about them."
+        )
+
+    if not lines:
+        # DEVIATIONS 9.45. Unreachable from a real gate failure — decodability
+        # cannot fall below 1.0 with zero violations and zero OOV, so the three
+        # `passes_gate` conditions are now all describable — but this is a live
+        # child-facing prompt and an empty problem list beside "change only what is
+        # listed" is the entirety of F1. Never ship that sentence again.
+        lines.append(
+            f"- The story did not pass the reading check. It must be at least "
+            f"{round(DECODABILITY_GATE * 100)}% decodable, contain no unknown words, "
+            f"and use at most {MAX_STORY_WORDS} different story words. Fix that "
+            f"without changing what the story is about."
+        )
+
+    if report.violations or oov:
+        headline = "Your story used words this child cannot read. Rewrite it."
+    elif drop:
+        headline = (
+            f"Your story is readable, but it used {len(keep) + len(drop)} DIFFERENT "
+            f"story words where at most {MAX_STORY_WORDS} are allowed. Rewrite it."
+        )
+    else:
+        headline = "Your story did not pass the reading check. Rewrite it."
+
+    offered = "\n".join(f"- {w}: {gloss}" for w, gloss in sorted(vocab.story_words.items()))
+    bank = (
+        (
+            f"\n\nSTORY WORDS — at most {MAX_STORY_WORDS} DIFFERENT ones, only from "
+            f"this list:\n{offered}\n\n"
+            "Repeat those freely; only the number of DIFFERENT ones is capped, never "
+            "how often each appears."
+        )
+        if offered
+        else ""
+    )
+    about = f" It must still be a {theme} story." if theme else ""
+
     return (
-        "Your story used words this child cannot read. Rewrite it.\n\n"
+        f"{headline}\n\n"
         f"THE STORY YOU WROTE:\n{body}\n\n"
-        f"PROBLEMS ({len(lines)}):\n" + "\n".join(lines) + "\n\n"
-        "Keep the same story and the same length. Change only what is listed. "
-        "Every replacement must come from the permitted, sight, or story lists."
+        f"PROBLEMS ({len(lines)}):\n" + "\n".join(lines) + bank + "\n\n"
+        f"Keep the same story, and keep it {vocab.target_min}-{vocab.target_max} "
+        f"words long.{about} Change only what is listed. Every replacement must come "
+        "from the permitted, sight, or story lists."
     )
 
 
@@ -426,8 +531,11 @@ async def run_pipeline(
                 trace.update(output=_trace_summary(result))
                 return result
 
-            # §0: fix the prompt, never the gate.
-            user_block = build_rewrite_block(report, vocab, body)
+            # §0: fix the prompt, never the gate. `theme_slug` is passed because
+            # the rewrite block REPLACES the request block in a single-message
+            # conversation, so without it the model loses the theme it is writing
+            # about the moment a first draft fails (DEVIATIONS 9.40, 9.43).
+            user_block = build_rewrite_block(report, vocab, body, theme=theme_slug)
             kind = "rewrite"
 
         # §7: budget_exhausted. Not an error — the warm pool takes over.

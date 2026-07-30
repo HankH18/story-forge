@@ -5192,3 +5192,1081 @@ makes it say so, at both pool extremes), `test_request_returns_a_full_dto` still
 pins §11.2's whole DTO against a story it wrote, and the answer-key sweep still
 reads every live node-written `tap_word` row (8.92 is the note about how nearly it
 did not).
+
+## Phase 8 — the admin portal's BACKEND (§9 lines 232-234, §11's "Admin portal", §17 steps 1, 2 and 4)
+
+Numbered 9.1-9.19 to open a fresh block clear of every 8.x above. Logged
+**before** the code, per §0. Everything marked **PROVED** was measured in this
+repo with the command shown; everything else is reasoning and is labelled
+**ASSUMED**. New file: `services/api/storyforge/api/admin.py`. Touched:
+`storyforge/main.py` (one `include_router`) and `tests/test_admin.py` (new).
+Nothing in `apps/web/**`, `pipeline.py`, `eval.py`, `warm.py` or `auth.py` is
+modified — see 9.14 for the one place that was tempting and why it was not taken.
+
+Four of §17's six demo steps need this and none of it existed: step 1 is the
+playground (`POST /api/validate`, which already exists and is NOT duplicated
+here), step 2 is the allowed-words browser, step 4 is admin cold-generate with
+live pipeline states, and step 5's report is a view of `eval_runs`.
+
+**9.1 — §9 names three eval-run routes; this ships five, and the two extra ones
+are the honest cost of a route that spends money and one that takes 25-60
+seconds.** §9 lines 232-234 are `GET /api/admin/eval-runs`, `POST
+/api/admin/eval-runs`, `GET /api/admin/eval-runs/{id}` and `GET
+/api/admin/allowed-words?stage=N`. §11's "Admin portal" paragraph adds a
+"generate cold story button that shows live pipeline state transitions" with no
+route spelled for it, so `POST /api/admin/cold-generate` and `GET
+/api/admin/cold-generate/{job_id}` are additive and are named here rather than
+left for a reader to infer. No route outside `/api/admin/*` is added, so the
+role gate is uniform by construction: one `dependencies=[Depends(require_admin)]`
+on the router, not a decision per handler.
+
+**9.2 — `GET /api/admin/eval-runs` returns an ENVELOPE, not a bare array.**
+§9 does not say. Pagination needs a `total` that a JSON array has nowhere to put,
+and the in-process launch records (9.9) have to reach the UI on the same poll or
+the portal needs a second timer to discover that the run it started exists. So
+`{total, limit, offset, runs[], launches[], budget{}}`.
+
+**9.3 — the list omits `eval_runs.metrics` and projects a summary out of it
+instead.** Run 114's `metrics` is §14's whole aggregate — `by_stage`, `by_theme`,
+per-stage bins, `below_gate_detail`, the moderation reject lists. Five of those in
+one list response is hundreds of kilobytes to render a table of five rows. The
+summary is derived, never stored, so it cannot drift from the metrics it reads;
+`GET /api/admin/eval-runs/{id}` returns the aggregate verbatim.
+
+**9.4 — `POST /api/admin/eval-runs` is ESTIMATE-BY-DEFAULT. A request with no
+`budget_usd`, or with `confirm` left false, makes zero API calls and returns the
+projection.** This is the "confirmation path" the brief demands, and it is a path
+rather than a flag because the estimate response carries the exact values the
+launching request has to echo. A full matrix is 180 cells; `docs/EVAL.md` records
+run 114 at **$5.41 and 17m49s wall clock at concurrency 6**. A button that could
+start that on one click, with the CLI's own $15 default silently inherited, is the
+defect this entry exists to make impossible.
+
+**9.5 — a hard per-request ceiling, `MAX_BUDGET_USD = 8.0`, below the CLI's own
+`DEFAULT_BUDGET_USD = 15.0`.** `--budget` defaults to 15 in `eval.main` and the
+brief says to mirror that; mirroring the *mechanism* is right and mirroring the
+*number* is not. 8.0 is above the measured full-matrix actual ($5.41) with ~48%
+headroom for a worse rewrite rate, and below what a shell can authorise
+deliberately. A request over the ceiling is 422 with both numbers in the detail.
+The `--budget` semantics are unchanged: `run_full` checks it against the RUNNING
+ACTUAL after every story (DEVIATIONS 7.44), so this is a cap on spend, not on a
+projection.
+
+**9.6 — a PROCESS-cumulative ceiling too, `PROCESS_BUDGET_USD = 16.0` (two
+ceilings' worth), because one-at-a-time bounds concurrency and not spend.** With
+only a per-run cap and a busy check, ten sequential clicks are ten runs. The
+counter sums the `budget_usd` each launch COMMITTED, not the actual it spent —
+the conservative direction, and the only one available while a run is still in
+flight. It resets when the process restarts, which is stated rather than hidden:
+this is a guard against a repeated click in one sitting, not an accounting system.
+
+**9.7 — one eval run in flight PER PROCESS, and a stale `running` row in the
+database is reported, never blocking.** `eval_runs` currently holds `id=112,
+status='running', 0 items` — a run interrupted before it wrote anything, in
+2026-07-30. A busy check that keyed on the DATABASE would make this endpoint
+permanently 409 in exactly the database the demo runs against, so the block is on
+this process's own launch registry and the DB's `running` rows travel in the
+response as `stale_running_run_ids` for an operator to see.
+
+**9.8 — the run executes IN PROCESS as an `asyncio.Task`, and its `run_id` is
+DISCOVERED rather than assigned.** `eval.run_full` creates its own `eval_runs`
+row; giving the endpoint the id up front would mean either a new parameter on
+`run_full` (a concurrently-owned file) or `--resume`'s trail machinery abused to
+adopt a pre-made row, which would write a resume entry about a run that never
+paused. So the launcher records `max(eval_runs.id)` first and polls for the first
+id above it. ASSUMED, and the failure is benign: if the row is somehow not
+observed, `launch.run_id` stays null, the run still completes and still writes its
+row, and the list shows it. A subprocess was the alternative — §14 does call the
+CLI canonical — and was rejected because it needs stdout parsing and orphan
+management to learn the same thing, and because `run_full` is already a coroutine.
+
+**9.9 — the launch registry is in-process and EPHEMERAL, and says so in every
+response.** A launch record is lost on restart; `eval_runs` is the durable record
+and `--resume RUN_ID` is the recovery path, both unchanged. The registry keeps the
+last 10 launches. Nothing in the product reads it except the portal.
+
+**9.10 — `GET /api/admin/eval-runs/{id}` paginates `eval_run_items` (default 50,
+max 200) and returns `eval_runs.metrics` whole.** 180 items x §14's per-story
+metric row is the one part of a detail response that grows without bound, and it
+is also the part a metrics table does not need — `metrics.by_stage` already
+carries the per-stage aggregates §11 asks for. `criteria` is computed by calling
+`eval.criteria_verdict` on the stored metrics rather than reimplemented, so the
+portal cannot disagree with `make eval`'s exit code (§14: "the portal is a view").
+
+**9.11 — an unknown eval-run id is a plain 404 and DEVIATIONS 6.9's
+indistinguishability rule does not apply, because there is no owner to be
+indistinguishable from.** 6.9 exists so a kid or reading id cannot be enumerated
+across families. An `eval_runs` row belongs to no family; every admin may read
+every one; there is no "someone else's run" whose existence a 403-versus-404
+difference could confirm. The rule that DOES apply here is the one the brief
+states: **an admin route must not become a data bypass for children's records.**
+No route in this file selects from `kids`, `readings`, `answers` or `gpc_stats`,
+and a test asserts that by reading the module's SQL.
+
+**9.12 — `GET /api/admin/allowed-words` is page-mandatory: `limit` defaults to
+100 and is capped at 500.** §5.4 expects 150-2,500 words per stage and the real
+table holds **9,360 at stage 12** (157 at stage 1, 64,296 in total), so an
+unpaginated route is a 9,360-row JSON response for the one screen §17 step 2
+demos. Each word carries `in_prompt`, computed from the stage's 400th `freq_rank`
+(§6's `PROMPT_WORD_LIMIT`), because "every word a stage-3 reader may see" and "the
+400 the generator is actually shown" are different claims and the browser is where
+they can be compared. `q` is a case-insensitive substring filter — SQL `LIKE` with
+the wildcards escaped, so a `%` typed into the demo's search box is a literal.
+
+**9.13 — cold-generate reports node transitions by POLLING, not SSE. Four
+reasons, and the auth one is decisive.** (a) **Auth**: `EventSource` cannot send
+an `Authorization` header, so an SSE stream behind `require_admin` means putting a
+Clerk session token in a query string, where it lands in access logs and
+`Referer`. Every other route in this service takes its token from the header
+(`auth.bearer_token` is header-only, deliberately, to avoid a CSRF surface);
+inventing an exception for a progress bar is the wrong trade. (b) **Correctness**:
+each poll returns a COMPLETE snapshot, so a dropped, late or duplicated poll loses
+nothing — there is no event ordering, no `Last-Event-ID` resume, no heartbeat, and
+no missed-event semantics to get wrong. `seq` is a monotone counter the client can
+use to notice growth, not a cursor it has to honour. (c) **Transport**: a buffering
+proxy turns SSE into a stream that arrives all at once at the end, which is the
+exact failure that would make the demo look broken on the deployed URL, and §3's
+target is DigitalOcean App Platform. (d) **Granularity is free here**: a cold
+generation is 25-60 s (`docs/EVAL.md`: p50 GENERATING ~20 s, and a 30-word stage-1
+story measured 24.60 s under DEVIATIONS 8.4), so a 750 ms poll resolves every node
+transition a human can see. The cost is one timer in the SPA, which the frontend
+agent has to write either way.
+
+**9.14 — the transitions are captured by wrapping `obs.observation`, gated on a
+`ContextVar`, and `pipeline.py` is NOT modified.** §7's machine already emits one
+span per node with the input and output the demo needs — `VALIDATING`'s output is
+`{decodability, counts, violations, distinct_story_words, passes_gate}`, which is
+§17 step 4's "the validator caught it" in machine-readable form, and
+`REWRITING`'s output is the swapped text. `run_pipeline` takes no callback, so
+the choice was: add one to a concurrently-owned file, re-implement the state
+machine in `admin.py` (two state machines, one of which is not the one that runs),
+or observe the spans. The wrapper is installed once at import and is **inert
+unless a cold-generate job set the ContextVar** — outside a job it calls the
+original with the original arguments and returns what it returned, so every other
+caller of `obs` (every `make warm` story, every eval cell, every kid request) is
+byte-for-byte unaffected. A `ContextVar` and not a module flag: `asyncio.Task`
+contexts are copies, so the recorder cannot leak into a concurrent request even
+though the patch is global. This is still a monkeypatch of another module's
+function and is the least defensible thing in this block; it is recorded here in
+those words. Sabotage-checked in both directions (see PROVED below).
+
+**9.15 — cold-generate PERSISTS NOTHING. No `stories` row, no `story_segments`,
+no `questions`.** The obvious implementation writes `status='warm'`, and that is
+the DEVIATIONS 8.50 trap exactly: a warm story with no `questions` row is a
+dead-end session that `_SERVE_SQL` now refuses, and six of them shipped last time
+something wrote warm rows without enrichment. `status='eval'` would need an
+`eval_runs` row to hang off. So the story lives in the job snapshot and dies with
+the process. Consequence, stated: the trace id is NOT written to
+`stories.langfuse_trace_id` for a cold-generate story, because there is no story
+row — §15's guarantee is about the pipeline's persisted output and is unchanged
+for `warm` and `eval` stories. It is in the response instead (9.18).
+
+**9.16 — cold-generate takes `stage_id` and `theme`, and there is no `kid_id` on
+it at all.** DEVIATIONS 6.10 keeps role and ownership independent, and an admin is
+not an owner: `GET /api/kids` returns an admin's OWN kids and nobody else's,
+whatever their role. (The brief for this phase said an admin sees an empty kid
+list. That is true of the §18 demo admin — `demo_local_parent` owns 0 kids — and
+**PROVED false of the real Clerk admin**, which now owns 5: `user_3HBc8LNBQdWzl…`
+got `200` and five of its own children on `GET /api/kids` during the live boundary
+run below. The property that matters is unchanged and is the one 6.10 states —
+role does not grant ownership — so the design holds and only the anecdote was
+stale.) A "generate for this child" parameter would be the first admin route to
+read a `kids` row, and it would read it for a child the admin does not own — which
+is the data bypass the brief names. §11's button is about the orchestrator, not
+about a child, so nothing is lost. `POST /api/stories/request`'s admin-only
+`stage_id` preview knob (DEVIATIONS 7.21) is the precedent for a stage with no
+child in the room, and it is the same shape.
+
+**9.17 — one cold-generate job at a time per process, which is what bounds its
+spend.** A cold generation is ~$0.03 (`docs/EVAL.md`: $0.0315 per accepted story),
+so a per-run budget parameter would be ceremony. The 409-while-busy is the cap: a
+repeated click cannot outrun one generation, which bounds the burn at roughly
+$0.03 per 30 s, or ~$3.60/hour, and only for an authenticated admin. Stated rather
+than left as an inference, because "it is only three cents" is how a hole gets
+argued for. The last 20 job snapshots are retained in memory and then dropped.
+
+**9.18 — the Langfuse trace id is on the snapshot from the moment the ROOT span
+opens, and no trace URL is invented.** §17 step 4 shows the trace, so the id has
+to be reachable while the run is still going, not only in the terminal result —
+the recorder reads `trace.trace_id` on entry to `story_pipeline` and publishes it
+immediately. What is NOT returned is a clickable URL: Langfuse's console path
+contains a project id this service never sees, and a guessed link that 404s during
+a demo is worse than an id and a host. `langfuse.enabled` is reported too, because
+`obs` is inert without keys and a null trace id needs to be distinguishable from a
+broken one. `obs.flush()` is called on a worker thread after the job finishes so
+the trace is visible immediately; the obs docstring's "never on the request path"
+holds — this is after the response, on a background task, off the event loop.
+
+**9.19 — every route here is 403-for-a-parent, not 404, and that is `require_admin`
+unchanged.** A route's existence is public (it is in the OpenAPI schema), so there
+is nothing to conceal, and 6.9's 404 rule is about ownership. Proved live against
+a server with `DEMO_BYPASS_AUTH=false` in both directions — see PROVED below —
+because the brief records that testing this against a bypassed server has produced
+false conclusions here twice, and `/api/health`'s `demo_bypass_auth` field
+(DEVIATIONS 7.25) is what settles which server is answering.
+
+### What was measured — 9.1-9.19
+
+Gates, on a tree where another agent was concurrently editing `pipeline.py`:
+**852 passed, 2 skipped** (`.venv/bin/python -m pytest -p no:randomly`, 85s) —
+775 was the baseline, 66 of the new ones are `tests/test_admin.py` and the rest
+arrived with the concurrent work. `ruff check storyforge tests scripts` passes for
+every file this block touches; it reports one pre-existing `E501` in
+`storyforge/pipeline.py:223` (`story_word_verdict`), which belongs to that other
+agent's 115-line in-flight change and is **not** mine to fix. One suite run
+reported `test_llm.py::test_the_two_copies_of_the_token_ceiling_agree` red; it
+passes alone and passed on the next full run with `md5 storyforge/pipeline.py`
+identical before and after, so it was that file being saved mid-run —
+`inspect.getsource` reading a file another process is writing. Noted rather than
+chased, because STATE.md already warns that a concurrent writer makes this suite
+lie.
+
+**PROVED — the auth boundary, live, against a real server with the bypass OFF.**
+`uvicorn` on port 8077 with `DEMO_BYPASS_AUTH=false`; `GET /api/health` returned
+`"demo_bypass_auth": false, "principal": null` and every response carried
+`x-storyforge-auth: enforced`, which is what settles which server answered
+(DEVIATIONS 7.25). **The garbage-token check was run first, before any conclusion**,
+because the brief records that testing this against a bypassed server has produced
+false conclusions here twice. On all six routes: no token → `401 missing bearer
+token` with `WWW-Authenticate: Bearer`; `Bearer garbage.garbage.garbage` → `401
+malformed token header`; `Basic …` → 401; empty bearer → 401; a real RS256 JWT
+carrying `public_metadata.role=admin` signed by a key Clerk never published → `401
+unknown signing key`; `alg: none` carrying the same claim → `401 unsupported
+signing algorithm 'none'; only RS256`. **Zero 5xx and zero tracebacks** in the
+server log across the whole sweep. Then, with real Clerk Backend-API session
+tokens against the same process: the admin (`user_3HBc8LNBQdWzl…`, whose
+`public_metadata.role` reads `admin`) got **200** on `GET /eval-runs` and `GET
+/allowed-words?stage=3`, **200** with `mode=estimate, launched=false` on `POST
+/eval-runs`, **422** on `budget_usd: 99` naming the $8.00 ceiling, and **404** on a
+bad theme; a freshly created probe user with no role got **403 "admin role
+required (§9)" on every one of the six routes** and **200** on `GET /api/kids`,
+which is what proves the 403s were the role gate and not a broken token. Both
+sessions were revoked (`200`) and the probe user deleted (`200`).
+
+**PROVED — cold generation works end to end, and persists nothing (9.14, 9.15).**
+One live run, stage 3 / dragons, `$0.0262`. The recorded chain was
+`RECEIVED(job) → GENERATING(0) → VALIDATING(0) → MODERATING(0) → OUTCOME(job)`,
+observed growing across polls (`revision` 4 → 10 → 15). `VALIDATING`'s node detail
+carried the validator's own verdict — `{"decodability": 1.0, "counts": {...},
+"violations": [], "distinct_story_words": ["cave","dragon","wings"],
+"passes_gate": true}` — and `GENERATING`'s carried
+`{"model": "claude-sonnet-5", "input_tokens": 3257, "output_tokens": 1469,
+"cost_usd": 0.022612}`. The Langfuse trace id
+`ebcb0cd149fc8164d85d55d4afc54a52` appeared on the snapshot and **occurs in zero
+`stories` rows**; the story's full text (`"…It had big wings. It went up fast."`)
+occurs in **zero** `story_segments` rows. The one row matching its first sentence
+is story 9414, `status='eval'`, a different trace id, written by run 114 — which is
+how likely a stage-3 dragon opener is, and exactly why the trace id rather than the
+prose is the evidence.
+
+**PROVED — the story that did NOT happen.** The live generation passed at attempt 0,
+so §17 step 4's rewrite-loop catch was not observed live and **no money was spent
+hunting for one**. `_rewrite_loop` is a pure function over
+`PipelineResult.attempts`, so it is proved by test instead, in both directions: a
+rewrite that fixes `gleaming` reports `caught: ["gleaming"], fixed: ["gleaming"],
+still_present: [], new_words: ["big"]`, and a rewrite that keeps it reports
+`fixed: [], still_present: ["gleaming"]`. Reporting the second as fixed would be
+the flattering-eval mistake §14 is written against.
+
+**PROVED — every guard bites, checked the way AUDIT-PHASE7-FIXES F2 says to check.**
+F2's lesson is that adding `ANSWERABLE_SQL` made five existing guards vacuous
+because no fixture wrote a `questions` row, so each guard here was sabotaged and
+the failures counted:
+
+| sabotage | what went red |
+|---|---|
+| `dependencies=[Depends(require_admin)]` off the router | **13**: `no_token` x4, `garbage` x4, `parent` x4, the demotion test. Only the four GETs — the two POSTs also carry a handler-level `Depends(require_admin)` for `started_by`, so they are gated twice |
+| `require_admin`'s `raise` removed (role check dead, authentication alive) | **7**: `parent` x6 — now including both POSTs — and the demotion test. The `no_token`/`garbage` tests correctly stay green, because authentication is not what was broken |
+| `verify_token` refuses everything (a broken fixture) | **the positive control**, by name: `a VALID admin token was refused 401 … the forgery assertions above therefore prove nothing` |
+| the LIKE escaping removed | `search_is_a_literal_substring` |
+| `in_prompt` hardcoded `True` | `marks_what_the_prompt_actually_sees` |
+| the detail route drops `metrics` | 3 tests, including the one that compares against `criteria_verdict` itself |
+| `_STALE_RUNNING_SQL` changed to `SELECT id FROM kids` | `no_admin_route_reads_a_child_table` |
+| the recorder made unconditional (ContextVar guard gone) | `no_job_in_context_the_recorder_is_invisible` |
+| `_install_node_recorder()` never called | `recorder_is_installed_once`, `node_chain_is_recorded` |
+| the ROOT span counted as a node | `node_chain_is_recorded` |
+| `MAX_BUDGET_USD` raised above the CLI's default | `budget_block_reports_ceilings` |
+| the per-request ceiling check removed | `budget_over_the_ceiling_is_refused`, `assert 202 == 422` |
+
+**PROVED — the vacuity that was actually there, and is now closed.** The third row
+above is the F2 defect in this file, found by looking for it. With `verify_token`
+refusing every token, the forgery test as first written passed **6/6 green** while
+proving nothing: "a forged token is refused" and "nothing is accepted" are
+indistinguishable from inside a test that only ever sends forgeries. It now ends by
+handing the SAME route, on the same fixture, over the same transport, a VALID admin
+token and asserting the answer is neither 401 nor 403 — so both halves have to hold
+or neither means anything. `test_the_child_table_guard_can_fail` is the same idea
+for the AST scan: it writes a throwaway module containing `SELECT display_name FROM
+kids` and asserts the extractor finds it, because a scanner that silently matches
+nothing passes every module ever written.
+
+**PROVED — the last sabotage cost $0, deliberately.** Removing the ceiling check
+lets the request through to a real launch, so that one run was made with
+`ANTHROPIC_API_KEY=sk-ant-deliberately-invalid`. The test failed on `202 == 422` as
+intended, `select count(*) from eval_runs where id > 114` returned **0** both
+immediately and after a delay, and no billable call was made. Every other sabotage
+in the table is free.
+
+**PROVED — nothing leaked into the shared database.** `eval_runs` holds exactly
+`2, 3, 112, 113, 114` before and after all of this; the `owned_run` fixture's rows
+and the two throwaway `running` rows are gone. Total spend for this whole block:
+**$0.0262**, one cold generation. `make eval` and `make warm` were not run.
+
+**ASSUMED, and not provoked.** (a) 9.8's run-id discovery — the launcher polls for
+`min(id) > baseline` and no launch was run to completion, so the discovery loop is
+reasoned about rather than observed; its failure is benign by construction
+(`run_id` stays null, the run still writes its own row, the list still shows it).
+(b) 9.6's process ceiling was proved with registry entries placed by hand, not by
+spending $16. (c) The stale-serve interaction between a launch and a uvicorn
+`--reload` restart: a launch is lost from the registry and the `eval_runs` row is
+left `running`, which is the state `id=112` is already in and which 9.7 exists to
+tolerate. (d) 9.13's transport claim about a buffering proxy in front of SSE is an
+argument from how proxies behave, not a measurement — no SSE implementation was
+built to lose a race against.
+
+
+## Phase 8 — the admin portal's FRONTEND (§11's route list, §11's "Admin portal", §17 steps 1, 2, 4 and 5)
+
+Numbered 9.20-9.39, continuing the block the backend opened at 9.1. Logged
+**before** the code, per §0. Everything marked **PROVED** was measured in a real
+browser against a server reporting `demo_bypass_auth: false`; everything else is
+reasoning and is labelled **ASSUMED**.
+
+New files, all under `apps/web/src`: `lib/adminApi.ts`, `lib/validatorView.ts`
+and their two test files, `ui/AdminShell.tsx`, `ui/VerdictMark.tsx`,
+`ui/StatePill.tsx`, and five routes under `routes/Admin*.tsx`. Touched:
+`App.tsx` (the route table), `lib/auth.tsx` (one guard), `styles/index.css` (one
+plain-CSS block). Nothing in `services/api/**` is modified — the backend half of
+this portal is 9.1-9.19 and is another agent's.
+
+**9.20 — `/admin` is a route TREE and the validator playground is its index.**
+§11's route list names one route, `/admin` (admin only), while §11's "Admin
+portal" paragraph names four screens. Four screens behind one URL is either a
+tab bar with no addressable state or a 3,000-line component; the tree is
+`/admin` (playground), `/admin/words`, `/admin/evals`, `/admin/evals/:runId`,
+`/admin/generate`. The playground is the index rather than a dashboard, because
+§17 step 1 is the first thing a grader sees and a landing page in front of it is
+a click between the demo and its opening line.
+
+**9.21 — `RequireAdmin` does not check a role, because nothing on the client is
+allowed to. It checks a session; the API decides the role.** `lib/auth.tsx` is
+explicit that "roles still come from the signed token, never from here", and
+`auth.py` re-reads `public_metadata.role` from the JWT on every request so the
+Clerk dashboard can revoke admin immediately. A client-side role test would be a
+second opinion that can disagree with the only one that matters, and it would
+disagree in the dangerous direction the first time Clerk's client cache is ahead
+of a revocation. So the guard is exactly `RequireParent`'s check — signed out
+redirects to `/sign-in?next=…` — and the role gate is the API's 403, rendered.
+
+**9.22 — the 403 surface removed in 7.37 is restored, with its sentence verbatim,
+and it is reached by a real 403 rather than kept as decoration.** 7.37 deleted
+`ParentError`'s 403 branch after proving it unreachable: `require_admin` guarded
+one route and no web code called it. This portal is the code that calls it, so
+the branch returns — as `AdminError` in `ui/AdminShell.tsx`, not by reviving the
+parent one, because the two surfaces answer to different rules (§01 forbids an
+error state in kid mode, permits a plain one for a parent, and an admin should
+see the status and the route). The sentence preserved in 7.37/6.20 is restored
+word for word: it names the missing `public_metadata` claim and the Clerk
+dashboard action, because Clerk's default session token carries no metadata and
+every user then resolves to `parent` — a generic "forbidden" would send whoever
+meets it into `auth.py` looking for a bug that is not there.
+
+**9.23 — the shell PROBES the API once and renders nothing else until it
+answers, so `/admin` is not a screen a parent can sit on.** The alternative is
+per-screen 403 handling, which means the chrome, the stage selector and the
+textarea all render for a parent and only the data is missing — a surface that
+looks operable and is not. The probe is `POST /api/validate` with the text `cat`
+at stage 1: it is the one admin route that provably existed before this portal
+did, it is a pure function over a vendored dictionary plus one indexed `SELECT`,
+and it spends nothing. Its cost is one extra request per admin page load.
+ASSUMED: that a 200 from `require_admin` on that route implies a 200 from
+`require_admin` on the others. That is true by construction today — 9.1 puts a
+single `dependencies=[Depends(require_admin)]` on the whole admin router — and it
+is why the probe is a `lib/adminApi.ts` function with one call site rather than
+an inline fetch.
+
+**9.24 — the playground opens ON the §17 demo, pre-filled, because the fixture
+does not reproduce without `story_words`.** Measured live against
+`DEMO_BYPASS_AUTH=false`: "The knight sees a beautiful dragon" at stage 3 with no
+`story_words` returns **decodability 0.25, three violations, ZERO story words and
+`dragon` as DECODABLE via schwa relaxation** — because `dragon` genuinely is
+decodable at stage 3 (§5.2.6). The repo's own locked fixture
+(`tests/decoder/golden.yaml::demo-sentence-stage-3`, `test_phase2.py`) is 0.0%,
+three violations and one story word, and it gets there by passing
+`story_words: [dragon]`. So the screen ships with the sentence, stage 3 and the
+story word already in it: opening `/admin` IS §17 step 1, with no typing, and it
+reproduces the fixture rather than a near-miss. Every field is editable and
+nothing is hard-coded — the verdicts on screen are always the response's.
+
+**9.25 — the playground exposes BOTH `extra_sight_words` and `story_words`, where
+style guide §09 draws one "+ sight words" chip.** They are different inputs with
+different effects on the number being demonstrated: a sight word is exempted from
+scoring, a story word is the ≤3-per-story picture-chip budget §4 caps and is what
+turns `dragon` amber. Shipping only the one §09 draws would have made 9.24's
+fixture unreachable from the UI.
+
+**9.26 — the words on screen carry the ADMIN's own casing, spacing and line
+breaks; every verdict, and the word each verdict belongs to, come from the
+response.** `POST /api/validate` returns tokens lowercased (`the`, not `The`) and
+punctuation as its own token, in input order. Rendering the response's strings
+verbatim would print "the knight sees a beautiful dragon" back at someone who
+typed a capital, which reads as the app mangling the input. So a pure function
+walks the response's tokens against the submitted text and slices the original
+for display — apostrophe shapes normalised for the search only, since `’`→`'` is
+one character for one character and leaves every index intact. When a token
+cannot be found the response's own token is displayed instead, so the failure
+mode is "lowercase", never "wrong word" or "missing word". Tested in both
+directions.
+
+**9.27 — the playground's verdict rendering is a NEW plain-CSS class family
+(`.sf-tok-*`), not the existing `.verdict-*`.** Style guide §02's locked mapping
+and §09's playground draw the same four verdicts two ways: §02 colours the *text*
+(what `.verdict-*` does, and what `/` renders today), §09 fills the *background*
+in the verdict tint and leaves the word in ink-900 at 13.4:1 — which is the right
+call for a 26px reading line an adult is scanning for reds. Extending
+`.verdict-*` would have repainted the landing page's artifact, which is proven
+and shipped. Both families live OUTSIDE `@layer utilities` for STATE invariant
+7's reason: they are chosen from data, and a layered rule whose literal class name
+never appears in a scanned file is purged from the production bundle, silently
+collapsing all four verdicts to plain ink. Both are also written as literals in a
+`Record` in one component (`ui/VerdictMark.tsx`, the §12 contract's "the ONLY
+place verdict colors appear"), so the two defences are independent.
+
+**9.28 — a missing GPC is rendered grapheme-first with IPA, never as the raw id,
+and `alignable: false` gets its own sentence instead of an empty list.**
+`missing_gpcs` is `["igh|AY", "kn|N"]` — the id format from `decoder/types.py`,
+with `.` joining multi-phoneme GPCs and `SIL` for a silent one. §17's line is
+"violations light up red with missing GPCs NAMED", and `igh|AY` is not a name.
+Rendered as `igh /aɪ/` and `kn /n/`, reusing `lib/phonics.ts`'s ARPABET→IPA table
+rather than adding a second one. The harder case is `beautiful`: a VIOLATION with
+an EMPTY missing set and `alignable: false`, because the 93-GPC inventory cannot
+spell it at ANY stage (`B Y UW T AH F AH L` needs `eau`). "missing: nothing" is
+the one rendering that would make the demo look broken, so that case says what is
+true — the inventory cannot spell this word at any stage — which is §5.3's
+declared non-goal and §18's inventory-size signal, on screen.
+
+**9.29 — 300 ms debounces the TEXT and nothing else.** §5.6's number is about
+keystrokes. A stage change, a story-word change and a sight-word change are single
+deliberate acts that revalidate immediately: waiting 300 ms after a `<select>`
+makes the screen feel broken, and it is the stage selector a grader will be
+watching in step 1. The constant is exported and pinned by a test, so §5.6's
+number cannot drift into a magic literal.
+
+**9.30 — the allowed-words browser prints the real row counts, and §17's "611
+words" is stale.** Measured against the live table: stage 3 holds **2,593** rows,
+stage 1 holds **157** and stage 12 holds **9,360** (64,296 total). §17 step 2's
+script says "611 words" and the brief says 9,359 at stage 12; neither matches the
+database this demo runs against. The screen shows the server's `total`, never a
+figure from a document, and the demo line is a documentation drift worth naming
+rather than a number to reproduce.
+
+**9.31 — cold-generate polls, at the 750 ms 9.13 specified, and the client owns
+the stop condition.** 9.13 chose polling over SSE for four reasons of which the
+decisive one is that `EventSource` cannot send an `Authorization` header. The
+consequence on this side: every poll is a complete snapshot, so the UI is a pure
+function of the latest one and a dropped poll costs nothing. Polling stops on a
+terminal status, on unmount, and after a wall-clock ceiling — an un-terminating
+job must not leave a timer running for the rest of the session.
+
+**9.32 — the rewrite diff is rendered as the two texts, not as a word-level
+diff.** Style guide §09 is explicit that "the rewrite catch is the story — make
+sure the diff ('gleaming → shiny') is displayed, not just the state", and §17 step
+4 says the same. A word-level diff of two model outputs is a diff algorithm plus a
+tokenizer plus a rendering, and it can mislabel a whole re-clause as a swap. What
+the API gives is each attempt's text and each attempt's violating words with their
+missing GPCs, which names the caught word exactly and shows the replacement text
+beside it. The word "gleaming" is not searched for; whatever the validator
+actually caught is what is shown.
+
+**9.33 — the eval detail renders `metrics.by_stage` as §17 step 5's table and
+deliberately does not render the rest of the blob.** `eval_runs.metrics` carries
+`below_gate_detail`, three moderation reject lists, per-stage bins, `by_theme`,
+token censuses and model provenance. §11 asks for "metrics tables"; §17 asks for
+"decodability table across 12 stages, cost, latency". The screen shows the
+headline aggregates, the per-stage table, the §1 criteria verdict the server
+computed with `eval.criteria_verdict` (9.10 — so the portal cannot disagree with
+`make eval`'s exit code), and the below-gate rows when there are any. Everything
+else is reachable as the raw JSON behind a disclosure, which is honest about being
+a dump rather than dressing one up as a report.
+
+**9.34 — launching an eval run from the browser is a two-step confirmation, and
+the estimate is not editable into a launch by accident.** 9.4 made the API
+estimate-by-default; this side does not paper over it with one button that posts
+twice. The estimate is requested, its numbers are shown, and only then does a
+second, differently-worded control post the launch echoing the values the estimate
+returned. A full matrix is ~$5.41 and ~18 minutes; the ceiling is $8.00 per run
+(9.5) and $16.00 per process (9.6), and both are shown next to the button rather
+than discovered as a 422.
+
+**9.35 — this is an adult surface: §11's 48px floor, and no kid-mode styling is
+imported.** Card `surface="admin"` (1px rule, no shadow), IBM Plex Mono for data,
+`min-h-tap`/`min-w-tap` on every control — never `tap-kid`, never `.sf-lift-kid`,
+never `font-read` outside the one 26px validated-text line §09 draws in Andika.
+Style guide §09's temperament is "an instrument panel, and it should look like
+one", and §10's admin grid is 12 columns at max 1440px with a 16px gutter, which
+is wider than the 1120px parent shell — so `AdminShell` is its own chrome rather
+than `ParentShell` with a different heading.
+
+**9.36 — §01 is inverted here on purpose: every failure names the status, the
+route and the method.** "A child never sees an error" is about kid mode; a parent
+gets a plain sentence and no jargon (7.32); an admin debugging a pipeline needs
+the status code. So `AdminError` prints `POST /api/validate → 500` alongside the
+prose, an unreachable server is distinguished from a refusing one (status 0 vs a
+real code), and a 404 on an admin route says the route is absent rather than
+"something went wrong" — which is the state four of these five screens were in
+while 9.1-9.19 was being written.
+
+**9.37 — the screens are typed against 9.1-9.19's stated shapes, with one
+tolerant seam per response, and the seam is a tested pure function.** The backend
+entries pin the envelopes (`{total, limit, offset, runs[], launches[], budget{}}`;
+a summary on the list and `metrics` whole on the detail; `in_prompt` per allowed
+word; a `seq`-carrying job snapshot). Where a field name is still an inference
+rather than a quotation, one `normalize*` function per response reads the
+plausible spellings and reports which one it found, in the manner `postAnswer`
+already accepts three names for a graded answer. That keeps every guess in one
+file with a test beside it instead of scattered through five components, and it is
+why pointing a screen at a corrected shape is a one-line change.
+
+**9.38 — the landing page's phase-0 note is corrected, not the landing page.**
+`routes/Landing.tsx` carries hard-coded verdicts and a comment saying the live
+`POST /api/validate` result is shown by "the admin playground (§5.6, phase 8)".
+That playground now exists, so the comment is updated to point at the route. The
+hard-coded artifact stays: `/` is public and `/api/validate` is admin-only, so a
+signed-out visitor cannot be shown a live validation, and reaching for one would
+mean opening the endpoint.
+
+**9.39 — no component tests, unchanged from 7.30's decision; the new pure
+functions get real ones.** `bun test src` covers `lib/` only and the components
+are verified in a browser. The two new lib files are where the logic that can be
+wrong without being visible lives — token alignment, GPC naming, response
+normalisation — and they are tested. Baseline was 137 web tests; the count after
+this block is in the PROVED section below.
+
+### PROVED — the admin portal's frontend, measured in a real browser
+
+Every claim below was driven through `~/.claude/skills/gstack/browse` at an
+isolated `BROWSE_SERVER_PORT`, against a FastAPI on port 8091 started with
+`DEMO_BYPASS_AUTH=false`, with a REAL Clerk session minted through the Backend
+API. **Enforcement was confirmed first, not assumed**: `/api/health` reported
+`demo_bypass_auth: false`, and through the Vite proxy `POST /api/validate` with no
+token returned 401 and with `Bearer garbage.token.here` returned 401 — the check
+the Phase 6 audit's finding 0 exists to make mandatory. Web gates: **`bunx tsc
+--noEmit` clean, `bun test src` 201 passed / 0 failed (137 baseline, +64), `bun run
+build` clean.**
+
+- **PROVED — §17 step 1, the money shot, at stage 3.** "The knight sees a
+  beautiful dragon" renders **0.0% decodability, 3 violations, 1 story word** —
+  the locked fixture exactly (`tests/decoder/golden.yaml::demo-sentence-stage-3`).
+  The GPCs are NAMED, not printed as ids: `knight → missing igh /aɪ/, kn /n/` and
+  `sees → missing ee /iː/, s /z/`. `beautiful` says *the 93-GPC inventory cannot
+  spell this word at any stage* rather than reporting an empty missing set. Screenshot
+  taken in dev AND against the production bundle.
+- **PROVED — the colours are the style guide's, by computed style, in `dist/`.**
+  Read off the live DOM under `vite preview`: violation `background
+  rgb(248,227,223)` = `#F8E3DF` (berry-100) with `text-decoration underline wavy
+  rgb(192,69,59)` = `#C0453B` (berry-500); sight `#E2EDF2` + dotted `#3D7891`;
+  story `#FBEFD4` + double `#C98A2E`; decodable `#E7F0E2` + solid `#4C7C51`; OOV
+  `#F1E4C8` + strikethrough. STATE invariant 7 checked directly in the built CSS:
+  all six `.sf-tok-*` rules and all five `StatePill` tone classes survive the purge.
+- **PROVED — §5.6's debounce, by counting requests.** Six keystrokes fired back to
+  back produced **exactly one** `POST /api/validate`. A stage change revalidated
+  immediately (9.29): the same sentence at stage 9 became **66.7%, 1 violation** —
+  `knight` and `sees` decodable once `kn` and `igh` unlock, `beautiful` still not.
+  That progression is a better demo than the single frame and cost nothing to find.
+- **PROVED — §17 step 2 against the real table.** Stage 3 shows **2,593 words**,
+  the `in_prompt` column, and `freq_rank ≤ 2,221` as §6's 400-word cutoff. §17's
+  script says "611 words" and the brief says 9,359 at stage 12; the database holds
+  **157 / 2,593 / 9,360** at stages 1 / 3 / 12. The screen prints the server's
+  numbers (9.30) and the documents are the things that are wrong.
+- **PROVED — §17 step 5 against run 114.** Mean decodability 98.9%, **0 below the
+  gate**, p95 rewrite depth 2, $5.41, and the four §1 criteria all `✓ met` —
+  computed by the server calling `eval.criteria_verdict`, so the portal cannot
+  disagree with `make eval`'s exit code. The 12-row per-stage table renders, as do
+  the moderation rejects and the run's provenance. The stale `running` row 112
+  renders as all dashes rather than crashing on its null aggregates.
+- **PROVED — §17 step 4, twice, with real money (~$0.05 total).** `cg_7bbb7c36` at
+  stage 3: `RECEIVED → GENERATING 4.8s → VALIDATING 95.8% → MODERATING approved
+  1.4s → OUTCOME accepted`, $0.0151, Langfuse trace id
+  `6ee49ab93c0db2d525eef94feeb944a2` on `us.cloud.langfuse.com`. `cg_030512bb` at
+  stage 10 caught the rewrite loop: `GENERATING 7.6s → VALIDATING fail 93.8% →
+  REWRITING n=1 25.3s → VALIDATING 100.0% → MODERATING rejected → OUTCOME
+  moderation_fail`, and the diff panel named it in the server's own words —
+  `caught: liked, opened, would, knew, friend → swapped out: … words that appeared
+  instead: family, know, like, will`. **That run is also an unplanned demo of §13's
+  three independent layers**: the validator took the story to 100% and the
+  moderation node still refused it for `"It like to fly up and away."`
+- **PROVED — the 403 surface 7.37 removed is reachable, and it names the CAUSE.**
+  A temporary Clerk user with empty `public_metadata` was created, signed in
+  through a ticket, and sent to all five admin routes. Every one rendered *"This
+  session is not an admin"* with the 7.37 sentence verbatim — the default session
+  token carrying no metadata, the Clerk dashboard action — plus `request POST
+  /api/validate`, `status 403`, and the server's own `detail`. **No stage selector,
+  no textarea, no data**: the shell probe (9.23) refuses to render the screen at
+  all. `POST /api/admin/cold-generate` with that user's token was independently
+  403 by `curl`, so the gate holds at both layers. **The probe user was deleted and
+  its session revoked**; a `GET /v1/users` afterwards shows one user.
+- **PROVED — signed out, `/admin/evals/114` redirects to
+  `/sign-in?next=%2Fadmin%2Fevals%2F114`.** The deep link survives, so an admin
+  who followed a link lands where they were going.
+- **PROVED — §11's 48px floor, by computed geometry.** Every one of the 11
+  controls on the playground measures ≥48px in BOTH axes. No `tap-kid`, no
+  `.sf-lift-kid`, no kid-mode import anywhere in the portal (9.35).
+- **PROVED BY SABOTAGE — the role-gating test is not vacuous.** The coordinator
+  flagged the shape `docs/AUDIT-PHASE7-FIXES.md` F2 found five of: "a parent
+  cannot reach /admin" passes just as happily when NOBODY can. So the status →
+  copy decision was extracted to `lib/adminApi.ts::adminErrorCopy` and given a
+  POSITIVE control. Both directions bite: making every status name the role claim
+  turns **3** tests red, and making 403 fall through to the generic branch turns
+  **2** red. Same for `transitionVerdict` — verdict-always-false fails 2, dropping
+  the `approved` field fails 2.
+- **A REAL BUG THE BROWSER FOUND, and it was a colour lie.** Every §7 node
+  completes with `status: "done"`, the two whose whole job is to say no included.
+  So the first version of the pill chain painted a **green `MODERATING rejected`
+  and a green `OUTCOME moderation_fail`** — the label said refused, the hue said
+  fine, and on a demo screen the hue is what gets read. That is §11's "never colour
+  alone" inverted, which is worse than a missing signal. Fixed by reading the
+  span's own verdict (`passes_gate`, `approved`, `outcome`) instead of its status,
+  and locked with the fixtures from the real `cg_030512bb` snapshot.
+- **A SECOND BUG THE BROWSER FOUND.** Run 114's wall clock rendered as
+  `1068.2s`. `elapsed()` had ms and s tiers only, because §09's pills are seconds;
+  an eval run is not. Now `17m48s`.
+- **A THIRD DEFECT, found by reading `admin.py` after the fact.** The detail route
+  paginates `eval_run_items` on `items_limit`/`items_offset`; this client was
+  sending `limit`/`offset`, which FastAPI ignores. It read correctly by accident on
+  the server's defaults and would have broken on page 2 of a 180-item run. Fixed.
+
+**ASSUMED, and labelled as such.**
+- **That a 200 from `require_admin` on `POST /api/validate` implies a 200 on the
+  `/api/admin/*` routes** (the shell probe, 9.23). Read, not merely assumed —
+  `admin.py` carries one `dependencies=[Depends(require_admin)]` on the router —
+  but a future route that took its own dependency would slip past the probe.
+- **The 409-while-busy path was never provoked.** One cold generation at a time is
+  what bounds the spend (9.17); the screen disables its own button while a job is
+  in flight, so reaching the 409 needs two tabs, and that was not staged.
+- **The 12-minute poll ceiling and the eval LAUNCH were never exercised.** The
+  estimate path was driven live and returns `mode: "estimate", launched: false`
+  with all three cost projections; the launch would have spent $6.49–$8.00 on an
+  18-minute matrix and was deliberately not run. So the two-step confirmation is
+  proven up to the second click and not through it, and `mode: "launch"` (the
+  server's word — NOT `"launched"`, which is the boolean beside it) is verified
+  against the backend's published contract rather than against a response.
+- **No component tests**, unchanged from 7.30 (9.39). The four screens are
+  browser-verified; the logic that can be silently wrong was moved into `lib/` for
+  exactly that reason.
+
+
+**8.100 — `--concurrency` had never run above 1, and this entry was cited before
+it existed.**
+`eval.py`'s worker passed the ENCLOSING `AsyncSession` to every cell, so
+`asyncio.gather` drove one session concurrently and raised "This session is
+provisioning a new connection; concurrent operations are not permitted". The flag
+was accepted, printed in the report's reproduction command, and recorded in the
+run config — and had never once executed. The first full matrix was serial not by
+choice but because anything else crashed on the first batch.
+Fixed with a session per cell. That also strengthens `--resume`: each cell now
+commits on its own connection, so an interrupted run keeps every measurement it
+finished rather than depending on the enclosing transaction. Full matrix wall
+clock 1068s at `--concurrency 6` against roughly two hours serial.
+
+**Process failure, logged because it is exactly what this file exists to prevent:**
+I cited `8.100` in `storyforge/eval.py` and `scripts/eval_doc.py` and in the commit
+message BEFORE writing this entry, and then shipped without it. §0 requires the
+deviation to be logged before the change is made. `docs/AUDIT-PHASE7-FIXES.md`
+caught it by resolving every citation in the repo — 159 cited, 158 resolved — and
+the one dangling reference was mine. A citation to a nonexistent entry is worse
+than no citation: it reads as though a rationale exists and was reviewed.
+
+---
+
+## Phase 8 — the rewrite prompt that could not state the cap, and the safety boolean that still precedes its reason (`docs/AUDIT-PHASE7-FIXES.md` F1 and F9)
+
+Numbered 9.40-9.59. Two findings, both confirmed live by the Phase 7 adversarial
+audit, both the same shape: a structured prompt that asks for a conclusion the
+prompt gave the model no way to reach. F1 is on the generation half and is
+child-facing today; F9 is on the safety half. Written BEFORE the changes, per §0.
+
+**9.40 — F1's root cause is WIDER than the story-word cap: the rewrite prompt
+drops the story-word bank, the theme and the length target, so on any rewrite the
+model cannot see the words that carry the theme.**
+`pipeline._call` sends `messages=[{"role": "user", "content": user_block}]` — one
+message, no history — and `run_pipeline` replaces `build_request_block`'s output
+with `build_rewrite_block`'s on the first failure. `build_vocabulary_block` (the
+cached `system` half) carries PERMITTED and SIGHT words and nothing else, because
+story words are per-request. So from attempt 1 onward the prompt says "every
+replacement must come from the permitted, sight, or story lists" while the story
+list, the theme word and the word count are all absent from it.
+PROVED from run 114, no API call: **0 of 108** stories that needed no rewrite
+ended with zero distinct story words; **23 of 72** that were rewritten did
+(31.9%), and the rate climbs with depth — 14/56 at depth 1, 8/15 at depth 2, 1/1
+at depth 3. The audit's 9 cap-only cases are a subset; the other 14 are ordinary
+decodability rewrites that lost the theme for want of the bank. So the fix
+restores the offered bank (with glosses), the theme and the length bounds to the
+rewrite block, and does not stop at naming the cap.
+
+**9.41 — the cap failure is stated as DROP ONE, KEEP THE REST — never as "remove
+story words".**
+§5.5 and STATE invariant 3: the cap counts DISTINCT story words and repetition is
+correct decodable-reader behaviour. The failure being fixed is a dragons story
+with no dragon in it, so "remove the story words" is not an acceptable resolution
+of a cap failure — it is the defect. The problem line therefore names the words to
+KEEP, names the one word to remove, and repeats that repeating the kept words is
+free.
+
+**9.42 — which story word to drop is decided by the CODE, not left to the model.**
+Ranked by occurrence count descending, then alphabetically, keeping the top
+`MAX_STORY_WORDS`. Rationale: the most-repeated word is the one the story leans
+on, so dropping the rarest is the smallest edit and the least likely to unravel
+the plot — and a deterministic choice makes the instruction concrete ("keep
+dragon, cave and fire; remove wings") instead of a decision the model has to make
+inside a prompt that has already proved it resolves ambiguity by deleting the
+theme. `report.words` carries every occurrence with its verdict, so no new data is
+needed.
+
+**9.43 — `build_rewrite_block` gains a `theme` argument.**
+The theme is not on `Vocabulary` (it is a parameter of `load_vocabulary`, not a
+field of the result) and the rewrite block now has to name it. Added as a
+keyword-only parameter with an empty default so the theme section is omitted
+rather than mis-rendered if some future caller does not pass one. `run_pipeline`
+is the only production caller.
+
+**9.44 — the headline sentence is now conditional.**
+"Your story used words this child cannot read" is FALSE on a cap-only failure —
+the audit's story 9257 was at 100% decodability when that sentence was sent to it.
+The lexical headline is preserved verbatim for the lexical case, and a cap-only
+failure gets its own true sentence.
+
+**9.45 — `build_rewrite_block` may never again emit an empty problem list, and
+that is asserted rather than assumed.**
+All three `passes_gate` conditions are now describable, so an empty `lines` is
+unreachable from a real gate failure. It is still a live prompt, so the function
+carries a final defensive line naming the gate generically, and a test enumerates
+every failure mode of `passes_gate` and asserts each produces at least one problem
+line and never the string `PROBLEMS (0)`. A prompt that instructs the model to
+"change only what is listed" and lists nothing is the whole of F1; the guard is
+against the class, not the instance.
+
+**9.46 — none of this touches the cached prefix.**
+Everything added is in `messages`, after the `cache_control` breakpoint.
+`SYSTEM_RULES` and `build_vocabulary_block` are unchanged, so STATE invariant 10
+holds and `tests/test_llm.py`'s frozen-prefix assertions are untouched. A rewrite
+already paid full input price for the body it is quoting; the bank is ~8 lines.
+
+**9.47 — the pool repair is a RE-STATUS, never a delete, and the servable defect
+is exactly one story.**
+`answers.question_id` is `ON DELETE CASCADE` and `questions.story_id` is
+`ON DELETE CASCADE`, so deleting a story destroys the §8 mastery evidence
+(`mastery.MASTERY_QTYPES`) hanging off it — an earlier agent already destroyed one
+answer row that way. Story 1661 (stage 1, dragons, `warm`, `story_words = {}`,
+text "Dan sat in a camp…") reads as a dragons story with no dragon and is
+servable, so it moves to `rejected` — the status the pipeline itself uses for a
+story that must not reach a child — which keeps every `questions`, `answers`,
+`readings` and `story_segments` row addressable. Verified before the change that
+stage-1/dragons still holds >= 3 servable stories without it, so `make warm-check`
+does not go red; a replacement is generated through the real pipeline so the pair
+does not merely stay at its floor.
+
+**9.48 — the other five servable stories with `story_words = {}` are NOT the same
+defect and are left alone.**
+7270, 7316, 7324, 7336 and 7342 have empty `story_words` but their text carries the
+theme in permitted words ("A dragon had a cave. It had wide wings…"). Empty
+`story_words` means "no OFFERED bank word was both used and claimed", which is
+invariant 2 working, not a missing theme. Two of them (7342's `burrow`) even use
+the theme word without claiming it, so it scored as a violation. Re-statusing a
+story a child can enjoy would be a worse outcome than the metric being ugly.
+
+**9.49 — the 30 `eval` rows with `story_words = {}` are measurement records and
+are not repaired.**
+`status = 'eval'` is refused by `_SERVE_SQL`, by `GET /api/stories/{id}` and by
+`POST /api/readings` (STATE invariant 14), and `eval_run_items.story_id` points at
+them: they are the evidence for F1 and for `docs/EVAL.md`'s numbers. Mutating them
+would corrupt the run they document. No child can reach one.
+
+**9.50 — F9: `reason` is declared BEFORE `approved`, for the reason 8.77 already
+proved on the grammar half.**
+Structured output is emitted in schema order. 8.77 moved `grammar_note` ahead of
+`well_formed` because the boolean-first order made the judge commit and then
+rationalise, and it fixed three false positives. `approved` was left ahead of
+`reason` — the identical defect on the half that decides child safety. The
+auditor's controlled experiment (field order the only variable) flips story 9136
+from REJECTED 3/3 to approved 3/3 and 9190 to 2/3 while a true positive (9305) and
+a control are unmoved. The judge's own words on 9190 give the mechanism away: "A
+dog hit a rock next to the cat, **which could be interpreted as** the dog hitting
+the cat" — a rationalisation of a boolean already emitted.
+
+**9.51 — the must-approve set stops being drawn only from stories the judge
+already approved.**
+The auditor's structural criticism, and it is correct: every must-approve case in
+`FIXTURE` was selected from real stories the judge had APPROVED (`# story 7292`,
+`# eval story 3243`, …), which is survivorship selection — the fixture cannot
+detect a class of false positive whose members were never eligible for it.
+`assert fp == 0` passing is therefore weaker evidence than it reads as. New
+must-approve cases are drawn from stories run 114's judge REJECTED, verbatim out
+of `story_segments`, and each is added only after I have read it and judged it safe
+myself. Cases I judge to be defensible rejects (9305, "went off to get fire") are
+NOT added — the point is to fix the selection bias, not to assert that every
+rejection was wrong.
+
+**9.52 — STATE invariant 5 governs 9.50 and 9.51, in full, and the order of work
+follows from it.**
+Both directions, the WHOLE fixture, against the live judge, over MULTIPLE runs.
+Every one of the four previous passes at this prompt broke a case that had been
+passing and none was caught by testing the case being worked on. So: candidate
+cases are probed on their own first (cheap, and it decides whether they belong in
+the fixture at all), then the field order changes, then the whole fixture runs
+three times. `"The man had a gun. He shot it and the dragon was dead."` must still
+die at layer 1, and every must-reject case must still die at `layer == "model"`
+where the fixture asserts it.
+
+## Phase 8 — AUDIT-PHASE7 F2, F3, F4: guards that passed for the wrong reason
+
+Numbered 9.60-9.79 to stay clear of every block above. Logged **before** the
+changes, per §0. Everything marked **PROVED** was measured with the command
+shown; everything else is reasoning and is labelled **ASSUMED**. Every number
+comes from a private `pg_dump` copy of the live database (`sfj960`, and a
+sabotage copy `sfsab` taken from it) because two other agents are writing the
+shared one — STATE.md's recipe, and the reason 8.47 exists.
+
+The three findings are one shape: **a test that goes quiet is worse than one that
+goes red, because it still carries its sabotage note and still reads as
+coverage.** 8.90 was the same shape (a fixture betting the product would never be
+finished) and so was 8.50's `_insert_story` trap (a fixture excluded by a new
+predicate before the gate it was about ever ran). This is the third and fourth
+time; the entries below therefore fix the *mechanism* each guard uses to be
+observable, and every assertion is preserved or tightened, never loosened.
+
+**9.60 — The vacuity is PROVED, not inferred, and one instance is new.**
+Sabotage copy at `/tmp/sfsab/api` (a working-tree copy, never the real repo;
+`storyforge` resolves out of the copy — verified `storyforge.__file__ ==
+/tmp/sfsab/api/storyforge/__init__.py`) against a throwaway `sfsab` database.
+
+Three sabotages applied together — `_SERVE_SQL`'s `WHERE status = ANY(:statuses)`
+→ `WHERE (status = ANY(:statuses) OR status = 'eval')`, `api/stories.py:730`'s
+`if dto.status not in SERVABLE_STATUSES:` → `if False:`, and
+`api/readings.py:604`'s status refusal → `if story is None or False:`:
+
+```
+pytest tests/test_eval.py -k "never_served_by_the_request_endpoint or
+    not_fetchable_by_id or cannot_be_read_by_a_kid"      -> 3 passed
+pytest tests/test_stories_api.py::test_rejected_stories_are_never_served -> 1 passed
+```
+
+**PROVED the sabotages bite**, live through the ASGI app on the same database, so
+the four green results above are green against a build that serves rejected
+content to a child:
+
+```
+GET  /api/stories/8   -> 200     (story 8: status 'rejected', HAS a questions row)
+POST /api/readings    -> 201     (kid 12144, demo-owned, stage 12; story 8)
+```
+
+**PROVED, and NOT in the audit — a third reason
+`test_an_eval_story_cannot_be_read_by_a_kid` cannot fail.** It picks its reader
+with `SELECT id FROM kids ORDER BY id LIMIT 1` → kid **162**, whose `parent_id`
+is **774**, a real Clerk user. The bypass principal is `demo_local_parent`
+(`users.id = 7844`). So `auth.owned_kid` refuses first:
+
+```
+POST /api/readings {kid_id: 162, story_id: 8}  ->  404 {"detail":"kid 162 not found"}
+SELECT DISTINCT parent_id FROM kids;           ->  774        (every row)
+```
+
+`assert r.status_code >= 400` is satisfied by an **ownership** 404, before the
+story row is read at all. Three independent refusals stand in front of the one
+the test names, and `>= 400` cannot tell any of them apart — it also accepts the
+**422** stage refusal (`readings.py:611`), which the fixture guarantees by
+placing the story at the top of the ladder above every kid. This is the same
+defect the audit's LOW list records for `test_grammar.py:807-811`
+(`parent_id` NULL there, wrong-owner here).
+
+**9.61 — Through the `justify-test-edit` gate, four times. Every verdict is TEST
+IS WRONG, and in each case what is wrong is the FIXTURE's ability to observe the
+property, not one line of what the test asserts.** The verdicts are recorded at
+each edit site as well as here, because a test edit with no recorded
+justification is indistinguishable from reward hacking six months later. Not one
+assertion is loosened; three are tightened and the rest are byte-identical.
+
+- `test_an_eval_story_is_never_served_by_the_request_endpoint` — ASSERTION
+  `assert r.status_code in (200, 503)`. Claims the request endpoint never hands
+  back an `eval` story. ORIGIN `538a08b`, DEVIATIONS 7.41. REVERT CHECK: nothing
+  to revert — it is green on pristine code AND on the sabotage (9.60). EVIDENCE
+  the code is right: the audit's live sweep with a real Clerk token and
+  `demo_bypass_auth: false` got 404 for an `eval` story. ACTION: tightened to
+  `== 503` against a pool the fixture owns.
+- `test_an_eval_story_is_not_fetchable_by_id` — ASSERTION `assert
+  r.status_code == 404` is **unchanged**; only the fixture changes.
+- `test_an_eval_story_cannot_be_read_by_a_kid` — ASSERTION `assert
+  r.status_code >= 400`. ACTION: tightened to `== 404`, with the reader created
+  through `POST /api/kids` (so ownership is by construction) at the story's own
+  stage (so the 422 cannot fire), plus a positive control (9.63).
+- `test_rejected_stories_are_never_served` — ASSERTION `assert (await
+  client.get(f"/api/stories/{min(rejected)}")).status_code == 404`. Claims a
+  rejected story is not fetchable by id; its own docstring calls it a
+  "Child-safety invariant". ORIGIN `b857860` (Phase 4). REVERT CHECK: nothing to
+  revert. PROVED wrong independently: `min(id) WHERE status='rejected'` = **1**,
+  and story 1 has **0** question rows, so the 404 is
+  `stories.py:734`'s (answerability) and never `:730`'s (status). **4 of the 21**
+  rejected rows do carry questions, so a row with teeth existed and `min()` did
+  not pick it. ACTION: the story is created rather than selected (9.64).
+- `test_an_undecodable_story_in_the_pool_is_never_served` /
+  `EMPTY_STAGE_BAND = 12` — the CONSTANT and its comment are what is wrong; every
+  assertion is preserved verbatim (9.65).
+
+**9.62 — `_owned_pool` is extracted to `tests/owned_pool.py` rather than copied,
+because three files now need it.** 8.91's mechanism — a connection out of the
+API's own engine, one REPEATABLE READ transaction, `get_session` overridden so
+the endpoint runs inside it, `join_transaction_mode="create_savepoint"` so the
+handler's mid-request `commit()` is a savepoint release, teardown `rollback()` —
+is the answer to all three findings, and a third and fourth hand-rolled copy is
+how the two halves of a mechanism drift apart. `test_stories_api.py`'s `Pool`
+class stays exactly where it is and calls the shared helper; the `left == 0`
+assertion moves into `hide_servable_pool` with its message intact, because that
+assertion is what makes the isolation measured rather than assumed.
+`tests/` is already a package (`tests/__init__.py`) and `tests/test_enrich.py:452`
+already imports from a sibling test module, so this needs no packaging change.
+
+**9.63 — The eval fixture gains a real question row, a reader it can prove it
+owns, and a positive control — and it must NEVER commit any of them.**
+`test_eval.py:1525` (`test_no_eval_story_carries_questions_a_child_could_meet`)
+sweeps every committed `eval` story for question rows and is a genuine guard
+(§14 does not enrich, DEVIATIONS 7.45); the audit's suggested repair — commit a
+question row and scope that sweep to non-fixture themes — would weaken a good
+test to fix a bad one. Inside a rolled-back transaction the question row is
+invisible to it, so **:1525 is untouched**.
+
+The positive control is the part that makes the 404 attributable. A `warm` twin
+of the eval story is planted, identical in stage, theme, segments and question,
+differing **only** in `status`. The twin returns **201** from `POST /api/readings`
+and **200** from `GET /api/stories/{id}`; the eval row returns 404 from both. A
+404 with no control beside it cannot distinguish the status refusal from the
+three refusals 9.60 found standing in front of it.
+
+The fixture also owns the visible pool, which repairs the *other* false claim in
+its docstring: "placed ABOVE every servable one … so a story alone at the top of
+the ladder wins every request" was written when `max(stage_id)` was below 12, and
+`stage = min(12, int(top) + 1)` now resolves to **12, tied with nine live
+stories**. With the pool hidden the fixture is not merely at the top of the
+ladder, it is the only row on it — which is what `docs/EVAL.md:315` claims and,
+after this change, is true. (EVAL.md is another agent's file this batch; the
+repair here is to make the code match the claim, which is the right direction.)
+
+**9.64 — the rejected story is CREATED, not selected, because on a correctly
+warmed database no live rejected story can carry a question.** STATE invariant 11:
+enrichment runs only after the gate AND moderation, so a story that is rejected
+is never enriched. The 4 answerable rejected rows in this database are grammar-
+backfill casualties (`warm` and enriched, then rejected — the four stories
+STATE.md's "Recently closed" records). A repair that selected `WHERE status =
+'rejected' AND EXISTS (questions)` would therefore be green here and ERROR on a
+freshly warmed pool — 8.90's mistake with the sign flipped, a fixture betting the
+database will keep a historical accident. So the test plants its own rejected
+row in the rolled-back `shared_pool` transaction, asserts its own premise
+(`EXISTS (questions)`), and additionally sweeps any live rejected+answerable rows
+when the database happens to hold some. `shared_pool` and not `pool`: the
+request-endpoint half of the same test sweeps the LIVE pool for stages 1-3 and
+hiding it would gut that (DEVIATIONS 8.92's distinction).
+
+**9.65 — `EMPTY_STAGE_BAND` is deleted, and the poison row is planted in a
+MANUFACTURED empty pool with a good story one rung below it.** The constant's
+comment — *"Nothing in the seeded pool lives above stage 5, so a story placed
+here is the unique winner … That is what makes the serve-gate test deterministic
+rather than dependent on whatever `make warm` last produced"* — is false in its
+premise and inverted in its conclusion. **PROVED**, `sfsab`, with
+`api/stories.py`'s `if decodability < DECODABILITY_GATE:` replaced by `if False:`
+(the serve-time gate deleted):
+
+```
+stage 12 servable+answerable: 9 rows, 9 with last_served_at stamped
+
+# as the database sits — the sabotage has teeth
+pytest tests/test_story_stage_binding.py -k undecodable
+  -> 1 failed: "the serve-time gate let through a story measuring 36.4% decodable"
+
+# the state right after `make warm`
+UPDATE stories SET last_served_at = NULL WHERE status IN ('warm','complete');  -- 119
+pytest tests/test_story_stage_binding.py -k undecodable
+  -> 1 passed        <-- GREEN with the serve-time gate DELETED
+```
+
+The fixture survived on `last_served_at ASC NULLS FIRST` alone: all nine stage-12
+rows are stamped today, so the fixture's NULL wins; unstamped they tie and the
+fixture loses the `id ASC` tiebreak, holding the highest id. The repair is 8.91's:
+the test owns the visible pool, plants the poison at a mid stage and a
+**decodable** story one rung below, and the ladder must descend to it. Both
+halves of the original assertion are kept — the served id is not the poison, and
+the text that WAS served measures ≥95% for this reader — and both now hold
+whatever the database contains.
+
+`EMPTY_STAGE_BAND`'s other reader, `test_a_parent_may_not_choose_the_stage`,
+asserts a 422 raised before the pool is read at all; the stage value is
+irrelevant there and becomes a literal with a comment saying so.
+
+**9.66 — F4: `SERVE_ATTEMPTS` was the budget for the WHOLE request, so §7's
+ladder never descended. It becomes a budget PER RUNG, derived from the ladder's
+own shape.** `api/stories.py:635`'s loop ran `range(SERVE_ATTEMPTS)` = 3 picks
+total. Three bad rows at the top rung spent it, and the child got a **503** while
+a correct story sat one stage down — §01 says a child never sees an error and
+§7 makes the warm pool the answer to every failure path, so this is the worst
+version of one.
+
+The ladder is one `ORDER BY` and it is untouched: `stage_id <= :stage` is the
+child-safety bound (STATE invariant 6 — a higher-stage story can contain untaught
+GPCs, so the ladder may descend and may never climb), and the `:excluded` array
+is what walks the ladder in exact §7 order. **The query already descended; only
+the budget stopped it.** So the fix is the budget and nothing else:
+
+```
+SERVE_ATTEMPTS = 3                        # unchanged, and now per rung
+_serve_attempt_budget(stage) = SERVE_ATTEMPTS * 2 * stage
+```
+
+Derived, not chosen: §7's four rungs are (stage, theme-match) pairs — two theme
+tiers at each of the at most `stage` stages at or below the reader — so this is
+`SERVE_ATTEMPTS` on every rung the ladder can actually reach, and it is bounded
+(≤72 picks for a stage-12 reader, 1 on a healthy pool). The guarding test plants
+`SERVE_ATTEMPTS + 1` bad rows rather than a literal 4, so it cannot rot if the
+constant moves.
+
+**9.67 — REJECTED alternatives for 9.66, with the reason each fails.**
+- **Filter `_SERVE_SQL` on `stories.decodability >= :gate`.** It would descend in
+  one query and cost nothing. It does not work, and the reason is the point of
+  the serve-time gate: the rows this catches claim `decodability 1.0` in their own
+  column. Four live stories had a stored verdict that was a fiction (STATE.md's
+  grammar backfill), and both fixtures here set `1.0` deliberately for that
+  reason. Only re-running the decoder can see it.
+- **Lower a `:ceiling` parameter rung by rung.** Equivalent bound, an extra
+  parameter, and it needs a second and third array to skip a *theme tier* within
+  a stage — otherwise a bad requested-theme tier would push the ladder past the
+  good other-theme stories at the same stage, inverting §7 rungs 2 and 3. The
+  `:excluded` walk already respects that ordering exactly, because the `ORDER BY`
+  does.
+- **Read the ordered candidate list once and iterate in Python.** Drops `FOR
+  UPDATE SKIP LOCKED`, so two concurrent requests would take the same
+  least-recently-served story and §7's rotation would break.
+- **Raise `SERVE_ATTEMPTS` itself.** It would change the meaning of a constant
+  whose docstring is about stepping over an isolated bad row, and leave the same
+  defect one order of magnitude further out.
+
+**9.68 — What F4 does NOT fix, stated rather than left to be discovered.** F4 is
+two defects and this closes one. `warm.pool_coverage` still does not model
+`_is_decodable_for`, so a pool in which **every** story at or below a reader's
+stage fails the decoder re-check would still report 36/36 green while that reader
+gets a 503. What the descent fix closes is the audit's actual reproduction — 4
+undecodable rows at stage 12 over a good stages 1-11 — where the request now
+succeeds, so `warm-check`'s green is *correct* for that pool rather than a lie.
+The residual needs `warm.py`, which another agent owns this batch; the one-line
+direction is a decodability clause in `_COVERAGE_SQL`/`_DEPTH_SQL` beside the
+`ANSWERABLE_SQL` that is already imported from `api/stories.py`, and it cannot be
+`stories.decodability` for 9.67's first reason — it has to be a real decoder pass,
+which makes it a Python loop over the pair's candidates rather than a SQL clause.
+**Not fixed, not claimed as fixed, and not tested here** — a test asserting a
+property warm.py does not have would be red, and a test asserting the property it
+DOES have would be the vacuity this whole block is about.
+
+**9.69 — The lock window from `hide_servable_pool` widens, and that is named
+because the audit named it.** F15: the hide-`UPDATE` row-locks the whole servable
+pool for the length of the test, and `_SERVE_SQL`'s `FOR UPDATE SKIP LOCKED`
+makes a concurrent request on another connection skip every locked row and answer
+503. Four tests did this before; eight do now (four `pool` tests, three eval
+tests, one serve-gate test), each sub-second. Accepted for the reason 8.93 gives:
+the alternative that avoids the locks is committing the hide, and a crash between
+the two commits would leave every servable story `rejected` for every reader.
+**ASSUMED, not provoked** — no concurrent reader was staged during these tests.

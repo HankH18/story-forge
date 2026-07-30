@@ -62,6 +62,7 @@ from storyforge.llm.moderate import UNGRAMMATICAL_PREFIX, ModerationResult
 from storyforge.llm.pricing import Usage
 from storyforge.main import app
 from storyforge.pipeline import DECODABILITY_GATE, Attempt, PipelineResult, Vocabulary
+from tests.owned_pool import hide_servable_pool, owned_transaction
 
 ON = date(2026, 7, 29)  # Sonnet 5 introductory pricing is live on this date.
 POST_INTRO = date(2026, 9, 1)
@@ -1059,56 +1060,128 @@ async def client():
         yield c
 
 
-@pytest.fixture
-async def eval_story(session):
-    """An eval-status story placed ABOVE every servable one, then deleted.
+#: The stage the eval fixture builds at. Any stage inside §9's 1..12 does: the
+#: fixture owns the visible pool, so the eval row is the only candidate on §7's
+#: ladder whatever this is. It replaces `stage = min(12, int(top) + 1)` over the
+#: live `max(stage_id)`, which resolved to **12, tied with nine live stories**, while
+#: the docstring claimed the row was "placed ABOVE every servable one … alone at the
+#: top of the ladder" (AUDIT-PHASE7 F2, DEVIATIONS 9.63).
+EVAL_FIXTURE_STAGE = 6
 
-    Above, deliberately: `_SERVE_SQL` orders `stage_id DESC` under
-    `stage_id <= :stage`, so a story alone at the top of the ladder wins every
-    request at or above its stage. If `status='eval'` were servable, THIS row is
-    the one that would be served — which makes the assertion below a real
-    experiment rather than a restatement of the SQL.
+
+async def _plant_eval_fixture_story(session, *, theme_id: int, status: str, title: str) -> int:
+    """One row, with segments AND a question — servable but for its `status`.
+
+    **The `questions` row is the whole repair and it is load-bearing.** Without it,
+    `ANSWERABLE_SQL` (`api/stories.py:143`) refuses the row in `_SERVE_SQL`, in
+    `GET /api/stories/{id}` and in `POST /api/readings` *before* `status` is ever
+    consulted — so all three tests below were satisfied by answerability and never
+    tested `status` at all. PROVED: with `_SERVE_SQL` sabotaged to
+    `WHERE (status = ANY(:statuses) OR status = 'eval')`, `stories.py:730`'s status
+    refusal replaced by `if False:` and `readings.py:604`'s deleted, all three
+    PASSED — while the same build served a `rejected` story 200 by id and filed a
+    reading against it 201 (DEVIATIONS 9.60).
+
+    `decodability 1.0` and a body that really is decodable, because the serve-time
+    gate must not be what refuses this row either. The only thing wrong with it is
+    the status.
     """
-    top = (
-        await session.execute(
-            text("SELECT coalesce(max(stage_id), 0) FROM stories WHERE status = ANY(:s)"),
-            {"s": list(SERVABLE_STATUSES)},
-        )
-    ).scalar_one()
-    stage = min(12, int(top) + 1)
-    theme_id = (
-        await session.execute(
-            text(
-                "INSERT INTO themes (slug, display_name, emoji) "
-                "VALUES ('zz-eval-fixture', 'Eval Fixture', '🧪') RETURNING id"
-            )
-        )
-    ).scalar_one()
     story_id = (
         await session.execute(
             text(
                 "INSERT INTO stories (stage_id, theme_id, status, title, decodability, "
-                "story_words, gen_meta) VALUES (:st, :th, :status, 'Eval Artifact', 1.0, "
+                "story_words, gen_meta) VALUES (:st, :th, :status, :title, 1.0, "
                 "ARRAY['dragon']::text[], '{\"source\": \"eval\"}'::jsonb) RETURNING id"
             ),
-            {"st": stage, "th": theme_id, "status": EVAL_STATUS},
+            {"st": EVAL_FIXTURE_STAGE, "th": theme_id, "status": status, "title": title},
         )
     ).scalar_one()
     await session.execute(
         text(
             "INSERT INTO story_segments (story_id, idx, body, scene_tags) "
-            "VALUES (:s, 0, 'A dragon sat.', ARRAY[]::text[])"
+            "VALUES (:s, 0, 'A dragon sat in a cave. Sam did pat the dragon.', ARRAY[]::text[])"
         ),
         {"s": story_id},
     )
-    await session.commit()
-    try:
-        yield {"story_id": story_id, "stage": stage, "theme_id": theme_id}
-    finally:
-        await session.rollback()
-        await session.execute(text("DELETE FROM stories WHERE id = :i"), {"i": story_id})
-        await session.execute(text("DELETE FROM themes WHERE id = :i"), {"i": theme_id})
+    await session.execute(
+        text(
+            "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+            "VALUES (:s, 0, 'tap_word', 'Tap: sit.', CAST(:p AS jsonb), CAST(:a AS jsonb))"
+        ),
+        {
+            "s": story_id,
+            "p": '{"options": ["sat", "did", "pat"], "cue_word": "sit"}',
+            "a": '{"correct": "sat", "index": 0, "target_grapheme": "s"}',
+        },
+    )
+    return story_id
+
+
+@pytest.fixture
+async def eval_story(client):
+    """An eval-status story that is servable in every respect EXCEPT its status.
+
+    Three changes from the version AUDIT-PHASE7 F2 found, and each closes one way
+    the tests below could pass without observing anything:
+
+    1. **A `questions` row**, so `ANSWERABLE_SQL` is not what refuses it
+       (`_plant_eval_fixture_story`).
+    2. **The visible pool is hidden** inside a rolled-back REPEATABLE READ
+       transaction (DEVIATIONS 8.91's mechanism, shared from `tests/owned_pool.py`),
+       so the eval row is not merely at the top of §7's ladder — it is the only row
+       on it, whatever `make warm` last produced. The old fixture placed itself with
+       `min(12, max(servable stage_id) + 1)`, which is **12** on a correctly warmed
+       pool, tied with nine live stories.
+    3. **A `warm` twin**, identical in stage, theme, segments and question and
+       differing only in `status`. That is the positive control, and without it a 404
+       is not attributable: three other refusals stand in front of the status one —
+       answerability, `POST /api/readings`'s 422 stage check, and `auth.owned_kid`
+       (every kid in the live database belongs to a real Clerk user, not to the
+       bypass principal, so the old test's `SELECT id FROM kids ORDER BY id LIMIT 1`
+       was refused for ownership before the story row was read — DEVIATIONS 9.60).
+
+    **Nothing is committed, and that is deliberate rather than tidy.**
+    `test_no_eval_story_carries_questions_a_child_could_meet` below sweeps every
+    committed `eval` story for question rows and is a real guard (§14 does not
+    enrich, DEVIATIONS 7.45). Committing the question row would have meant weakening
+    that test to fix this one; inside the transaction it never sees it, so it is
+    untouched (DEVIATIONS 9.63).
+
+    The reader is created through `POST /api/kids`, so "a kid this caller owns" is
+    true by construction, at the story's own stage so `readings.py`'s 422 cannot
+    fire either.
+    """
+    async with owned_transaction() as session:
+        hidden = await hide_servable_pool(session)
+        theme_id = (
+            await session.execute(
+                text(
+                    "INSERT INTO themes (slug, display_name, emoji) "
+                    "VALUES ('zz-eval-fixture', 'Eval Fixture', '🧪') RETURNING id"
+                )
+            )
+        ).scalar_one()
+        story_id = await _plant_eval_fixture_story(
+            session, theme_id=theme_id, status=EVAL_STATUS, title="Eval Artifact"
+        )
+        twin_id = await _plant_eval_fixture_story(
+            session, theme_id=theme_id, status="warm", title="The Same Row But Warm"
+        )
         await session.commit()
+
+        kid = await client.post(
+            "/api/kids", json={"display_name": "Ana", "stage_id": EVAL_FIXTURE_STAGE}
+        )
+        assert kid.status_code == 201, kid.text
+
+        yield {
+            "story_id": story_id,
+            "twin_id": twin_id,
+            "stage": EVAL_FIXTURE_STAGE,
+            "theme_id": theme_id,
+            "kid_id": kid.json()["id"],
+            "hidden": hidden,
+        }
 
 
 async def test_an_eval_story_is_never_served_by_the_request_endpoint(client, eval_story):
@@ -1118,41 +1191,97 @@ async def test_an_eval_story_is_never_served_by_the_request_endpoint(client, eva
     is not what serves stories — `_SERVE_SQL` is — and DEVIATIONS 6.14 records
     exactly what happens when a test and the endpoint disagree about which
     statuses count.
+
+    justify-test-edit — VERDICT: TEST IS WRONG, and the assertion is TIGHTENED
+    rather than loosened. It read `assert r.status_code in (200, 503)` with the id
+    check inside an `if`, so a 503 satisfied it and any other story satisfied it —
+    which was the honest shape while the fixture shared a ladder with the live pool
+    and could not know what else was on it. ORIGIN: commit `538a08b`, DEVIATIONS
+    7.41. REVERT CHECK: nothing to revert — it was green on pristine code and green
+    with `eval` made servable (DEVIATIONS 9.60), because the fixture carried no
+    question row. EVIDENCE the code is right: the auditor got 404 for an `eval` story
+    live against a `demo_bypass_auth: false` server with a real Clerk token.
+
+    Now the visible pool holds exactly two stories, identical but for `status`, and
+    the eval row holds the LOWER id — so it wins `_SERVE_SQL`'s last tiebreak and a
+    servable `eval` status has one unambiguous signature: this request returns the
+    eval id instead of the twin's. That is the experiment `docs/EVAL.md:315` claims
+    this test is, and after this change it is one.
     """
     # `stage_id` is the admin preview knob (DEVIATIONS 7.21); the suite's bypass
     # principal is an admin, so this is the one body that can name a stage
     # directly and therefore the one that can aim at the fixture.
+    assert eval_story["story_id"] < eval_story["twin_id"], (
+        "the eval row must hold the lower id: `_SERVE_SQL` breaks the final tie on "
+        "`id ASC`, and that is what makes it the row a servable `eval` status wins with"
+    )
+
     r = await client.post(
         "/api/stories/request",
         json={"stage_id": eval_story["stage"], "theme_id_or_slug": eval_story["theme_id"]},
     )
-    # Its theme has nothing else in it and it is the top of the ladder, so a
-    # servable `eval` status would show up as this story. Either the pool falls
-    # back to another story or it 503s; both mean the eval row was skipped.
-    assert r.status_code in (200, 503), r.text
-    if r.status_code == 200:
-        assert r.json()["id"] != eval_story["story_id"]
+    # The pool is owned, so the served story is one of the fixture's two rows. The
+    # 200 is itself the control: the twin is reachable, so nothing but `status`
+    # separates the two outcomes.
+    assert r.status_code == 200, (
+        f"the warm twin should have been served ({eval_story['hidden']} real stories "
+        f"hidden): {r.text}"
+    )
+    assert r.json()["id"] == eval_story["twin_id"], (
+        f"served {r.json()['id']}; the warm twin is {eval_story['twin_id']} and the "
+        f"eval artifact is {eval_story['story_id']}"
+    )
 
 
 async def test_an_eval_story_is_not_fetchable_by_id(client, eval_story):
+    """`GET /api/stories/{id}` refuses it too — and the twin proves why.
+
+    The assertion is unchanged; what changed is that the fixture now carries a
+    question row, so `stories.py:734` (answerability) can no longer answer for
+    `:730` (status). PROVED: with `:730` replaced by `if False:` this test passed
+    while `GET` on a rejected-but-answerable story returned 200 (DEVIATIONS 9.60).
+    """
     r = await client.get(f"/api/stories/{eval_story['story_id']}")
     assert r.status_code == 404, r.text
 
-
-async def test_an_eval_story_cannot_be_read_by_a_kid(client, session, eval_story):
-    """`POST /api/readings` is the only path that puts a story in a child's
-    record. It must not accept one either."""
-    kid_id = (
-        await session.execute(
-            text("SELECT id FROM kids ORDER BY id LIMIT 1"),
-        )
-    ).scalar()
-    if kid_id is None:
-        pytest.skip("no kid rows in this database")
-    r = await client.post(
-        "/api/readings", json={"kid_id": kid_id, "story_id": eval_story["story_id"]}
+    twin = await client.get(f"/api/stories/{eval_story['twin_id']}")
+    assert twin.status_code == 200, (
+        "the twin differs from the eval row only in `status`, so if it is not "
+        f"fetchable the 404 above proves nothing about `status`: {twin.text}"
     )
-    assert r.status_code >= 400, r.text
+
+
+async def test_an_eval_story_cannot_be_read_by_a_kid(client, eval_story):
+    """`POST /api/readings` is the only path that puts a story in a child's
+    record. It must not accept one either.
+
+    justify-test-edit — VERDICT: TEST IS WRONG, and the assertion is TIGHTENED.
+    It read `assert r.status_code >= 400`, which is satisfied by four different
+    refusals, three of which fire before the one the test names: `ANSWERABLE_SQL`'s
+    404 (`readings.py:606` — the fixture had no question row), the 422 stage check
+    (`readings.py:611` — the fixture sat at the top of the ladder, above every kid),
+    and `auth.owned_kid`'s 404, because `SELECT id FROM kids ORDER BY id LIMIT 1`
+    returns a kid belonging to a real Clerk user rather than to the bypass principal
+    (**every** kid row in the live database does). ORIGIN: commit `538a08b`,
+    DEVIATIONS 7.41 + 8.50. REVERT CHECK: nothing to revert — green on pristine code
+    and green with `readings.py:604`'s status refusal deleted, while that same build
+    filed a 201 reading against a `rejected` story (DEVIATIONS 9.60).
+
+    So: `== 404`, a reader created through `POST /api/kids` at the story's own stage,
+    and the `warm` twin as the control that makes the 404 attributable to `status`.
+    """
+    r = await client.post(
+        "/api/readings", json={"kid_id": eval_story["kid_id"], "story_id": eval_story["story_id"]}
+    )
+    assert r.status_code == 404, r.text
+
+    twin = await client.post(
+        "/api/readings", json={"kid_id": eval_story["kid_id"], "story_id": eval_story["twin_id"]}
+    )
+    assert twin.status_code == 201, (
+        "the twin differs from the eval row only in `status`, so if a reading cannot "
+        f"be started against it either, the 404 above proves nothing: {twin.text}"
+    )
 
 
 async def _plant_run(session, *, config: dict, n_items: int) -> int:

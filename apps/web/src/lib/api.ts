@@ -247,8 +247,16 @@ export function setAuthTokenGetter(getter: AuthTokenGetter | null): void {
  * would turn a 401 the caller already knows how to render into a client-side
  * failure with no status at all, and would break the bypass outright. The
  * server decides what an anonymous request is worth; this file does not.
+ *
+ * Exported for `lib/adminApi.ts`, which has its own transport rather than reusing
+ * `request` below. The reason is the error contract, not the happy path: an admin
+ * needs the server's `detail` string ("admin role required (§9); set
+ * public_metadata.role in Clerk", "stage 12 not seeded — run `make seed`"), and
+ * `ApiError` deliberately does not carry a body — adding one here would change
+ * what a parent reads on a proven screen. The token bridge is shared because
+ * there is exactly one session and it must not be registered twice.
  */
-async function authHeader(): Promise<Record<string, string>> {
+export async function authHeader(): Promise<Record<string, string>> {
   if (!authTokenGetter) return {}
   try {
     const token = await authTokenGetter()

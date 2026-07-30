@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
-from storyforge.api import catalog, health, kids, readings, stories, validate
+from storyforge.api import admin, catalog, health, kids, readings, stories, validate
 from storyforge.auth import auth_config
 
 logging.basicConfig(
@@ -73,6 +73,10 @@ def create_app() -> FastAPI:
     app.include_router(stories.router)
     app.include_router(kids.router)
     app.include_router(readings.router)
+    # §9's `/api/admin/*` block and §11's admin portal. Every route on this router
+    # is role-gated by the router itself (`dependencies=[Depends(require_admin)]`),
+    # so mounting it cannot widen anything by accident (DEVIATIONS 9.1).
+    app.include_router(admin.router)
     return app
 
 

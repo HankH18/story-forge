@@ -26,6 +26,13 @@ Ties inside a rung break least-recently-served, then by id for determinism.
 
 The whole ladder is one `ORDER BY`; see `_SERVE_SQL`.
 
+A story that is picked and then refused by one of the two gates below (no
+comprehension question, or a serve-time decodability failure) is **excluded and the
+ladder carries on descending**, with a budget of `SERVE_ATTEMPTS` per rung
+(`_serve_attempt_budget`). That was three attempts for the whole request until
+AUDIT-PHASE7 F4: a rung of unservable rows spent them all at the top and the child
+got a 503 while a correct story sat one stage down.
+
 **Errors that remain errors.** The never-an-error invariant covers *pool
 exhaustion*, not requests that name something which does not exist. An unknown
 stage or theme is a caller bug — kid mode picks from `GET /api/themes` — and is
@@ -145,11 +152,45 @@ ANSWERABLE_SQL = "EXISTS (SELECT 1 FROM questions q WHERE q.story_id = {story}.i
 RATE_LIMIT_PER_MINUTE = 10  # §9
 RATE_LIMIT_WINDOW_S = 60.0
 
-#: How many times the pick is retried when the story it returns fails the
-#: serve-time decodability re-check. Bounded because each attempt is a real
-#: `UPDATE … RETURNING`; three is enough to step over an isolated bad row and
-#: small enough that a systematically broken pool fails fast and loudly.
+#: How many times the pick is retried **at one rung of §7's ladder** when the story
+#: it returns fails the serve-time decodability re-check or turns out to carry no
+#: question. Bounded because each attempt is a real `UPDATE … RETURNING`; three is
+#: enough to step over an isolated bad row.
 SERVE_ATTEMPTS = 3
+
+
+def _serve_attempt_budget(stage_id: int) -> int:
+    """`SERVE_ATTEMPTS` on every rung the ladder can reach, not three in total.
+
+    This was `range(SERVE_ATTEMPTS)` over the whole request, and that is
+    AUDIT-PHASE7 **F4**: three unservable rows at the top rung spent the entire
+    budget there, so §7's ladder **never descended** and the child was answered
+    **503** while a correct story sat one stage down. Measured: four
+    undecodable-but-answerable `warm` stories planted at stage 12 with stages 1-11
+    full of good ones returned `503 no story at or below stage 12 passes §1's 95%
+    gate for this reader`. §01 says a child never sees an error and §7 makes the
+    warm pool the answer to *every* failure path; a 503 is the worst version of one.
+
+    The ladder itself is untouched, and that is the point. `_SERVE_SQL` is one
+    `ORDER BY`, `stage_id <= :stage` is the child-safety bound (STATE invariant 6 —
+    a higher-stage story can contain GPCs this reader was never taught, so the
+    ladder may descend and may **never** climb), and the `:excluded` array is what
+    walks the rungs in exact §7 order. The query already descended; only the budget
+    stopped it. So the budget is the whole fix.
+
+    Derived rather than chosen: §7's four rungs are (stage, theme-match) pairs —
+    two theme tiers at each of the at most `stage_id` stages at or below the reader
+    — so this is `SERVE_ATTEMPTS` per rung, and it is bounded (72 picks for a
+    stage-12 reader in the worst case, exactly 1 on a healthy pool). A pool that
+    exhausts it is systematically broken, which is the case the 503 below is for.
+
+    Rejected: filtering `_SERVE_SQL` on `stories.decodability >= :gate`. It would
+    descend in one query and cost nothing, and it cannot work — the rows this
+    catches claim `1.0` in that column. Four live stories had a stored verdict that
+    was a fiction (the grammar backfill), and only re-running the decoder sees it
+    (DEVIATIONS 9.66-9.67).
+    """
+    return SERVE_ATTEMPTS * 2 * stage_id
 
 
 # --- rate limiting -----------------------------------------------------------
@@ -632,7 +673,10 @@ async def request_story(
     undecodable: list[tuple[int, float]] = []
     dead_end: list[int] = []
 
-    for _attempt in range(SERVE_ATTEMPTS):
+    # Every rejection below appends to `excluded`, which is what makes the next
+    # pick step DOWN §7's ladder rather than re-offer the same rung (DEVIATIONS
+    # 9.66). `stage_id <= :stage` never moves, so descending is all it can do.
+    for _attempt in range(_serve_attempt_budget(stage_id)):
         served = (
             await session.execute(
                 _SERVE_SQL,

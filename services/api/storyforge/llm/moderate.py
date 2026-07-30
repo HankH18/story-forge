@@ -228,8 +228,32 @@ _NO_GRAMMAR_DEFECT = {"none", "none.", "", "n/a"}
 
 
 class ModerationVerdict(BaseModel):
-    approved: bool = Field(description="True only if the story is safe for ages 5-10.")
-    reason: str = Field(description="One sentence. If rejecting, name the specific problem.")
+    # DEVIATIONS 9.50: `reason` is declared BEFORE `approved`, for the reason 8.77
+    # already proved on the grammar half two fields down. Structured output is
+    # emitted in schema order, so with the safety boolean first the judge committed
+    # to it and then reasoned — and the rationalisation is legible in its own words:
+    # "A dog hit a rock next to the cat, WHICH COULD BE INTERPRETED AS the dog
+    # hitting the cat". Measured, field order the only variable, 3 runs each: story
+    # 9136 (a trip-and-recover with an explicit happy ending) goes from REJECTED 3/3
+    # to approved 3/3 and 9190 from REJECTED 3/3 to approved 2/3, while
+    # `reject/unsafe-cruelty`, `reject/ungrammatical-verb-form` and the layer-1
+    # gun/shot/dead case are unmoved. Two of run 114's eight rejections were
+    # reproducible false positives. Reason first = derivation, boolean = conclusion.
+    reason: str = Field(
+        description=(
+            "Fill this in FIRST, before approved. One sentence. Name what IN THE "
+            "STORY decides it, quoting the words. If nothing in the story matches a "
+            "REJECT bullet, say that. A reason that needs 'could be interpreted as', "
+            "'suggests' or 'might' is not a finding."
+        )
+    )
+    approved: bool = Field(
+        description=(
+            "The CONCLUSION of reason, not an independent judgement: true unless "
+            "reason names something the story actually says that matches a REJECT "
+            "bullet. True only if the story is safe for ages 5-10."
+        )
+    )
     # DEVIATIONS 8.77: `grammar_note` is declared BEFORE `well_formed`, and the order
     # is load-bearing. Structured output is emitted in schema order, so with the
     # boolean first the judge committed to it and then reasoned in the note — three
