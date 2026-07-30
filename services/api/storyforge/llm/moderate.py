@@ -635,6 +635,46 @@ def proper_names(bodies: list[str]) -> frozenset[str]:
     return frozenset(names)
 
 
+#: How a title is labelled inside the string §13 judges. A LABEL rather than a
+#: bare first line because the same call carries the grammar half of the verdict
+#: (4.12) and a title is a noun phrase, not a sentence — "Sam Goes To The Moon"
+#: read as prose invites a `well_formed = false` that would cost the story. The
+#: word itself is not blocklisted (a test asserts it), so prefixing it cannot
+#: manufacture a layer-1 hit.
+TITLE_LABEL = "Title: "
+
+
+def child_facing_text(title: str, body: str) -> str:
+    """Everything §13 must judge about a story: its TITLE as well as its prose.
+
+    DEVIATIONS 17.1. `draft_text()` joins `segment.text` and nothing else, so the
+    title — model-authored free text, persisted to `stories.title`, shipped in
+    every `StoryDTO` and rendered on the parent dashboard — passed **none** of
+    §13's three layers. Not the blocklist, because `blocklist_check` only ever saw
+    the body. Not allowlist-constrained generation, because `validate_draft` also
+    only ever saw the body and the schema's "from the permitted vocabulary" is an
+    instruction to an untrusted generator (§0), not a constraint: measured over the
+    live pool, **28 of 119 servable titles use a word that would fail the very gate
+    their body had to clear**. Not moderation, because `run_pipeline` passed `body`.
+
+    Folding the title into the ONE existing moderation call rather than adding a
+    second is deliberate, and the reason is `_moderate_questions`' measured lesson
+    (warm.py): `moderate()` judges *short stories*, and handed something that is
+    not one it rejects it. A bare six-word title is not a story; a title above its
+    story is exactly what a children's book looks like. It is also free — no extra
+    API call — and strictly more text for a safety judge to see, which cannot make
+    it blind to anything it reads today.
+
+    `MODERATION_SYSTEM` is deliberately UNCHANGED (STATE invariant 5: naming a
+    construction moves the judge in both directions, and every one of the four
+    passes at that prompt broke a case that had been passing). The 40-case fixture
+    in `tests/test_grammar.py` therefore still describes this function's judge
+    exactly.
+    """
+    title = " ".join(title.split())
+    return f"{TITLE_LABEL}{title}\n\n{body}" if title else body
+
+
 async def moderate(body: str) -> ModerationResult:
     """Run both layers. Short-circuits on the blocklist so a rejected story
     never costs an API call."""

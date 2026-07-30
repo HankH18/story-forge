@@ -32,7 +32,7 @@ from storyforge.llm.generate import (
     build_request_block,
     generation_system_blocks,
 )
-from storyforge.llm.moderate import ModerationResult, moderate
+from storyforge.llm.moderate import ModerationResult, child_facing_text, moderate
 from storyforge.llm.narrative import NarrativeResult, judge_narrative
 from storyforge.llm.pricing import Usage, usage_from_response
 
@@ -604,13 +604,21 @@ async def run_pipeline(
                     # §7: MODERATING sits between the validator passing and
                     # PERSISTED. A story that clears the decodability gate but
                     # fails moderation is rejected, not served.
+                    #
+                    # DEVIATIONS 17.1: the TITLE is judged here too. It is
+                    # model-authored child-facing text and it used to reach
+                    # `stories.title` — and every `StoryDTO` — having passed none
+                    # of §13's three layers, because `draft_text` joins segment
+                    # text and nothing else. `child_facing_text` is what makes
+                    # the README's "every child-facing string" true of it.
+                    judged = child_facing_text(draft.title, body)
                     with obs.generation(
                         "MODERATING",
-                        input=body,
+                        input=judged,
                         metadata={"attempt": n, "stage_id": stage_id},
                     ) as mod_span:
                         t_node = time.perf_counter()
-                        result.moderation = await moderate(body)
+                        result.moderation = await moderate(judged)
                         result.moderation_ms = (time.perf_counter() - t_node) * 1000
                         result.passed = result.moderation.approved
                         mod_span.update(
