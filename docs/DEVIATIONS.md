@@ -9333,3 +9333,204 @@ the whole file was the 52.
   neither `make warm-check` nor `make promote-check` is perturbed.
 - **No `make warm`, no `make eval`, no `make eval-smoke`, no model call, nothing
   touched on DigitalOcean. Live spend $0.00.**
+
+## Phase 8 — 11.60 shipped a sentence no child has ever been shown (11.82-11.85)
+
+Numbered in the 11.60-11.79 block because it IS 11.60, unfinished. That entry
+rebuilt the tap-a-word frame ladder for a reason quoted from a live user report,
+and closed with: *"Not done, and left for the operator on purpose: the 125
+existing `tap_word` rows still carry their pre-11.60 prompts.
+`warm.refresh_tap_word_prompts` fixes them in place with no API call and is
+idempotent ... It was not run here because the database was mid-migration."*
+The migration landed in 12.1-12.14. The command was never run. Logged **before**
+the change. Every number below was measured against the live local `storyforge`
+Postgres — read-only — and on a `pg_dump` copy of it (`sfprompt`) with the
+product's own functions. No API call, live spend $0.00.
+
+**11.82 — 0 of 125 tap-a-word rows carry a prompt the current ladder can
+produce, and 66 of the 120 SERVABLE ones still do not say what the task is.**
+
+```
+select count(*) filter (where prompt like 'Tap the word that starts with the same sound as %'),
+       count(*) filter (where prompt like 'Tap:%'), count(*)
+from questions where qtype='tap_word';
+  0 | 0 | 125
+```
+
+Both current rungs, zero rows. The 120 rows on servable (`warm`|`complete`)
+stories — one per story, 120 distinct stories — are these six shapes, none of
+which any rung in `PROMPT_FRAMES` can spell:
+
+| instruction | rows | names the task? |
+|---|---|---|
+| `Tap the one that starts with the same sound as X.` | 45 | yes |
+| `Tap it. Hint: X.` | 22 | **no** |
+| `Tap it if it begins like X.` | 21 | **no** |
+| `Tap it: X.` | 12 | **no** |
+| `Tap it if it begins as X.` | 11 | **no** |
+| `Tap the one that starts like X.` | 9 | yes |
+
+**66 of 120 (55%)** are the exact class 11.60 was written about — `llm/questions.py`'s
+own module docstring records the complaint as *"57% of live instructions did not
+say what the task was, and that is what the user reported"* — and every one of
+them is being served today. The remaining 54 are the *second* version of the
+ladder, the one 11.62 replaced. So the pool holds two retired ladders and none of
+the shipped one, and the top row differs from the shipped sentence by two words
+(`the one` for `the word`), which is why nothing looked wrong to a reader
+skimming the pool.
+
+The other 5 rows sit on `rejected` stories and are out of scope by the same
+predicate `refresh_tap_word_prompts` uses: `rejected` is never served, and status
+only ever moves *toward* it (`run_grammar_backfill`), never back.
+
+**11.83 — the repair is one free command, it works, and it is idempotent.
+PROVED on a copy before it was run on anything.**
+
+`pg_dump`ed the live database into `sfprompt` and ran the shipped functions
+against it, in `run_backfill`'s own order:
+
+```
+repair_leaky_cues        -> repaired 0, stuck [], answered []      (7.14 is clean)
+refresh_tap_word_prompts -> rewritten 120, left alone []
+refresh_tap_word_prompts -> rewritten 0,   left alone []           (idempotent)
+```
+
+All 120 land on **rung 1**, the fully spelled-out sentence; not one falls to the
+`Tap: {cue}.` floor, which is what 11.62 predicted (both rungs contain only
+`INSTRUCTION_WORDS` plus the cue, so they pass or fail the gate together — the
+floor is retained for a future frame change, not for a stage). `UPDATE questions
+SET prompt` and nothing else: no DELETE, no regenerated row, `options`, `answer`
+and `payload` untouched. That matters here and is not decoration — **21 recorded
+`answers` hang off 7 of these rows** and `answers.question_id` is `ON DELETE
+CASCADE`, so the §8 evidence a child has already earned would go with any row
+that was replaced instead of repaired.
+
+**11.84 — the residual is that nothing in the build can ever notice this again,
+so what ships is a read-only gate, not just the repair.**
+
+11.61 recorded the stale rows as *"a known inconsistency rather than a silent
+one"* — but the record was a paragraph in this file, and a paragraph does not
+exit non-zero. The pool went 125-for-125 wrong for two full phases under a green
+suite, a green `make warm-check` and a green `make promote-check`, because no
+check anywhere reads a question's TEXT. Three things are added:
+
+- **`warm.stale_tap_word_prompts(session, ...)`** — the finding's own query, as a
+  function: every `tap_word` row on a servable story whose `prompt` is not a rung
+  of the CURRENT `PROMPT_FRAMES` filled with that row's OWN `payload.cue_word`.
+  The predicate is `questions.prompt_is_current`, which lives beside
+  `PROMPT_FRAMES` and is spelled *out of* it, so it cannot drift from the ladder
+  the way a hand-copied `LIKE` in a gate would. Membership, not re-derivation, on
+  purpose: it needs no stage vocabulary, so it reads the whole pool in one query,
+  and "no rung produces this" is exactly the proposition. The stricter statement
+  (the row is what `tap_word_prompt` would write *today*) is `refresh_tap_word_
+  prompts` returning `(0, [])`, and a test asserts that over the live pool too.
+- **`python -m storyforge.warm --check-prompts`** (`make prompt-check`) — prints
+  the offending instructions and exits **non-zero** while any row is stale. Free:
+  one SQL query, no API client, nothing written.
+- **a postcondition inside `--backfill`** — after its own `refresh_tap_word_
+  prompts` it re-reads the pool and refuses if a row it could have repaired is
+  still stale. A repair that reports success while leaving the defect in place is
+  the failure mode that cost this project four ungrammatical stories in the pool
+  (`_body_verdict` wrote three of five verdict fields and the sweep printed
+  success), so the repair checks its own work rather than trusting its own
+  bookkeeping. Rows with **no** `cue_word` are excluded from that refusal and
+  from it alone: there is nothing to re-derive from, `--backfill` has no remedy
+  for them, and a refusal whose remedy is "there is nothing you can do" teaches
+  an operator to ignore the exit code. They are named by id on every run and
+  `--check-prompts` still refuses on them. The live pool holds **zero** — the
+  node has written `cue_word` since 4.9.
+
+**Deliberately NOT wired into `--check-coverage` or `--check-promotability`.**
+Same argument `run_promotability_check`'s docstring already makes for being a
+second command rather than a clause in the first: those two gates are SUPPLY
+floors whose remedy is `make warm` and real money, and this one is a text defect
+whose remedy is a free in-place `UPDATE`. Folding it in would return one exit
+code for "buy more stories" and "run the free repair". There is a second reason
+and it is concrete: both of those gates are **MANDATORY** deploy steps in
+`docs/DEPLOY.md`, and the production database on DigitalOcean carries its own
+copy of these rows — which this change is not permitted to touch. Turning a
+mandatory production gate red for a defect the operator is not being handed a
+remedy for in the same breath is how a gate gets ignored. `--check-prompts` is
+listed in DEPLOY.md as its own free step, with the remedy on the same line, and
+the residual is stated there rather than only here.
+
+**11.85 — tests: two live-pool invariants (both RED before this change), one
+refusal test, one predicate test. No existing assertion is edited, weakened or
+deleted.**
+
+`justify-test-edit` was not needed: nothing existing changed. Four tests are
+added, and the two that matter are the ones that would have caught this on the
+day 11.60 shipped.
+
+- `test_the_live_pool_serves_no_pre_11_60_tap_word_instruction` — the property
+  over the real pool, stated independently of the repair code: it rebuilds
+  `{frame.format(cue=row.cue) for frame in PROMPT_FRAMES}` in the test and asserts
+  membership. It does not call `stale_tap_word_prompts`, so a bug in that function
+  cannot make it pass.
+- `test_the_live_pool_needs_no_tap_word_prompt_repair` — the stronger half, via
+  the shipped repair: `refresh_tap_word_prompts` over the live pool returns
+  `(0, [])`. Every servable row is *exactly* what `tap_word_prompt` writes today,
+  not merely a rung shape.
+- `test_the_backfill_refuses_when_a_repairable_prompt_is_still_stale` — the
+  postcondition, driven by monkeypatching the refresh into a no-op so a repairable
+  stale row survives to the check. Without this the postcondition is unreachable
+  by construction (the refresh runs first and fixes everything fixable), which is
+  precisely the kind of guard that goes green without ever being executed.
+- `test_a_prompt_is_current_only_for_its_own_cue` — the predicate: the shipped
+  sentence with the row's own cue is current; the same sentence with a different
+  cue, every retired shape, and a row with no cue are not.
+
+**Sabotage — four, each restored and verified restored.** The record is what
+actually went red, not what was expected to.
+
+| sabotage | the defect it stages | result |
+|---|---|---|
+| the DATA, before the repair: the live pool as it stood | the finding itself | **2 RED**: `120 of 120 servable tap-a-word instruction(s) are not anything the current ladder writes: [(19, 17, 'Tap it if it begins as for.'), ...]` and `the repair would rewrite 120 live tap-a-word prompt(s)`. `--check-prompts` exit **1** |
+| the DATA, after the repair: `update questions set prompt='Tap it. Hint: win.' where id=705` | one row regressing, e.g. a partial restore | **2 RED**, naming the single row: `1 of 120 ... [(705, 14, 'Tap it. Hint: win.')]`. `--check-prompts` exit **1**, then `--backfill` re-derived exactly 1 and the gate went green again |
+| `PROMPT_FRAMES[0]` moved back to the retired `Tap the one that starts with the same sound as {cue}.` | **the 11.60 event repeating** — the ladder moves and nobody repairs the pool | **RED**, including both live-pool tests. This is the whole point: before this change that edit was green everywhere and 125 rows silently went stale |
+| `stale = []` in place of the `--backfill` postcondition | the repair reporting success over its own leftovers | **1 RED**: `Failed: DID NOT RAISE SystemExit` |
+
+**The repair, run for real.** `python -m storyforge.warm --backfill` against the
+live local `storyforge` database: `re-derived 120 tap-a-word prompt(s) from the
+current frame ladder`, then `nothing to backfill`, exit **0**. A second run
+re-derived **0** — idempotent, as 11.83 predicted on the copy. `_UNENRICHED_SQL`
+was measured read-only first and returned **0 stories**, and
+`payload ? 'target_grapheme'` **0 rows**, so the run made **no API call and moved
+no answer key**; live spend **$0.00**. Afterwards:
+
+- the finding's own re-assertion — `select count(*) ... where qtype='tap_word'
+  and prompt not like 'Tap the word that starts with the same sound as %'` over
+  servable stories — is **0**;
+- **21 `answers` rows still hang off 7 of those questions**, the same 21 as
+  before: nothing was deleted, `options` and `answer` are byte-identical;
+- served through the real route (`GET /api/stories/{id}`, `DEMO_BYPASS_AUTH`),
+  the three stories the finding quoted now read
+  `Tap the word that starts with the same sound as win.` (story 14, stage 2,
+  options `['went','hit','man']`), `... as for.` (17), `... as cat.` (2), and
+  `target_grapheme` is still absent from every served payload.
+
+**The 5 rows on `rejected` stories keep their old sentences and that is correct**
+— `refresh_tap_word_prompts` filters on the serving predicate, `rejected` is never
+served, and status never moves back out of it.
+
+**Gates.**
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **1030 passed,
+  3 skipped**, against a baseline of **1026 passed, 3 skipped** measured in this
+  tree on `c54dfac` before the change. +4, the four new tests, nothing else moves.
+  (The task brief said 1008; that number has been stale since 9.74.)
+- `.venv/bin/ruff check storyforge tests scripts` — all checks passed.
+- `cd apps/web && bun test src` — **232 pass, 0 fail**. No web file is touched.
+- The pool is where it was found, plus the repaired text: `--check-coverage` still
+  **green** (33 of 33 pairs), `--check-promotability` still **red** in exactly the
+  way invariant 15 records (six terminal stages — this change neither fixes nor
+  hides that), 120 servable `tap_word` rows before and after, 21 answers before
+  and after.
+- **No `make warm`, no `make eval`, no `make eval-smoke`, no model call, nothing
+  touched on DigitalOcean. Live spend $0.00.**
+
+**The production database on DigitalOcean is untouched and almost certainly holds
+the same defect.** It cannot be repaired from here and must not be. What ships for
+it instead is `docs/DEPLOY.md` §4: `--check-prompts` is now listed as a MANDATORY
+free check with `--backfill` on the line under it, and §6 re-runs it after any
+restore. That is the difference between this residual and 11.61's — an operator is
+told, by an exit code, in the console where the remedy runs.

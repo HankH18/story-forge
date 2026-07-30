@@ -295,6 +295,32 @@ PROMPT_FRAMES = (
     "Tap: {cue}.",
 )
 
+
+def prompt_is_current(prompt: str | None, cue: str | None) -> bool:
+    """Could the ladder ABOVE have written this instruction for this cue word?
+
+    The read side of `tap_word_prompt`, and it lives here — next to the frames,
+    spelled out of them — for the reason DEVIATIONS 11.84 gives: a pool gate that
+    restated the shape as its own `LIKE 'Tap the word that %'` would be free to
+    stop agreeing with the ladder it is guarding, silently, the next time the
+    ladder moves. That is exactly the defect it exists to catch.
+
+    A membership test rather than a re-derivation, deliberately. It needs no
+    stage vocabulary and no database, so a caller can ask it of every row in the
+    pool in one pass, and "no rung of `PROMPT_FRAMES` produces this string" is
+    the proposition. The stricter question — *is this the rung `tap_word_prompt`
+    would pick today* — is `warm.refresh_tap_word_prompts` returning `(0, [])`,
+    which needs the stage's vocabulary and is asserted separately.
+
+    The cue is the row's OWN `payload.cue_word`, so a prompt naming some other
+    word is not current either: the instruction and the hint the child is shown
+    have to be about the same sound. No cue, nothing to check it against —
+    `False`, which is the answer for a legacy row that predates 4.9's payload.
+    """
+    if not prompt or not cue:
+        return False
+    return prompt in {frame.format(cue=cue) for frame in PROMPT_FRAMES}
+
 # Frozen. Per-request material lives in `messages`, so this prefix (plus the
 # stage vocabulary) stays cacheable across every story at a stage.
 #

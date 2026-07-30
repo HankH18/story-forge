@@ -129,6 +129,8 @@ python -m storyforge.warm --dry-run   # what warm would generate + roughly what 
 python -m storyforge.warm        # make warm       — the story pool (§7). SLOW. Costs money.
 python -m storyforge.warm --check-coverage   # MANDATORY. Non-zero = partial pool. Free.
 python -m storyforge.warm --check-promotability  # MANDATORY. Non-zero = no child can be promoted. Free.
+python -m storyforge.warm --check-prompts    # MANDATORY. Non-zero = retired instructions. Free.
+python -m storyforge.warm --backfill         # ^ that check's remedy. No API call when nothing is unenriched.
 ```
 
 - `make seed`'s `migrate` prerequisite is already satisfied by the PRE_DEPLOY job.
@@ -206,6 +208,35 @@ raises what each story is worth. Neither fixes a stage whose stories contain no
 word using a sound that stage introduces — that is an allowlist and generation
 problem, and the check names it rather than implying `make warm` will do.
 
+### `--check-prompts` is the only check that reads what a question SAYS
+
+The tap-a-word instruction (§11.3) is a pure function of (cue word, stage), so it
+is written into `questions.prompt` once, when the story is enriched, and nothing
+re-derives it afterwards. **When the frame ladder changes, every row already in
+the pool keeps its old sentence** — and that is not hypothetical either: DEVIATIONS
+11.60 rebuilt the ladder because *"57% of live instructions did not say what the
+task was"*, and two phases later **125 of 125 live rows still carried a retired
+sentence**, 66 of the 120 servable ones telling the child nothing about what they
+were being asked to do:
+
+```
+  q705 story 14 stage 2: 'Tap it. Hint: win.' (cue win)   <- three options on screen; "it" is nothing
+```
+
+The suite, `--check-coverage` and `--check-promotability` were all green
+throughout, because none of them reads a question's text. `--check-prompts` does,
+and exits non-zero while any servable row carries an instruction no rung of the
+current ladder produces.
+
+**Its remedy is `--backfill`, and on this defect it is free**: the prompt is
+re-derived in place from the row's own cue with **no API call**, it is idempotent,
+and it never DELETEs — which matters, because `answers.question_id` is
+`ON DELETE CASCADE` and a regenerated row would take a child's earned §8 evidence
+with it. (`--backfill` *does* call Haiku for a story whose questions are missing
+or unmoderated; run `--check-prompts` first and you will know which case you are
+in.) Run both after **any** restore from a dump, and after any deploy that changes
+`PROMPT_FRAMES`.
+
 ## 5. One manual Clerk step the API cannot do for you
 
 **A fresh Clerk instance silently downgrades every user to `parent`.** Not an
@@ -258,6 +289,7 @@ and it is the same one §4 ends with —
 ```bash
 python -m storyforge.warm --check-coverage        # exit 0, or the pool is partial
 python -m storyforge.warm --check-promotability   # exit 0, or no child can leave their stage
+python -m storyforge.warm --check-prompts         # exit 0, or children are read retired instructions
 ```
 
 Worth re-running after anything that could move the pool: a database restore, a

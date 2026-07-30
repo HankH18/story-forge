@@ -10,8 +10,8 @@ WEB := apps/web
 
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
-        migrate seed precompute warm warm-check promote-check warm-plan eval \
-        eval-smoke codegen clean
+        migrate seed precompute warm warm-check promote-check prompt-check \
+        warm-plan eval eval-smoke codegen clean
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -100,6 +100,18 @@ warm-check: ## Refuse a partial warm pool: non-zero while any (stage, theme) is 
 # queries and the decoder, no API client.
 promote-check: ## Refuse a pool no child can be promoted from: non-zero while any stage is below §8's evidence floor
 	cd $(API) && uv run python -m storyforge.warm --check-promotability
+
+# The THIRD gate, and the only one that reads a question's TEXT. §11.3's tap-a-word
+# instruction is a pure function of (cue, stage), so when DEVIATIONS 11.60 rebuilt
+# the frame ladder every row already in the pool kept its old sentence — 125 of
+# 125, for two phases, under a green suite and two green gates, 66 of them saying
+# nothing about what the child is being asked to do (11.82). Nothing measured it
+# because no other check anywhere looks at what a question SAYS. Free: one SQL
+# query, no API client. The repair is `--backfill`, which re-derives the prompts in
+# place with no API call and cannot touch `options`, `answer` or any recorded
+# answer.
+prompt-check: ## Refuse a pool serving tap-a-word instructions no current frame produces
+	cd $(API) && uv run python -m storyforge.warm --check-prompts
 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run

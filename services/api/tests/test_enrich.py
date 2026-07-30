@@ -26,10 +26,11 @@ import pytest
 from sqlalchemy import text
 
 from storyforge import warm
+from storyforge.api.stories import SERVABLE_STATUSES
 from storyforge.db import SessionLocal
 from storyforge.llm.moderate import ModerationResult
 from storyforge.llm.pricing import Usage
-from storyforge.llm.questions import GeneratedQuestion, QuestionSet
+from storyforge.llm.questions import PROMPT_FRAMES, GeneratedQuestion, QuestionSet
 from storyforge.llm.scene_tags import SceneTagResult
 from storyforge.models import Story, StorySegment
 
@@ -878,6 +879,113 @@ async def test_backfill_re_derives_a_stale_tap_word_prompt_in_place(session, sto
     )
     assert rows[0]["payload"]["options"] == ["cat", "sam", "sit"], "the row was replaced"
     assert (again, skipped) == (0, [])
+
+
+# --- the instruction in the POOL, not in the next story (DEVIATIONS 11.82-11.85)
+# The test above proves the repair works on one row and has proved it since
+# 11.60. It said nothing about whether anyone had ever run it, and nobody had:
+# 125 of 125 live rows still carried a pre-11.60 sentence two phases later, 66 of
+# the 120 servable ones saying nothing about what the child is being asked to do
+# — under a green suite, a green `--check-coverage` and a green
+# `--check-promotability`, because no check anywhere read a question's TEXT.
+#
+# These two are that check. RED against the pool as it stood before this change
+# (120 of 120 stale); the sabotage record is in DEVIATIONS 11.85.
+
+
+async def test_the_live_pool_serves_no_pre_11_60_tap_word_instruction(session):
+    """Every servable tap-a-word instruction is a rung of the CURRENT ladder,
+    filled with that row's own cue word.
+
+    Deliberately does NOT call `warm.stale_tap_word_prompts` or
+    `questions.prompt_is_current`: the membership set is rebuilt here out of
+    `PROMPT_FRAMES`, so a bug in the gate cannot make its own invariant pass. The
+    gate is exercised separately, and the stricter statement — that each row is
+    the rung `tap_word_prompt` picks *today* — is the test below.
+    """
+    rows = (
+        await session.execute(
+            text(
+                "SELECT q.id, q.story_id, q.prompt, q.payload ->> 'cue_word' AS cue "
+                "FROM questions q JOIN stories s ON s.id = q.story_id "
+                "WHERE q.qtype = 'tap_word' AND s.status = ANY(:statuses) ORDER BY q.id"
+            ),
+            {"statuses": list(SERVABLE_STATUSES)},
+        )
+    ).all()
+    if not rows:
+        # Not a pass. An empty pool cannot serve a bad instruction and cannot
+        # demonstrate a good one either — 8.44's vacuity failure, as a skip.
+        pytest.skip("no tap_word rows on servable stories — run `make warm` first")
+
+    stale = [
+        (r.id, r.story_id, r.prompt)
+        for r in rows
+        if not r.cue or r.prompt not in {f.format(cue=r.cue) for f in PROMPT_FRAMES}
+    ]
+    assert stale == [], (
+        f"{len(stale)} of {len(rows)} servable tap-a-word instruction(s) are not "
+        f"anything the current ladder writes: {stale[:5]}. Every child served one "
+        "of those stories is read a retired instruction. Repair — free, in place, "
+        "no API call — with `python -m storyforge.warm --backfill`."
+    )
+
+
+async def test_the_live_pool_needs_no_tap_word_prompt_repair(session):
+    """The stronger half, through the shipped repair rather than around it.
+
+    `refresh_tap_word_prompts` re-derives each row from its own (cue, stage,
+    story words) and returns what it would change. `(0, [])` says every servable
+    row is *exactly* what `tap_word_prompt` writes today — not merely a rung
+    shape — and that the pool is at the repair's fixed point. Nothing is written:
+    the session is rolled back, so this cannot repair the thing it is measuring.
+    """
+    try:
+        rewritten, unjudgeable = await warm.refresh_tap_word_prompts(session)
+    finally:
+        await session.rollback()
+    assert (rewritten, unjudgeable) == (0, []), (
+        f"the repair would rewrite {rewritten} live tap-a-word prompt(s) and cannot "
+        f"judge {len(unjudgeable)}: {unjudgeable[:5]}. Run `python -m storyforge.warm "
+        "--backfill`."
+    )
+
+
+async def test_the_backfill_refuses_when_a_repairable_prompt_is_still_stale(
+    session, story, nodes, monkeypatch
+):
+    """The postcondition, forced into the one state it exists for.
+
+    `--backfill` repairs before it checks, so on a healthy build the check can
+    only ever see a clean pool — which is how a guard ends up green without once
+    having been executed (8.51's lesson, five vacuous guards). The refresh is
+    stubbed to a no-op here so the stale row survives to the postcondition, and
+    the run must then be non-zero rather than printing "nothing to backfill" over
+    an instruction no child can act on.
+    """
+    await session.execute(
+        text(
+            "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+            "VALUES (:s, 0, 'tap_word', 'Tap it. Hint: sat.', "
+            """CAST('{"options": ["cat", "sam", "sit"], "cue_word": "sat"}' AS jsonb), """
+            """CAST('{"correct": "sam", "index": 1}' AS jsonb))"""
+        ),
+        {"s": story.id},
+    )
+    await _mark_moderated(session, story.id)  # nothing to enrich: the early return
+    await session.commit()
+
+    async def no_repair(*a, **kw):
+        return 0, []
+
+    monkeypatch.setattr(warm, "refresh_tap_word_prompts", no_repair)
+
+    with pytest.raises(SystemExit) as exc:
+        await warm.run_backfill(only=[story.id])
+
+    assert "STILL not what the current frame ladder writes" in str(exc.value)
+    assert "Tap it. Hint: sat." in str(exc.value), "the refusal must quote the instruction"
+    assert "--backfill" in str(exc.value), "the refusal must name the remedy"
 
 
 # --- the §13 question pass is not forward-only -------------------------------

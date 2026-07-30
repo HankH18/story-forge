@@ -34,6 +34,7 @@ from storyforge.llm.questions import (
     check_tap_word,
     cue_leaks,
     generate_questions,
+    prompt_is_current,
     readable,
     readable_openers,
     shuffle_options,
@@ -654,6 +655,40 @@ def test_the_ladder_names_the_cue_and_never_the_answer():
 
 def test_an_unreadable_cue_yields_no_prompt_at_all():
     assert tap_word_prompt("beautiful", 1, ["a", "i", "the"]) is None
+
+
+def test_a_prompt_is_current_only_for_its_own_cue():
+    """`prompt_is_current` is the read side of the ladder — the predicate the pool
+    gate asks of a row that was written months ago (DEVIATIONS 11.84).
+
+    The retired shapes below are verbatim from the live pool, where all 125 rows
+    were one of them: the second ladder's `Tap the one that starts with the same
+    sound as X.` differs from the shipped sentence by two words, which is why
+    nothing looked wrong to anyone skimming the table.
+    """
+    cue = "sat"
+    for frame in PROMPT_FRAMES:
+        assert prompt_is_current(frame.format(cue=cue), cue), f"{frame!r} is a current rung"
+
+    # The instruction and the hint the child is shown must be about the same
+    # sound: the right sentence about the wrong word is not this row's prompt.
+    assert not prompt_is_current(PROMPT_FRAMES[0].format(cue="cat"), cue)
+
+    for retired in (
+        "Tap the one that starts with the same sound as sat.",
+        "Tap the one that starts like sat.",
+        "Tap it if it begins like sat.",
+        "Tap it if it begins as sat.",
+        "Tap it. Hint: sat.",
+        "Tap it: sat.",
+    ):
+        assert not prompt_is_current(retired, cue), f"{retired!r} is not a current rung"
+
+    # A row that predates DEVIATIONS 4.9's payload carries no cue to check
+    # against, so it cannot be vouched for — `--check-prompts` refuses on it and
+    # `--backfill` says so rather than pretending to have repaired it.
+    assert not prompt_is_current(PROMPT_FRAMES[0].format(cue=cue), None)
+    assert not prompt_is_current(None, cue)
 
 
 # --- tap_word verification ---------------------------------------------------

@@ -100,6 +100,7 @@ from storyforge.llm.questions import (
     cue_candidates,
     cue_leaks,
     generate_questions,
+    prompt_is_current,
     story_word_tokens,
     tap_word_prompt,
     word_graphemes,
@@ -1456,15 +1457,19 @@ def _finish(
     api_failures: Sequence[tuple[int, str, str]] = (),
     coverage_gaps_: Sequence[PairDepth] = (),
     target: int = TARGET_PER_PAIR,
+    stale_prompts: Sequence[StalePrompt] = (),
 ) -> None:
     """The one exit point that decides whether the run succeeded.
 
-    Three kinds of failure, kept on separate lines because they have different
+    Four kinds of failure, kept on separate lines because they have different
     remedies (DEVIATIONS 8.4, 8.43). `failures` is a story that reached the pool
     unenriched — the fix is `--backfill`. `api_failures` is a cell that produced
     no story at all, usually `anthropic.APITimeoutError`; nothing is wrong with
     the pool, it is just shallower than the target, and the fix is to re-run
-    `make warm`, which `pool_depth` already makes idempotent.
+    `make warm`, which `pool_depth` already makes idempotent. `stale_prompts` is
+    a row `--backfill` was supposed to have just repaired and did not
+    (DEVIATIONS 11.84) — it is the repair checking its own work, so there is no
+    hint to print beyond the one `_stale_prompt_refusal` carries.
 
     `coverage_gaps_` is the third, and it is the only one that looks at the POOL
     rather than at this run's bookkeeping. It is passed non-empty only when the run
@@ -1483,7 +1488,7 @@ def _finish(
         for stage, theme, why in api_failures:
             print(f"  stage {stage} / {theme}: {why}")
 
-    if not failures and not api_failures and not coverage_gaps_:
+    if not failures and not api_failures and not coverage_gaps_ and not stale_prompts:
         return
 
     parts = []
@@ -1513,6 +1518,8 @@ def _finish(
             "Re-run `make warm`; if a pair stays empty its stories are being "
             "REJECTED, not lost — look at `status='rejected'` for that pair."
         )
+    if stale_prompts:
+        parts.append(_stale_prompt_refusal(stale_prompts))
     # Loud and non-zero. The whole point of Phase 4's audit: a run that
     # printed success with both enrichment nodes gutted.
     raise SystemExit("\n\n".join(parts))
@@ -1921,6 +1928,131 @@ async def refresh_tap_word_prompts(
     return updated, skipped
 
 
+@dataclass(frozen=True)
+class StalePrompt:
+    """One tap-a-word row whose instruction no current rung can spell."""
+
+    question_id: int
+    story_id: int
+    stage_id: int
+    cue: str | None
+    prompt: str
+
+    @property
+    def repairable(self) -> bool:
+        """Has a cue word, so `refresh_tap_word_prompts` has something to work from."""
+        return bool(self.cue)
+
+
+async def stale_tap_word_prompts(
+    session, target_status: Sequence[str] = SERVABLE_STATUSES, only: Sequence[int] | None = None
+) -> list[StalePrompt]:
+    """Every servable tap-a-word row carrying a prompt no current rung produces.
+
+    The gate DEVIATIONS 11.84 exists for. 11.60 rebuilt the frame ladder because
+    *"57% of live instructions did not say what the task was"*, 11.61 recorded the
+    rows already in the pool as a known inconsistency, and the pool then went
+    125-for-125 wrong for two phases under a green suite, a green
+    `--check-coverage` and a green `--check-promotability` — because no check
+    anywhere reads a question's TEXT. A paragraph in DEVIATIONS does not exit
+    non-zero; this does.
+
+    `prompt_is_current` is imported from beside `PROMPT_FRAMES` rather than
+    restated here as a `LIKE`, so this cannot go on passing after the ladder
+    moves again — which is the whole failure mode.
+
+    Read-only. One query, no API client, no vocabulary load.
+    """
+    rows = (
+        await session.execute(
+            _TAP_WORD_ROWS_SQL,
+            {"statuses": list(target_status), "only": list(only) if only else None},
+        )
+    ).all()
+    return [
+        StalePrompt(r.id, r.story_id, r.stage_id, r.cue, r.prompt)
+        for r in rows
+        if not prompt_is_current(r.prompt, r.cue)
+    ]
+
+
+#: How an operator fixes a stale instruction. Free, in place, and — decisively —
+#: not a DELETE: `answers.question_id` is `ON DELETE CASCADE`, so a row that was
+#: regenerated instead of repaired would take a child's §8 evidence with it.
+_STALE_PROMPT_HINT = (
+    "Repair with `python -m storyforge.warm --backfill` — it re-derives every "
+    "prompt from the current ladder in place, makes no API call, touches neither "
+    "`options` nor `answer`, and is idempotent. Verify with `python -m "
+    "storyforge.warm --check-prompts`."
+)
+
+
+def _stale_prompt_refusal(stale: Sequence[StalePrompt]) -> str:
+    """The non-zero exit `--backfill` owes when its own repair did not land.
+
+    One string, used by `_finish` and by the nothing-to-enrich early return, so
+    the two paths cannot describe the same defect differently.
+    """
+    lines = "\n".join(_render_stale_prompts(stale))
+    return (
+        f"{len(stale)} tap-a-word instruction(s) are STILL not what the current "
+        f"frame ladder writes, after this run's own repair pass:\n{lines}\n"
+        "That is a defect in the repair, not in the pool — every one of these "
+        f"carries a cue word to re-derive from.\n{_STALE_PROMPT_HINT}"
+    )
+
+
+def _render_stale_prompts(stale: Sequence[StalePrompt], limit: int = 12) -> list[str]:
+    """The instructions themselves, not just a count — 8.43's rule for a gap."""
+    out = [
+        f"  {len(stale)} tap-a-word row(s) carry an instruction no rung of the "
+        "current ladder produces:"
+    ]
+    for s in stale[:limit]:
+        cue = s.cue if s.cue else "<no cue_word>"
+        out.append(
+            f"    q{s.question_id} story {s.story_id} stage {s.stage_id}: "
+            f"{s.prompt!r} (cue {cue})"
+        )
+    if len(stale) > limit:
+        out.append(f"    ... and {len(stale) - limit} more")
+    return out
+
+
+async def run_prompt_check() -> None:
+    """`--check-prompts`: §11.3's instruction as an exit code. Nothing is spent.
+
+    A THIRD gate rather than a clause inside `--check-coverage`, for the reason
+    `run_promotability_check` already gives about itself: those two gates are
+    supply floors whose remedy is `make warm` and real money, and this one is a
+    text defect whose remedy is a free in-place `UPDATE`. One exit code cannot
+    mean both "buy more stories" and "run the free repair".
+    """
+    async with SessionLocal() as session:
+        stale = await stale_tap_word_prompts(session)
+        total = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM questions q JOIN stories s ON s.id = q.story_id "
+                    "WHERE q.qtype = 'tap_word' AND s.status = ANY(:statuses)"
+                ),
+                {"statuses": list(SERVABLE_STATUSES)},
+            )
+        ).scalar_one()
+
+    print(f"\nTAP-A-WORD INSTRUCTIONS — {total} row(s) on servable stories", flush=True)
+    if stale:
+        for line in _render_stale_prompts(stale):
+            print(line, flush=True)
+        raise SystemExit(
+            f"\n{len(stale)} of {total} tap-a-word instruction(s) predate the current "
+            f"frame ladder (DEVIATIONS 11.60/11.84).\nEvery child served one of those "
+            "stories is read an instruction the product no longer writes — 11.82 "
+            "measured 66 of 120 that never name the task at all.\n" + _STALE_PROMPT_HINT
+        )
+    print(f"OK — all {total} carry a rung of the current ladder, filled with their own cue.")
+
+
 def _report_cue_repair(repaired: int, stuck: Sequence[int], answered: Sequence[int]) -> None:
     """Print what `repair_leaky_cues` did — including what it could not do."""
     if repaired:
@@ -1978,6 +2110,23 @@ async def run_backfill(
             print(f"  left {len(unchanged)} tap-a-word prompt(s) alone: {unchanged}")
         await session.commit()
 
+        # The repair's own postcondition, read back from the pool rather than
+        # taken from the counters above (DEVIATIONS 11.84). A sweep that reports
+        # success while leaving the defect in place is not hypothetical here: the
+        # grammar backfill's `_body_verdict` wrote three of five verdict fields
+        # and every run printed success. Rows with no `cue_word` are excluded —
+        # `--backfill` has no remedy for them, `--check-prompts` still refuses on
+        # them, and they are already named by id on the line above.
+        #
+        # Read HERE rather than after the enrichment loop, and that is not an
+        # oversight: this is the postcondition of the REFRESH. Rows the loop goes
+        # on to write are current by construction — `check_tap_word` builds the
+        # prompt with `tap_word_prompt` itself and the model never supplies one —
+        # while a stub that returns a hand-written prompt is a test's business,
+        # not a defect in the pool.
+        left_stale = await stale_tap_word_prompts(session, target_status, only)
+        stale = [s for s in left_stale if s.repairable]
+
         rows = (
             await session.execute(
                 _UNENRICHED_SQL,
@@ -1993,6 +2142,8 @@ async def run_backfill(
                 "  every servable story has questions, a §13 verdict on them and a "
                 f"{'/'.join(MASTERY_QTYPES)} question §8 can count — nothing to backfill"
             )
+            if stale:
+                raise SystemExit(_stale_prompt_refusal(stale))
             return
 
         print(
@@ -2016,6 +2167,7 @@ async def run_backfill(
     _finish(
         f"{len(rows) - len(failures)} of {len(rows)} backfilled. Cost ${total_cost:.4f}",
         failures,
+        stale_prompts=stale,
     )
 
 
@@ -2265,6 +2417,16 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--check-prompts",
+        action="store_true",
+        help=(
+            "report every tap-a-word instruction on a servable story that no rung "
+            "of the current PROMPT_FRAMES ladder produces, and exit NON-ZERO while "
+            "any exists, then exit. No API calls, nothing spent. The repair is "
+            "`--backfill` and is free (DEVIATIONS 11.60/11.84)"
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -2306,6 +2468,8 @@ def main() -> None:
             asyncio.run(run_coverage_check(a.target))
         elif a.check_promotability:
             asyncio.run(run_promotability_check())
+        elif a.check_prompts:
+            asyncio.run(run_prompt_check())
         elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
         elif a.grammar_backfill:

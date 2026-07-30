@@ -43,7 +43,7 @@ Lint: `cd services/api && uv run ruff check storyforge tests`.
 
 ## Commands
 ```
-make dev | test | seed | precompute | warm | warm-check | promote-check | warm-plan
+make dev | test | seed | precompute | warm | warm-check | promote-check | prompt-check | warm-plan
 make eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
@@ -57,7 +57,15 @@ ladder answers an empty pair by silently serving a lower stage (DEVIATIONS
 8.40–8.48). **`make promote-check` (`--check-promotability`) is the SECOND gate
 and measures the other floor** — the §8 evidence those stories can yield — and it
 is RED today: six stages are terminal dead ends (invariant 15, DEVIATIONS 11.70).
-Both are free, neither implies the other.
+**`make prompt-check` (`--check-prompts`) is the THIRD gate and the only one that
+reads what a question SAYS** — non-zero while a servable `tap_word` row carries an
+instruction no rung of the current `PROMPT_FRAMES` produces. GREEN today, and it was
+120 of 120 RED until DEVIATIONS 11.82-11.85: 11.60 rebuilt the frame ladder, nothing
+re-derives a prompt already in the pool, so for two phases every child was read a
+retired sentence — 66 of 120 of which never said what the task was — under a green
+suite and two green gates. Its remedy is `--backfill`, which re-derives prompts in
+place with no API call and never DELETEs a row §8 evidence hangs off.
+All three are free, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
 `reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest
