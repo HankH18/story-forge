@@ -185,7 +185,12 @@ function StatCards({ progress: p }: { progress: Progress }) {
           pr.promote
             ? 'Both parts of the rule are met.'
             : atMaxStage
-              ? 'Stage 11 is the last stage in the scope & sequence.'
+              ? // DEVIATIONS 17.2: the ceiling comes from the server's own
+                // answer, never a literal. `atMaxStage` IS `to_stage === null`,
+                // so `from_stage` is the top of the ladder by construction — and
+                // the previous 'Stage 11' would have gone on saying 11 through
+                // the next renumber, on a parent's screen, with a green suite.
+                `Stage ${pr.from_stage} is the last stage in the scope & sequence.`
               : `${name} moves up on both counts together, never on one alone.`
         }
       />

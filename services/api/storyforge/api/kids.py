@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from storyforge.auth import Principal, require_parent
 from storyforge.db import get_session
+from storyforge.decoder import MAX_STAGE, MIN_STAGE
 
 router = APIRouter(tags=["kids"])
 
@@ -67,7 +68,8 @@ class KidCreate(BaseModel):
     """
 
     display_name: DisplayName
-    stage_id: int = Field(ge=1, le=11)
+    # DEVIATIONS 17.2: derived from the decoder, which owns stage semantics.
+    stage_id: int = Field(ge=MIN_STAGE, le=MAX_STAGE)
 
     @field_validator("display_name")
     @classmethod

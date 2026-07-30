@@ -21,14 +21,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from storyforge.auth import Principal, require_admin
 from storyforge.db import get_session
-from storyforge.decoder import TextReport, mastered_ids, validate_text
+from storyforge.decoder import MAX_STAGE, MIN_STAGE, TextReport, mastered_ids, validate_text
 
 router = APIRouter(tags=["validate"])
 
 
 class ValidateRequest(BaseModel):
     text: str = Field(max_length=4000)
-    stage_id: int = Field(ge=1, le=11)
+    # DEVIATIONS 17.2: derived, never a literal. `11` was edited by hand in five
+    # schemas when stage 1 was retired (12.1-12.14) and would have to be edited by
+    # hand again — `tests/test_stage_bounds.py` is what turns the next renumber
+    # from a silent 422 into a red suite.
+    stage_id: int = Field(ge=MIN_STAGE, le=MAX_STAGE)
     # A kid's own name is added to their sight allowlist (§4), so callers need to
     # extend the list per request.
     extra_sight_words: list[str] = Field(default_factory=list, max_length=64)

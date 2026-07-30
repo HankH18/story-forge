@@ -57,6 +57,7 @@ from storyforge import obs
 from storyforge.auth import Principal, require_admin
 from storyforge.config import get_settings
 from storyforge.db import SessionLocal, get_session
+from storyforge.decoder import MAX_STAGE, MIN_STAGE
 from storyforge.eval import (
     DEFAULT_BUDGET_USD,
     DEFAULT_N,
@@ -927,8 +928,14 @@ async def _plan(session: AsyncSession, body: EvalRunRequest) -> dict[str, Any]:
         stages = parse_stages(body.stages)
     except SystemExit as exc:
         raise HTTPException(status_code=422, detail=f"bad stages spec: {exc}") from exc
-    if any(s < 1 or s > 11 for s in stages):
-        raise HTTPException(status_code=422, detail="stages must be within 1..11 (§4)")
+    # DEVIATIONS 17.2: the bound AND the message derive from the decoder. The
+    # message was its own hardcoded copy of the ceiling and a test pinned the
+    # literal string, so a renumber left both saying 11 with a green suite.
+    if any(s < MIN_STAGE or s > MAX_STAGE for s in stages):
+        raise HTTPException(
+            status_code=422,
+            detail=f"stages must be within {MIN_STAGE}..{MAX_STAGE} (§4)",
+        )
 
     rows = (await session.execute(text("SELECT id, slug FROM themes"))).all()
     known = {slug: tid for tid, slug in rows}
@@ -1280,7 +1287,7 @@ def _like_pattern(raw: str) -> str:
 
 @router.get("/allowed-words")
 async def list_allowed_words(
-    stage: int = Query(..., ge=1, le=11),
+    stage: int = Query(..., ge=MIN_STAGE, le=MAX_STAGE),
     limit: int = Query(WORDS_DEFAULT_LIMIT, ge=1, le=WORDS_MAX_LIMIT),
     offset: int = Query(0, ge=0),
     q: str = Query("", max_length=64),
@@ -1379,7 +1386,7 @@ class ColdGenerateRequest(BaseModel):
     precedent: a stage with no child in the room.
     """
 
-    stage_id: int = Field(..., ge=1, le=11)
+    stage_id: int = Field(..., ge=MIN_STAGE, le=MAX_STAGE)
     #: Slug or id, resolved against `themes`.
     theme: int | str
     effort: Literal["low", "medium", "high"] = "medium"

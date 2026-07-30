@@ -164,7 +164,10 @@ TARGET_PER_PAIR = 3
 #: the full matrix. §17's demo is dragons at one low stage, a cell that was
 #: covered, and the §7 ladder degrades to a lower stage silently and correctly, so
 #: the demo passed and nine empty stages were invisible.
-DEFAULT_STAGES = "1..11"
+#: DEVIATIONS 17.2: spelled from MIN_STAGE/MAX_STAGE rather than typed. This
+#: string IS the full matrix's definition — a stale literal here does not
+#: fail, it silently stops filling the top stage.
+DEFAULT_STAGES = f"{MIN_STAGE}..{MAX_STAGE}"
 DEFAULT_THEMES = "all"
 
 

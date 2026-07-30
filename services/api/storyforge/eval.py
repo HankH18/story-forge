@@ -59,7 +59,7 @@ from sqlalchemy import select, text
 from storyforge import obs
 from storyforge.api.stories import SERVABLE_STATUSES
 from storyforge.db import SessionLocal
-from storyforge.decoder import WordVerdict
+from storyforge.decoder import MAX_STAGE, MIN_STAGE, WordVerdict
 from storyforge.decoder.resources import load_gpcs, load_lexicon
 from storyforge.llm.client import SDK_MAX_RETRIES, fast_model, generation_model, generation_timeout
 from storyforge.llm.generate import (
@@ -90,7 +90,7 @@ from storyforge.warm import _split_segments
 #: §14's own default matrix is §1 item 2's acceptance matrix: 11 stages x 3
 #: themes x 5 stories. Spelled the way the CLI spells a range (`1..11`, `all`) so the
 #: documented command line is the one that actually runs.
-DEFAULT_STAGES = "1..11"
+DEFAULT_STAGES = f"{MIN_STAGE}..{MAX_STAGE}"
 DEFAULT_THEMES = "all"
 DEFAULT_N = 5
 
@@ -2846,7 +2846,11 @@ def main() -> None:
     s.add_argument("--effort", default="medium")
 
     f = sub.add_parser("run", help="§14 full run: writes eval_runs + a markdown report")
-    f.add_argument("--stages", default=DEFAULT_STAGES, help="'1..11', '3,6', '1..4,9..11'")
+    f.add_argument(
+        "--stages",
+        default=DEFAULT_STAGES,
+        help=f"'{DEFAULT_STAGES}', '3,6', '1..4,9..{MAX_STAGE}' (default: {DEFAULT_STAGES})",
+    )
     f.add_argument("--themes", default=DEFAULT_THEMES, help="'all' or comma-separated slugs")
     f.add_argument("-n", "--n", type=int, default=DEFAULT_N, dest="n")
     f.add_argument("--effort", default="medium")

@@ -132,7 +132,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from storyforge.auth import Principal, owned_kid, require_parent
 from storyforge.db import get_session
-from storyforge.decoder import mastered_ids, validate_text
+from storyforge.decoder import MAX_STAGE, MIN_STAGE, mastered_ids, validate_text
 
 # Imported, not restated: §1's 95% is one number and the serve-time re-check
 # must be the same gate the pipeline applied, not a second opinion that can
@@ -349,7 +349,8 @@ class StoryRequest(BaseModel):
     """
 
     kid_id: int | None = Field(default=None, ge=1)
-    stage_id: int | None = Field(default=None, ge=1, le=11)
+    # DEVIATIONS 17.2: derived from the decoder, which owns stage semantics.
+    stage_id: int | None = Field(default=None, ge=MIN_STAGE, le=MAX_STAGE)
     # Kid mode holds slugs (`GET /api/themes`); the admin portal holds ids.
     theme_id_or_slug: int | str
 
