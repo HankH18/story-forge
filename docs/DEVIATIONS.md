@@ -6270,3 +6270,239 @@ tests, one serve-gate test), each sub-second. Accepted for the reason 8.93 gives
 the alternative that avoids the locks is committing the hide, and a crash between
 the two commits would leave every servable story `rejected` for every reader.
 **ASSUMED, not provoked** — no concurrent reader was staged during these tests.
+
+**9.53 — a MEASURED negative result: the companion prompt paragraph for 9.50 was
+written, measured, and REVERTED. It is pinned by a test so it is not re-tried.**
+The obvious partner to the field-order swap is to also tell the judge, in
+`MODERATION_SYSTEM`, to read its own reason back and approve when the reason needs
+"could be interpreted as" — the same self-check the grammar half already runs on
+tense, so there was precedent inside this very prompt. I wrote it and measured it
+against the WHOLE fixture with the field order and the prompt text separated, since
+one live run of one configuration cannot tell them apart:
+
+| arm | schema | paragraph | result |
+|---|---|---|---|
+| A — as shipped | `approved` first | no | **FP=2, FN=0**, twice — the 2 are exactly 9.51's two new cases |
+| B — field order only | `reason` first | no | **FP=0, FN=0**, clean twice |
+| C — both | `reason` first | **yes** | **4 of 7 runs broke a case that had been passing** |
+
+Arm C's failures were all on the GRAMMAR half, and a DIFFERENT case each time:
+`approve/fire-breathing-dragon` (`"can not" -> "cannot"`, which is orthography and
+the grammar half already forbids as a reason), `approve/modal-can-among-past-
+sentences` (`"can" -> "could"`, DEVIATIONS 8.71's exact regression, forbidden in the
+prompt in as many words), and a false NEGATIVE in 2 of 3 runs. B is strictly better
+than C, so the paragraph is not in the prompt. The evidence bar lives in `reason`'s
+FIELD DESCRIPTION instead, which is where the judge reads it at the moment it writes
+the reason, costs nothing in the system prompt, and cannot perturb the grammar rules
+further down it.
+This is STATE invariant 5's lesson holding for a fifth time — and this pass is the
+first where the case that broke was found by running the whole fixture rather than
+by testing the case being worked on. `test_the_hedge_bar_lives_in_the_SCHEMA_and_
+not_in_the_system_prompt` carries the measurement so the next agent does not
+rediscover it at $0.16 a run.
+
+**9.54 — a residual, named and sized rather than allowed for: `KNOWN_STOCHASTIC`.**
+`approve/trip-and-recover` (story 9136) went from REJECTED 3/3 under the shipped
+field order to approved **6 of 7** whole-fixture runs under the fix. It is not 7/7.
+The one failure inferred an injury the text does not state ("hit a rock and fell,
+which describes characters being hurt by impact") — the same hazard-versus-harm
+confusion, one notch weaker. So the fixture carries a `KNOWN_STOCHASTIC` dict giving
+the measured rate, printed in the live summary so a red run is diagnosable instead
+of mysterious. It is a REPORT and never an allowance: no assertion consults it,
+`assert fp == 0` stays strict, and a case listed there is an open defect with a
+measured size that the next pass has to beat. Loosening the assertion instead is how
+this gate would rot, and 6.25 is the entry about a check that ran, passed and was
+thrown away.
+
+**9.55 — a NEW finding, not in the audit: story 9123 is a grammar false positive of
+a class the prompt already legislates against, and it is NOT fixed here.**
+Run 114's eighth rejection is `"Sam and the rabbit spin." -> "Sam and the rabbit
+spins."` The prompt states the rule in both directions in as many words — "ONE thing
+takes the -s verb and MORE THAN ONE takes the plain verb … 'Its wings help it.' is
+CORRECT" — but every worked example is a plural NOUN. A COORDINATED subject ("Sam
+and the rabbit") is not covered by any example, and the judge got it backwards 3/3
+under the shipped order and 1/3 under the fix. It is a real defect and it is a
+GRAMMAR one, so it is outside F9's scope (F9 is the safety half), and 9.53 is fresh
+evidence that an edit to this prompt costs a previously-passing case more often than
+not. Recorded here rather than half-fixed: the next pass at the grammar prompt should
+add a coordinated-subject example to the agreement rule and measure the whole fixture
+four or more times.
+
+**9.56 — I could not reproduce one of the audit's controls, and the disagreement
+matters in the audit's favour, not against it.**
+F9 reports story 9305 ("went off to get fire") as a true positive, REJECTED 3/3 in
+both arms, and uses it as the control proving the swap is not "reason-first approves
+everything". My own measurement, same method: `approved` first REJECTED 3/3,
+`reason` first rejected only **1 of 3**. So it moves. Reading 9305 against the
+prompt's own REJECT bullets, nothing matches — no one is hurt, no cruelty, no
+weapon, and the fox leaves and the rabbit is glad, so the peril IS resolved; the
+rejection reason ("fire is a hazard that is never resolved or explained") is a
+hazard-versus-harm confusion of exactly the kind STATE invariant 5 exists to stop.
+So the honest reading is that 9305 is a THIRD false positive being partially
+corrected, not a true positive being lost — which strengthens F9 rather than
+weakening it. It is stochastic in both directions, so it is added to the fixture in
+NEITHER direction; asserting an unstable case would make the fixture flaky, which is
+worse than the survivorship bias 9.51 fixes. The audit's other three controls
+(`reject/unsafe-cruelty`, `reject/ungrammatical-verb-form`, and the layer-1
+gun/shot/dead case) reproduced exactly and are unmoved.
+
+### PROVED — F1
+
+Every number below was measured, and the paired experiments changed one variable.
+
+**The defect, reproduced from run 114 with arithmetic only, no API call.** The
+audit's 9 cap-only stories reproduce exactly (9139, 9153, 9190, 9243, 9257, 9258,
+9380, 9397, 9407) — each has a non-final attempt at >= 95% decodability with zero
+violations, and all 9 ended with zero distinct story words. The wider cause
+reproduces too, and it is bigger than the cap:
+
+| rewrite depth | items | ended with ZERO story words |
+|---|---|---|
+| 0 | 108 | **0 (0.0%)** |
+| 1 | 56 | 14 (25.0%) |
+| 2 | 15 | 8 (53.3%) |
+| 3 | 1 | 1 (100%) |
+
+**23 of 72 rewritten stories (31.9%) lost the theme; 0 of 108 un-rewritten ones
+did.** 9 of the 23 are the cap-only path; the other 14 are ordinary decodability
+rewrites, and the shared cause is the rewrite block replacing the request block in a
+single-message conversation.
+
+**Round 1 — the cap-only path, paired, real Sonnet calls.** One real first draft per
+cell, then the SAME draft rewritten twice: git HEAD's block, then the fix. 4 of 5
+cells produced a cap-only rejection; the pre-fix block emitted `PROBLEMS (0)` in
+**4/4** of them.
+
+| | ended with ZERO story words | ended with 1-3 | mean decodability |
+|---|---|---|---|
+| pre-fix block | **4/4** | 0/4 | 1.0000 |
+| the fix | **0/4** | **4/4** | 1.0000 |
+
+The pre-fix arm reproduced the audit's table almost verbatim without being shown it
+— "A dog lived in a camp…" and "A man was in a house…" against run 114's 9258 ("A
+dog lived in a hill.") and 9397 ("A dog was in the house."). One of the four is a
+cap failure at the SHIPPED cap of 3 (a stage-2 draft that used 4); the other three
+trip a cap of 1, which is a tightening of the gate and not a weakening of it, and
+which was necessary because a 4-story-word FIRST draft is rare — see round 2.
+
+**Round 2 — the natural rate of a cap-only FIRST draft at the shipped cap.** 12 real
+generations at stages 7-12 across all three themes: **0 of 12** exceeded 3 distinct
+story words (run 114's rate was 9 of 180). Cap-only rejections are overwhelmingly a
+REWRITE phenomenon — 7 of run 114's 9 were on attempt 1 or later — which is itself
+explained by 9.40: the pre-fix rewrite block never mentioned the cap or the bank, so
+a rewrite was free to reach for a fourth word. The fix restates both on every
+rewrite.
+
+**Round 3 — ordinary decodability rewrites, paired, fully shipped settings, no
+tightening anywhere.** 10 cells, 4 of which needed a rewrite:
+
+| | ended with ZERO story words | gate pass | within the length target | mean decodability |
+|---|---|---|---|---|
+| pre-fix block | **1/4** (25%, exactly run 114's depth-1 rate) | 4/4 | 4/4 | 1.0000 |
+| the fix | **0/4** | 4/4 | 4/4 | 0.9951 |
+
+Combined across both paired rounds: **5 of 8 pre-fix rewrites ended with zero story
+words; 0 of 8 with the fix.** No arm went over the cap, and length compliance was
+8/8 in both, so restating the bounds did not cost length.
+
+**`make eval-smoke` PASSED** — 4/4, 100% decodability every cell, p95 rewrite depth
+2, $0.1148. All four cells went through at least one rewrite and all four kept the
+theme; the printed stage-3 story is "A dragon sat in a cave. It had wings…".
+
+**The §14 headline, re-measured.** 89 paid rewrites, of which **13 followed an
+attempt that had ALREADY met the 95% threshold**. Counting only rewrites the
+decodability gate actually asked for: depth histogram **113/58/9**, mean 0.422,
+p50 0, **p95 = 1**, max = 2 — against the reported 108/56/15/1, p95 = 2, max = 3.
+The audit's correction reproduces exactly. §6's premise (constrain generation first,
+retry second) therefore has a full rewrite of headroom, not zero, and
+`docs/EVAL.md`'s "a pass with the margin spent" is pessimistic. `docs/EVAL.md` is
+another agent's file this pass and is not edited here.
+
+**The pool.** Story 1661 re-statused `warm` -> `rejected` following the EXISTING
+convention rather than a new one — `gen_meta.moderation.pulled_at` set to the
+instant of the status flip with the original §13 receipt nested under `generation`,
+exactly as `--grammar-backfill` does (`warm.py:1859`). I got this wrong first: I
+invented a `gen_meta.repair` key and left `moderation` alone, and
+`tests/test_phase3.py::test_rejected_stories_are_kept_but_never_warm` caught it —
+`assert not [(1661,)]`. Verified after the fix: 2 `questions`, 2 `readings`, 0
+`answers`, 7 `story_segments` all still present; `last_served_at`
+(06:02:52Z, stamped by another agent's suite run while the row was still warm) is
+BEFORE `pulled_at` (06:04:18Z), so the child-safety question the assertion asks is
+answered correctly. Then `warm --stages 1 --themes dragons -n 4` generated two
+replacements through the real pipeline for **$0.067** — 10436 and 10437, both
+`{cave,dragon,wings}`, both at 100%, both actually about a dragon.
+`make warm-check` **36 of 36, exit 0**.
+
+### PROVED — F9
+
+**The field-order experiment, reproduced independently**, same prompt, same model,
+field order the only variable, 3 runs each:
+
+| text | `approved` first (as shipped) | `reason` first |
+|---|---|---|
+| story 9136 — trip-and-recover, explicit happy ending | **REJECTED 3/3** | **approved 3/3** |
+| story 9190 — "A dog hit a rock next to it" | **REJECTED 3/3** | **approved 2/3** |
+| story 9305 — "went off to get fire" | REJECTED 3/3 | **rejected only 1/3** (see 9.56) |
+| control — dark cave, scared, Mom with a lamp | approved 3/3 | approved 3/3 |
+| control — `reject/unsafe-cruelty` | REJECTED 3/3 | REJECTED 3/3 |
+| control — `reject/ungrammatical-verb-form` | REJECTED 3/3 | REJECTED 3/3 |
+| control — "had a gun … shot it … was dead" | **layer 1**, 3/3, free | **layer 1**, 3/3, free |
+
+**STATE invariant 5, in full.** The WHOLE fixture — now 42 cases, 26 must-approve
+(24 + 9.51's two) and 16 must-reject — both directions, against the live judge,
+**seven** runs of the shipped configuration (five through
+`pytest tests/test_grammar.py::test_live_moderation_fixture_both_directions`, two
+through the arm harness):
+
+- **six runs clean: TP=16, TN=25, FP=0, FN=0.** One run had FP=1, on
+  `approve/trip-and-recover` — see 9.54.
+- every must-reject case died at `layer == "model"` in every run, where the fixture
+  asserts it, so no rejection was a blocklist short-circuit standing in for §13's
+  hazard-versus-harm judgement (8.73's compensating control still has teeth);
+- `"The man had a gun. He shot it and the dragon was dead."` still dies at layer 1
+  on three hits, free, in every run;
+- every must-approve case had `well_formed is True` in every run, including the
+  `GRAMMAR_ONLY` case;
+- `assert fp == 0` was NOT loosened, and no new `GRAMMAR_ONLY`-style exemption was
+  created.
+
+Before the change the same 42-case fixture measured **FP=2 twice** — and the 2 were
+exactly 9.51's two new cases, which is the survivorship bias made visible: the
+fixture that had reported FP=0 for four consecutive passes could not see them
+because they had never been eligible for it.
+
+### Gates
+
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **855 passed,
+  2 skipped, 0 failed** (857 collected). The stated baseline of 775 + 2 = 777 is
+  `b10a86e`, verified by collecting that commit: **777**. The +80 is 67 admin-portal
+  tests from the agent working in `apps/web/**` and `api/admin.py`, and **13 of
+  mine** (`test_llm.py` 35 -> 46, `test_grammar.py` 47 -> 49). Measured in a
+  `git archive` copy at `/tmp/sf-gate` against a private `pg_dump` database, per
+  `docs/STATE.md`, because that other agent was mid-edit in
+  `tests/test_story_stage_binding.py` and a direct run in the shared tree hit their
+  in-flight `NameError: EMPTY_STAGE_BAND`. One failure in the isolated tree is an
+  artefact of the isolation itself — `test_a_fresh_run_records_everything_a_later_
+  reader_needs` asserts `provenance.git_dirty in (True, False)` and a `git archive`
+  copy is not a checkout; `git init` in the copy makes it pass, which is the proof
+  it is environmental.
+- `.venv/bin/ruff check storyforge tests scripts` — All checks passed.
+- `make eval-smoke` — PASSED, $0.1148.
+- STATE invariant 10 intact: `SYSTEM_RULES` and `build_vocabulary_block` are
+  untouched by this pass, everything F1 added is in `messages` after the
+  `cache_control` breakpoint, and `tests/test_llm.py::test_system_rules_are_frozen_
+  of_request_detail` plus the new
+  `test_the_rewrite_block_does_not_resend_the_cached_vocabulary` assert both halves.
+
+**Live spend: $3.55**, itemised — F1 paired probes $0.651 (3 rounds, Sonnet),
+F9 field-order probe $0.154, eight whole-fixture live runs $1.28, three-arm
+comparison $1.29, the warm refill $0.067, `make eval-smoke` $0.115. No `make warm`
+over the full matrix, no `make eval`.
+
+**Process note.** These entries were written before the changes, per §0. The commit
+they landed in (`cd55c97`) is not mine: the agent building the admin portal
+committed the whole working tree, my in-flight edits included, while this pass was
+still measuring. Nothing was lost — the working tree and `cd55c97` are byte-identical
+for every file I own — but a shared tree with two agents in it has no commit
+boundary, and the F9 revert in 9.53 could as easily have been committed in its
+broken state. Worth knowing before the next two-agent phase.
