@@ -6245,21 +6245,49 @@ constant moves.
   whose docstring is about stepping over an isolated bad row, and leave the same
   defect one order of magnitude further out.
 
-**9.68 — What F4 does NOT fix, stated rather than left to be discovered.** F4 is
-two defects and this closes one. `warm.pool_coverage` still does not model
-`_is_decodable_for`, so a pool in which **every** story at or below a reader's
-stage fails the decoder re-check would still report 36/36 green while that reader
-gets a 503. What the descent fix closes is the audit's actual reproduction — 4
-undecodable rows at stage 12 over a good stages 1-11 — where the request now
-succeeds, so `warm-check`'s green is *correct* for that pool rather than a lie.
-The residual needs `warm.py`, which another agent owns this batch; the one-line
-direction is a decodability clause in `_COVERAGE_SQL`/`_DEPTH_SQL` beside the
-`ANSWERABLE_SQL` that is already imported from `api/stories.py`, and it cannot be
-`stories.decodability` for 9.67's first reason — it has to be a real decoder pass,
-which makes it a Python loop over the pair's candidates rather than a SQL clause.
-**Not fixed, not claimed as fixed, and not tested here** — a test asserting a
-property warm.py does not have would be red, and a test asserting the property it
-DOES have would be the vacuity this whole block is about.
+**9.68 — What F4 does NOT fix. PROVED still open, not reasoned about.**
+F4 is two defects — *"the gate cannot see the condition"* and *"`SERVE_ATTEMPTS = 3`
+spends the whole retry budget on the top rung so §7's ladder never descends"* — and
+this closes the second one only.
+
+**PROVED, on the FIXED code**, against a copy of the live pool in which every
+servable story's segments were rewritten to undecodable text while `status` and the
+`questions` rows — the only two things `warm.pool_coverage` models — were left
+exactly as they were:
+
+```
+rewrote 826 segments of every servable story to undecodable text
+  warm --check-coverage          -> exit 0: OK — all 36 (stage, theme) pair(s) hold >= 3 servable
+  POST /api/stories/request (12) -> HTTP 503: no story at or below stage 12 passes §1's 95% gate
+  => GREEN GATE + 503 FOR THE CHILD
+```
+
+So F4's headline sentence — *"`make warm-check` exits 0 on a pool that answers a
+child 503"* — is **still true in general, and this entry does not pretend
+otherwise.** What the descent fix removes is the audit's actual reproduction (four
+undecodable-but-answerable rows planted at the top rung, stages 1-11 good), where
+the request now succeeds and `warm-check`'s green is therefore *correct* rather than
+a lie. Both measured on the same planted pool:
+
+| | `warm --check-coverage` | `POST /api/stories/request` (stage 12, dragons) |
+|---|---|---|
+| as it shipped | exit 0 | **503** — "rejected 10223 (36.4%), 10224 (36.4%), 10225 (36.4%)" |
+| fixed | exit 0 | **200** — story 7353 at stage 12 |
+
+In the residual case the serving path is not what is wrong: it spent the whole
+`_serve_attempt_budget`, found nothing that passes §1, and said so. Serving a story
+the gate rejected would be the weakening §0 forbids. The wrong number is the gate's.
+
+Closing it needs `warm.py`, which another agent owned during this batch, and it is
+**not** the one-liner an earlier draft of this entry called it: it cannot be a SQL
+clause on `stories.decodability` for 9.67's first reason, so `pool_coverage` and
+`pool_depth` would have to run the real decoder over each pair's candidates
+(`_load_story` + `_is_decodable_for` at the pair's own stage), turning a single
+`GROUP BY` into a per-story loop over ~119 rows on every `warm-check`. That is a
+design decision about what the mandatory gate costs, not a patch to slip in.
+**Not fixed, not claimed as fixed, and deliberately not tested here**: a test
+asserting the property `warm.py` lacks would be red, and a test asserting the
+property it already has would be exactly the vacuity this whole block is about.
 
 **9.69 — The lock window from `hide_servable_pool` widens, and that is named
 because the audit named it.** F15: the hide-`UPDATE` row-locks the whole servable
@@ -6270,6 +6298,39 @@ tests, one serve-gate test), each sub-second. Accepted for the reason 8.93 gives
 the alternative that avoids the locks is committing the hide, and a crash between
 the two commits would leave every servable story `rejected` for every reader.
 **ASSUMED, not provoked** — no concurrent reader was staged during these tests.
+
+**9.70 — PROVED: every guard is RED against the defect it names, and the sweep was
+run over the WHOLE suite rather than over the tests being worked on.** Six sabotages,
+each in a working-tree copy at `/tmp/sfsab/api` (never the real repo — verified
+`storyforge.api.stories.__file__ == /private/tmp/sfsab/api/storyforge/api/stories.py`)
+against a throwaway database restored from `pg_dump` before each run and put into
+the state right after `make warm` (`last_served_at = NULL`, 119 servable, 9 at
+stage 12), which is the state F3 was green in.
+
+| sabotage | the defect it stages | tests that go RED |
+|---|---|---|
+| `eval_servable` | `_SERVE_SQL`: `status = ANY(:statuses)` → `(… OR status = 'eval')` | **1** — `test_an_eval_story_is_never_served_by_the_request_endpoint` |
+| `byid_status` | `stories.py`'s `if dto.status not in SERVABLE_STATUSES:` → `if False:` | **3** — `test_an_eval_story_is_not_fetchable_by_id`, `test_rejected_stories_are_never_served`, `test_grammar.py::test_a_rejected_body_stops_being_served` |
+| `readings_status` | `readings.py`'s status refusal → `if story is None or False:` | **2** — `test_an_eval_story_cannot_be_read_by_a_kid`, `test_readings.py::test_a_rejected_story_cannot_be_read` |
+| `no_serve_gate` | `_is_decodable_for` removed from the serving path entirely | **2** — `test_an_undecodable_story_in_the_pool_is_never_served`, `test_the_ladder_descends_past_a_rung_the_serve_gate_refuses` |
+| `old_budget` | `range(_serve_attempt_budget(stage_id))` → `range(SERVE_ATTEMPTS)` | **1** — `test_the_ladder_descends_past_a_rung_the_serve_gate_refuses` |
+| `ladder_climbs` | `stage_id <= :stage` → `<= :stage + 1` (STATE invariant 6) | **11**, including `test_fallback_never_serves_a_story_above_the_requested_stage`, `test_a_stage_with_no_pool_falls_back_to_the_nearest_lower_stage`, `test_the_served_stage_is_the_kids_stage_not_the_callers_wish` and the new descent test |
+
+Before the repairs, `eval_servable` + `byid_status` + `readings_status` applied
+together turned **nothing** red: `pytest -k "never_served_by_the_request_endpoint or
+not_fetchable_by_id or cannot_be_read_by_a_kid"` → **3 passed** and
+`test_rejected_stories_are_never_served` → **1 passed**, while the same build served
+`GET /api/stories/8` (a `rejected` story that HAS questions) a **200** and filed a
+reading against it **201**. That control is what makes the four green results
+evidence of a defect rather than of correctness.
+
+Two tests fail in the copy under *every* sabotage including none, and neither is
+caused by anything here: `test_a_fresh_run_records_everything_a_later_reader_needs`
+(`assert None in (True, False)` — the copy has no `.git`, so `_provenance` records
+nothing) and `test_grammar.py::test_the_content_half_refuses_a_hedged_rejection`
+(the copy was taken mid-flight while another agent was editing
+`llm/moderate.py`'s prompt). Both pass in the real tree — the shared-database run
+below is 0 failures.
 
 **9.53 — a MEASURED negative result: the companion prompt paragraph for 9.50 was
 written, measured, and REVERTED. It is pinned by a test so it is not re-tried.**
