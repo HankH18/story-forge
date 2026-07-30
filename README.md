@@ -6,6 +6,17 @@ An LLM generates stories; a deterministic validator proves every story is
 readable using only the phonics rules a specific child has already mastered. The
 LLM is an untrusted generator. A pure function is the gate.
 
+## Demo
+
+**▶ [Watch the walkthrough](https://www.loom.com/share/30b4d77c474942ae930fd03e949dfbdc)**
+
+The §17 script: the validator playground refusing a sentence and *naming* the
+grapheme-phoneme correspondences it is missing, the machine-derived word list for
+a stage, a full kid session, a cold generation showing the pipeline's state
+transitions and a live rewrite-loop catch, and the §14 eval report.
+
+Live: **https://storyforge-vtwne.ondigitalocean.app**
+
 ## Quick start
 
 ```bash
