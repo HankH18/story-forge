@@ -79,15 +79,22 @@ export function StoryTaskIcon({ className = 'h-8 w-8' }: TaskIconProps) {
   )
 }
 
-/** Three chevrons fanning from the cue card down to the three options. */
-export function FanDownIcon({ className = 'h-6 w-20' }: TaskIconProps) {
+/**
+ * Three chevrons pointing DOWN, from the cue card to the three options.
+ *
+ * The first version was `M12 4l-6 8 6 8 …` — chevrons pointing left and right,
+ * which rendered as `‹ | ›` and read as "previous / next", i.e. as navigation.
+ * Verified in a browser at a tablet viewport, which is the only place the
+ * difference between "look down here" and "go back" is visible.
+ */
+export function FanDownIcon({ className = 'h-6 w-24' }: TaskIconProps) {
   return (
-    <svg viewBox="0 0 80 24" aria-hidden="true" focusable="false" className={className}>
+    <svg viewBox="0 0 96 26" aria-hidden="true" focusable="false" className={className}>
       <path
-        d="M12 4l-6 8 6 8M40 4v16M68 4l6 8-6 8"
+        d="M8 6l8 10 8-10M40 6l8 10 8-10M72 6l8 10 8-10"
         fill="none"
         stroke="currentColor"
-        strokeWidth="3"
+        strokeWidth="3.4"
         strokeLinecap="round"
         strokeLinejoin="round"
       />

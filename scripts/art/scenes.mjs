@@ -161,7 +161,7 @@ export const SEGMENTS = {
   'dragons/cave-01': {
     tags: ['dragon', 'cave', 'sleeping'],
     draw: () =>
-      caveInterior({ mouthX: 1150, mouthScale: 3.4 }) +
+      caveInterior({ mouthX: 1075, mouthScale: 3.1 }) +
       at(520, 726, 3.0, treasurePile()) +
       at(500, 690, 5.0, dragon({ pose: 'curled' })) +
       // a few coins spilled in front
@@ -273,7 +273,7 @@ export const SEGMENTS = {
   'dragons/cave-02': {
     tags: ['dragon', 'cave', 'treasure'],
     draw: () =>
-      caveInterior({ mouthX: 60, mouthScale: 3.4 }) +
+      caveInterior({ mouthX: 135, mouthScale: 3.1 }) +
       at(640, 740, 4.2, treasurePile()) +
       at(640, 660, 4.0, dragon({ pose: 'peeking' })) +
       circle(430, 736, 14, P.gold300) +

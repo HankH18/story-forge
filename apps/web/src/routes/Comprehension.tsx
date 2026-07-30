@@ -267,8 +267,11 @@ export default function Comprehension({
               </span>
             ) : null}
 
-            <span className="text-ink-300" aria-hidden="true">
-              <FanDownIcon className="h-6 w-24" />
+            {/* ink-500, not ink-300: §11 allows ink-300 for decoration, and this
+                IS decoration, but decoration too faint to point anywhere is not
+                doing the job it was added for. */}
+            <span className="text-ink-500" aria-hidden="true">
+              <FanDownIcon className="h-7 w-28" />
             </span>
           </div>
         ) : (

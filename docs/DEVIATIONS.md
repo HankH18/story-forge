@@ -7860,3 +7860,562 @@ inherit their band's wording from the stages that were. The rewrite-depth
 IMPROVEMENT is a distribution that did not worsen at n=30, not a proved effect. The
 judge's own accuracy is bounded by 11.54's known residual. And no story from either
 arm was persisted, so nothing here changed the pool a child reads from.
+
+## Phase 8 — the question screen: "they begin out of nowhere and then aren't really written well"
+
+Same surface, reported in the same live test as the two defects above. Both
+halves of the user's sentence are true and they have different causes.
+
+### 11.31 — there is now a beat between the last page and the first question
+
+`next()` on the final segment set `phase = 'questions'` and the reading view was
+replaced, in one frame, by a screen asking a child to do something. Nothing said
+the story was over and nothing said what was coming — and for a five-year-old who
+cannot yet read the new screen's text, that is the entire information available.
+"Out of nowhere" is a literal description of the state machine.
+
+`routes/StoryEnd.tsx` is a phase, not a slice of `Comprehension`, because it is a
+transition *between* phases and the reading view has to be gone before it paints.
+It does three things:
+
+- **closes the story** — a display headline and a hand-lettered line, in the
+  celebration screen's voice. Praise for reading, not a score: §08's "no derived
+  reading level, no streak, no badge" applies here too.
+- **shows what is coming, as pictures** — one card per question, carrying that
+  §11.3 task's own icon and tint. A child cannot read "two questions" but can see
+  two cards and can see that they are not the same shape as each other. The same
+  two tints and glyphs are then reused on the question screen itself, so the
+  preview and the thing it previews cannot drift.
+- **speaks it** — "You read the whole story. Now there are two things to try: a
+  listening game, and a question about the story." Adapts to a one-question
+  story, and uses the child's name when the session has it.
+
+The child advances it with a 64px kid-primary button. An auto-advance would put
+the beat back on a timer the child does not control, which is the same problem in
+slower motion.
+
+### 11.32 — the two question types are drawn as two different KINDS of thing
+
+They used to differ only in how many columns the options grid had. That hid two
+facts at once.
+
+The first is for the child: a listening game and a question about a story are not
+the same task, and being told which one you are in is most of knowing what to do.
+There is now a task band at the top left — an ear on gold for `tap_word`, an open
+book on sky for `mcq2` — plus question progress dots, plus a layout that differs
+structurally rather than by column count.
+
+The second is for the parent, and it is 11.34.
+
+`BAND` is a literal `Record`, per STATE invariant 7. `bg-${kind}-300` would be
+purged from the production build and both tasks would render on plain paper,
+silently deleting the entire distinction this screen now depends on — the same
+failure mode that collapsed the four verdict colours. Verified by computed style
+in `dist/`, not by reading the source: see PROVED.
+
+Colour is not the only difference either (§11): the two glyphs have different
+silhouettes, the two layouts are different, and the band names the task in words.
+
+### 11.33 — `tap_word` leads with the CUE, and the spoken instruction is not the written one
+
+The prompt is rendered to the child, so it must itself be decodable at the
+child's stage. Below stage 4 every word for similarity — `as`, `like`, `same`,
+`alike` — is stage 4 or later, so the generator provably cannot write the
+instruction and emits **`"Tap it. Hint: that."`** (llm/questions.py, DEVIATIONS
+6.27). That is a floor, not sloppiness, and the words are not negotiable.
+
+**What is not bound by the decoder: speech, icons and layout.** So:
+
+- **The cue word leads**, on a gold card with a speaker glyph, tappable. It is a
+  word from the story the child has already read. `payload.cue_word` survives
+  `_public_payload`'s denylist; `target_grapheme` does not and must not — the
+  correct option is the one that starts with it, so rendering it would print the
+  answer key the DTO exists to withhold.
+- **Three chevrons fan down** from the cue to the three options. The task is
+  "find the one that starts like this", and that is a shape, not a sentence.
+- **The spoken instruction is rebuilt**: `"Which word starts like that? Tap it."`
+  The old code spoke `question.prompt`, i.e. it read the decoder's floor aloud —
+  in the one channel where the floor does not apply.
+- **The generated prompt is demoted by POSITION**, below the options. Shrinking
+  it was the obvious move and is not available: §03 puts an absolute 28px floor
+  under story text and nothing in `StoryText` may go below it, and tinting it to
+  ink-500 lands at ~6.5:1 on paper where §11 requires ≥7:1 for story text.
+  Reading order is the one axis with no rule on it. It is still Andika, still
+  full size, still tappable word by word.
+
+`mcq2` is left leading with its prompt, because an `mcq2` prompt is a real
+sentence — "Did the dragon go into the sun?" — and needs no scaffolding. Its
+prompt and options now chip their story words (`QuestionDTO.story_words` was
+already on the wire and unused here), so a stage-1 reader is not handed "rocket"
+bare on the question screen after having it given to them in the story.
+
+`lib/questions.ts` owns `taskKind`, `cueWord` and `spokenInstruction` as pure
+functions with 15 tests, including one asserting the client never reads
+`target_grapheme` and one asserting an unknown `qtype` falls to the STORY task —
+failing towards "no phonics claim", because a new type drawn as the sound task
+would assert a mastery meaning it has not earned.
+
+### 11.34 — the parent dashboard now says which question feeds the letter-sounds table
+
+`mastery.MASTERY_QTYPES` is `("tap_word",)`. Only the sound question produces
+`gpc_stats` evidence and only it moves promotion; the `mcq2` comprehension
+question feeds nothing. That is the right call — a two-option question is 50%
+guessable and must not move a mastery counter — and it was **invisible**. Recent
+readings prints "3/3 correct" counting both, directly under a GPC table fed by
+one, so a parent reading the two panels together had no way to know they were
+counting different things.
+
+One paragraph in `GpcTable`, in the same plain-language register as §08's
+existing caveat, naming the sound question as the only input to that table and
+saying why the story question is not one. **Nothing is said to the child.** §01
+and §07 keep kid mode free of anything that reads like grading, and "this
+question is the one that counts" is grading — which is why 11.32's distinction is
+drawn as two kinds of task and not as two weights.
+
+**Deferred, and named**: a per-qtype split of "3/3 correct" needs
+`RecentReading` to carry the breakdown, i.e. two more `count(...) FILTER` columns
+in `readings.py:379`. Not done here — the sentence closes the honesty gap and the
+API change belongs with whoever next opens that file.
+
+### 11.35 — the process finding: a shared worktree has no commit boundary, and this time it fired
+
+DEVIATIONS 9.x ends with "a shared tree with two agents in it has no commit
+boundary, and the F9 revert could as easily have been committed in its broken
+state. Worth knowing before the next two-agent phase."
+
+Mid-pass, a concurrent agent ran `git stash -u` over the whole worktree and reset
+to HEAD. **Every file of this work vanished at once** — 21 modified files, 48
+generated SVGs, four new modules, ~250 lines of this document — along with all of
+theirs. It was recoverable: `git stash list` held one entry whose `^3` commit
+carried the untracked files, and they popped it themselves a minute later, so
+nothing was lost. But the recovery was luck, not design: a `stash drop`, a second
+stash, or a `checkout -- .` at the same moment would have been unrecoverable, and
+neither agent would have known which files were whose.
+
+Recorded because the mitigation is cheap and was not taken: **two agents editing
+one worktree should be two worktrees.** `git worktree add` costs one command and
+makes both agents' `git stash`, `git reset` and `git commit` local to their own
+work. Nothing in this pass needed the shared tree.
+
+### 11.36 — what was measured, and what was not
+
+Measured live, in a real browser, at tablet viewports, against a FastAPI on port
+8123 with `DEMO_BYPASS_AUTH=false` (enforcement confirmed FIRST: `/api/health`
+reported `demo_bypass_auth: false`, and through both the dev proxy and the
+`vite preview` proxy a `POST /api/validate` with no token returned 401 and with
+`Bearer garbage.token.here` returned 401), with a real Clerk session minted
+through the Backend API. See PROVED.
+
+NOT measured, and not claimed:
+
+- **Audio was never heard.** `speechSynthesis` was hooked and the utterance text
+  and rate were read back — `"Which word starts like that? Tap it."` at rate
+  0.85, and `"Noah, you read the whole story. Now there is one thing to try."` —
+  but a headless browser produces no sound. What is proved is *which string is
+  spoken*, which is the thing that changed.
+- **No child has used this.** Every claim about what a five-year-old reads as a
+  mistake is an argument from the style guide and from the user's report, not a
+  measurement.
+- **The 4 unreached tags.** `castle`, `snow`, `fish` and `swimming` have never
+  been emitted by the tagging node over 839 tagged segments. Assets carrying them
+  are drawn but no live segment selects them, so their art is unverified in situ.
+- **`make warm` was not run and no money was spent.** The pool is unchanged; only
+  `story_segments.asset_id`'s targets now exist.
+
+## Phase 8 — the ladder renumber: stage 1 retired, eleven stages (12.1-12.16)
+
+Logged BEFORE the changes. Authorised by the user (docs/DECISION-stage-ladder.md,
+2026-07-30): *"let's go and reposition everything so that the current stage two is
+the new stage one and we have 11 total stages."* The KILL CONDITION was checked
+first and does not apply — the measured per-stage counts under the corrected
+vocabulary filter are 78 / 771 / 1,383 / 1,934 / 2,149 / 3,197 / 3,461 / 3,899 /
+4,333 / 4,378 / 4,386 / 4,397, so stage 1 is the ONLY stage below §18's 150 floor
+and every other stage clears it by 5x or more. Everything marked **PROVED** was
+measured in this repo with the command shown; everything else is reasoning and is
+labelled as such.
+
+### 12.1 — the decision now has TWO independent grounds, not one
+
+The trigger was vocabulary (11.11): stage 1's nine GPCs can spell 78
+child-vocabulary words, a measured CEILING, and its old 157 cleared §18's floor
+only because 27 rows were proper nouns and 61 were adult register.
+
+A second, independent ground arrived from the narrative-quality work (11.57 and
+the coordinator's cross-agent report): **at old stage 1, negation is impossible.**
+`not`, `no`, `cannot` and `never` are all violations against `mastered_ids(1)`
+because no stage-1 word contains the letter `o` — so a stage-1 story cannot state
+an obstacle, only a want that is immediately met. Asked for "something wrong", the
+model's only decodable approximation was `cant` (c-a-n-t, 100% decodable, then
+correctly rejected by §13's grammar half), which cost 2 of 6 stage-1 stories.
+Narrative quality there measured 2.0/5 before prompt work and 2.5/5 after — a
+structural ceiling, not a prompt defect.
+
+So this is not "the filter shrank a stage and made it inconvenient". Old stage 1
+was never a viable rung, and its word count concealed that. New stage 1 (old
+stage 2) has `o`: it can say `not`, and it holds 771 child words. The accepted
+cost, explicitly the user's to accept and accepted: a true beginner who knows only
+`s a t p i n` no longer has a rung of their own.
+
+### 12.2 — the mapping, and why it preserves every guarantee
+
+Old stage N -> new stage N-1 for N >= 2; old stages 1 and 2 merge into new
+stage 1. Stage inventories are CUMULATIVE, so the cumulative GPC set, sight-word
+set and allowed-word set at new stage K are IDENTICAL to old stage K+1's for
+every K in 1..11 — new stage 1 = old stage 2 exactly, and old stage 1's inventory
+is a subset of it. Three consequences, each load-bearing:
+
+- **The decodability gate does not move.** No GPC row is added, removed or
+  re-spelled; only the stage LABEL at which each is taught changes. What counts
+  as decodable at the new top stage is byte-identical to the old top stage.
+- **A story proved decodable at old stage N is decodable at new stage N-1** —
+  the same cumulative set judges it. Old stage-1 stories map to new stage 1,
+  whose set is a superset; the safe direction (STATE invariant 6).
+- **The §5.7 goldens at old stage s >= 2 carry over to s-1 with identical
+  verdicts, alignments and missing sets** — same cumulative set, same aligner.
+  This is the REASONING; 12.5 records the per-case re-derivation, which is
+  measured, not assumed.
+
+### 12.3 — the seed data: four CSVs move together
+
+- `data/seed/stages.csv`: 12 rows -> 11. New stage 1 is the merged row (name
+  "Letters & doubles"): all single letters, the doubled consonants and `x`.
+  Length bands and syllable caps shift with their stages: 30-60 words at new
+  1-3, 60-120 at 4-7, 120-200 at 8-11; max_syllables 2 at new 1-7, 3 at 8-10,
+  uncapped (9) at new 11.
+- `data/seed/gpcs.csv` (the decoder package copy; `data/seed` holds a symlink):
+  every `stage` value >= 2 decrements; stage-1 rows stay. gpcs.csv is NOT in
+  PINS.md, so no pin moves; the INVENTORY (graphemes, phonemes, kinds,
+  positions, schwa flags) is untouched.
+- `data/seed/sight_words.csv`: same decrement; old stage 1 (`the a i`) and old
+  stage 2 (`is to no go of so do`) merge at new stage 1. The sets are disjoint,
+  so the merge loses nothing.
+- `data/seed/story_words.csv`: `min_stage` 3 -> 2 and 5 -> 4 (1 stays).
+
+### 12.4 — MAX_STAGE gets ONE canonical home, in the decoder
+
+`MAX_STAGE = 12` lived in TWO places (`mastery.py:94`, `precompute.py:69`) and
+was hardcoded as `12`/`le=12`/`"1..12"` in eight more. A renumber that edits
+every copy leaves the next change the same trap. So `MIN_STAGE`/`MAX_STAGE`
+move to `storyforge/decoder/__init__.py` — the package that owns stage
+semantics (`mastered_ids`) — and `precompute.py`, `warm.py`, `llm/generate.py`
+and the tests import from there. A test pins the constant to the inventory
+(`MAX_STAGE == max(g.stage) + 1`: the top stage is review and introduces no
+GPCs) and to `stages.csv`.
+
+**`mastery.py` is another agent's surface and is NOT touched.** The renumber
+requires exactly one line there — `MAX_STAGE = 12` -> `MAX_STAGE = 11` — and it
+is described in the handoff report instead of applied.
+`tests/test_mastery.py`'s ladder pin is updated to assert
+`mastery.MAX_STAGE == decoder.MAX_STAGE` (the two homes must agree), so it is
+RED until that one-line change is applied and green forever after; that is the
+one deliberate interim failure of this change, and it is diagnostic of exactly
+the un-applied line.
+
+### 12.5 — the §5.7 goldens are RE-DERIVED, not decremented
+
+Appendix B: the tests are the acceptance criteria; the CSV is an implementation
+detail. Every case in `tests/decoder/golden.yaml` was re-derived from the NEW
+inventory by running the validator (`justify-test-edit` verdict recorded per
+case in the YAML comments; the licence in every case is the same — the contract
+each case pinned names a stage LABEL, and the labels were renumbered by a user
+decision the tests cannot see):
+
+- `cat@1` decodable `[c|K, a|AE, t|T]` — unchanged: all three GPCs are in new
+  stage 1 (superset of old stage 1).
+- `ship@2->@1` violation missing `[sh|SH]`; `ship@3->@2` decodable — `sh` is
+  taught at new stage 2 (old 3).
+- `the@1` sight — unchanged (old stage-1 sight words merge into new stage 1).
+- `duck@2->@1` decodable — `u`, `ck` are new stage 1.
+- `cake@4->@3` violation missing `[a_e|EY]`; `cake@5->@4` decodable.
+- `fox@2->@1` decodable `[f|F, o|AA, x|K.S]`.
+- `night@5->@4` violation missing `[igh|AY]`; `night@6->@5` decodable.
+- `singer@6->@5`, `finger@6->@5` — `er|ER` is new stage 5; the `ng|NG` vs
+  `n|NG` distinction is stage-independent.
+- `read@6->@5` heteronym (`ea|IY` at new stage 5).
+- `city@8->@7` violation missing EXACTLY `{c|S}` — the case pins `y|IY` to what
+  is now stage 5, so at new stage 7 the only missing GPC is soft c;
+  `city@9->@8` decodable.
+- `dragon@4->@3` decodable with `schwa_relaxed` (the spec's own stage label,
+  decremented; the schwa rule is stage-independent).
+- `zorp@12->@11` oov; `beautiful@12->@11` violation, empty missing set,
+  `alignable=false` — the top stage moved.
+- `demo-sentence-stage-3` -> stage 2, all verdicts, missing sets and the 0.0
+  decodability UNCHANGED — new stage 2's cumulative set is identical to old
+  stage 3's. §17's demo is now a stage-2 demo.
+
+Every one of these was verified by executing the validator against the edited
+inventory before the YAML was committed; the golden suite passing is the
+recorded proof.
+
+### 12.6 — the anti-goldens and the vacuity ratchet
+
+- `NEVER_DECODABLE` words are asserted undecodable at every stage `1..MAX_STAGE`
+  (the loop was `range(1, 13)`); the list itself is untouched.
+- `MUST_BE_DECODABLE` stage expectations decrement (each also asserts NOT
+  decodable one stage earlier, so these are boundary re-derivations, PROVED by
+  the suite): happy/funny/sunny/bunny/puppy 6->5, water 7->6, house/mouse 8->7,
+  little 10->9, rabbit/kitten/carrot/egg 2->1, have 5->4.
+- **The ratchet's SEED, SAMPLE SIZE, FLOOR and CEILING are untouched.** It is
+  measured at the top stage; the new top stage (11) has the identical cumulative
+  set the old top stage (12) had — the full 93-GPC inventory — so the measured
+  value is EXPECTED not to move from 44.75%. Re-measured after the change rather
+  than assumed; the number is recorded in the Gates section below. Had it moved,
+  that would be evidence of an inventory change smuggled into the renumber, and
+  the right response would be to stop, not to adjust the ceiling.
+
+### 12.7 — `test_no_stage_is_starved` fires its own tripwire, as designed
+
+11.11 added `assert counts.get(1, 0) < 100` precisely so that retiring stage 1
+would turn the authorised exception into a loud failure instead of a permanent
+loophole. That tripwire now fires: the exception block is deleted and the plain
+floor assertion is restored for EVERY stage — new stage 1 starts at 771 words,
+so no stage needs an exemption, and the floor is raised from "at least 100" back
+over §18's 150 for good measure via the precompute report check. The
+`justify-test-edit` licence is the test's own docstring: it named the exception
+authorised, temporary, and to be deleted on the renumber.
+
+### 12.8 — the live-data migration renumbers; it never rebuilds
+
+New Alembic revision (down_revision `c4f1a2d7be03`). Production holds ~44
+stories and a handful of kids; a child at old stage 5 must land at new stage 4
+and a child at old stage 1 must land at new stage 1 — the entry rung; their
+taught inventory is a subset of new stage 1's, and there is no lower rung to
+send them to. In one transaction, guarded to run only when `max(stages.id) = 12`
+(fresh and already-renumbered databases are no-ops, which is what makes it
+idempotent):
+
+- `kids`, `stories`, `readings`: `stage_id = GREATEST(stage_id - 1, 1)`.
+  `readings.stage_id` is on the DECISION doc's list only implicitly — it exists
+  (§8 promotion counts readings at the kid's then-current stage) and missing it
+  would silently shift every promotion denominator; called out here because the
+  blast-radius list named kids/stories/allowed_words/gpc_stats/eval_run_items
+  and NOT readings.
+- `allowed_words`: old stage-1 rows are DELETED (their words all recur at old
+  stage 2 — cumulative), the rest decrement via an INSERT-from-temp so the
+  `(stage_id, word)` unique constraint never sees a transient collision. The
+  result is byte-identical to what `make precompute` regenerates (new stage N =
+  old stage N+1 exactly), so production is correct even BEFORE anyone re-runs
+  precompute — the deploy's PRE_DEPLOY job runs only `alembic upgrade head`.
+- `gpcs.stage_id`, `sight_words.stage_id`: same GREATEST decrement (sight-word
+  stage sets are disjoint, so the merge cannot collide);
+  `story_word_bank.min_stage` likewise. `gpc_stats` carries NO stage column —
+  the blast-radius list was wrong about that; its rows are keyed (kid, gpc) and
+  follow the renumbered `gpcs` rows automatically.
+- `stages`: rows 1..11 take the new contents (hardcoded in the migration — a
+  migration is a historical record and must not depend on a CSV that will move
+  again), row 12 is deleted last, after nothing references it.
+- `eval_runs.config.stages`, `eval_runs.metrics.by_stage` keys, and
+  `eval_run_items.metrics.stage_id` are renumbered in jsonb. Reasoning: the
+  measurements were made against cumulative inventories, and under the mapping
+  those inventories keep their identity — "stage 9, 96.9%" from a pre-renumber
+  run describes the inventory now NAMED stage 8, so leaving the old labels would
+  attach every historical number to the WRONG inventory. Renumbering preserves
+  the measurement's meaning; only the label moves.
+- Downgrade is a refusal (`RuntimeError`), like `c4f1a2d7be03`: re-inserting a
+  retired stage and re-raising every child's number is not an undo, it is a new
+  wrong state.
+
+Sabotage-verified on a scratch database, not assumed: fixture kids at every old
+stage 1..12 land at 1,1,2,3,4,5,6,7,8,9,10,11; a second run changes nothing
+(row-for-row identical dump); a fresh empty database is untouched. Recorded in
+the Gates section below.
+
+### 12.9 — the stage-1 negation clause dies with the stage that needed it
+
+`llm/generate.py`'s `_STAGE1_NEGATION` (11.57) states an inventory fact about
+OLD stage 1: no word with `o`, so `not`/`no`/`cannot`/`never` are unwritable.
+New stage 1 has `o`, `not` is decodable, and `no`/`go`/`so`/`do` are its sight
+words — the premise is false, and the clause would now tell the model a lie
+that removes its cheapest way to state an obstacle.
+`test_stage_one_is_told_it_cannot_write_a_negation_and_why` carries its own
+kill switch — *"if a future inventory change makes stage 1 able to say 'not',
+this test goes red and the clause should be reconsidered rather than silently
+kept"* — and that is exactly what happened. Clause, constant and test are
+removed together. (`justify-test-edit`: the test pre-authorised its own
+retirement on this exact condition; the condition was met by an authorised
+user decision.)
+
+### 12.10 — the narrative bands shift with the ladder
+
+`NARRATIVE_BAND_EDGES = (2, 4, 8)` encoded §10's own scaling ("0 branch points
+for stages 1-2, one at 3-4, up to 2 for 5+") in OLD stage numbers. The bands'
+CONTENT is unchanged — the same four asks, spec-derived (11.44) — but the edges
+become `(1, 3, 7)` so each band still covers the same INVENTORY range it was
+written for: band 0 is new stage 1 (old 1-2), band 1 new 2-3 (old 3-4), band 2
+new 4-7 (old 5-8), band 3 new 8-11 (old 9-12).
+
+### 12.11 — the §14 matrix is 11 x 3 x 5 = 165
+
+`eval.py DEFAULT_STAGES` and `warm.py DEFAULT_STAGES` become `"1..11"`; the
+Makefile `eval` target likewise; `api/admin.py`'s `MAX_CELLS` 180 -> 165 and
+its `1..12` validator -> `1..11`; the five Pydantic stage bounds (`le=12` in
+`api/validate.py`, `api/kids.py`, `api/stories.py`, `api/admin.py` x2) -> 11.
+`docs/EVAL.md`'s header matrix moves to 11 x 3 x 5; the committed numbers in it
+remain the last run's real measurements over the OLD ladder and are labelled
+as such rather than re-mapped — a report is a record of the run it reports.
+`scripts/eval_doc.py`'s generated wording follows. The measurement scripts'
+default stage tuples (`scripts/measure_gen_latency.py`,
+`services/api/scripts/measure_length.py`, `measure_narrative.py`) drop 12.
+
+### 12.12 — §17's demo is dragons at stage 2 now
+
+The demo sentence, verdicts and 0.0 decodability are unchanged (12.5); only the
+stage number a presenter types moves. Web: `DEMO_STAGE_ID` 3 -> 2, the landing
+page's "stage 3 · digraphs" label -> "stage 2 · digraphs" (the pairing is what
+matters — Digraphs IS new stage 2), `SEEDED_STAGES` drops old stage 1 and
+renumbers, `clampStage`'s bound and fallback follow, `AdminColdGenerate`'s
+default follows, `ParentDashboard`'s "Stage 12 is the last stage" copy -> 11,
+`AdminEvalRuns`' default `'1..12'` -> `'1..11'`. `seeds.test.ts`'s row-count pin
+12 -> 11 (it asserts the CSV and `SEEDED_STAGES` agree — the contract is
+unchanged, the ladder it pins moved). Stale-but-passing fixtures naming stage 12
+or "stage 3 = Digraphs" are re-pointed in the same pass.
+
+### 12.13 — the spec attachment is NOT edited
+
+The DECISION doc's blast radius names "the build doc's Appendix A stage table".
+The build doc is the frozen mandate (`.context/attachments/...`); every § and
+Appendix reference in five phases of DEVIATIONS entries resolves against it,
+and rewriting it would re-point them all silently. The executed mapping lives
+in `docs/DECISION-stage-ladder.md` (marked EXECUTED, with the old->new table);
+Appendix A's table stays as the historical input it was, exactly like §5.4's
+SUBTLEX instruction stayed in place when 11.7 replaced the corpus.
+
+### 12.14 — what is NOT changed
+
+- **The decodability gate (§0).** No aligner code, no GPC content, no sight
+  word added or removed, no syllable-cap VALUES (only their stage labels), no
+  tokenizer, no schwa rule. `test_every_allowed_word_revalidates_as_decodable`
+  and the unchanged anti-golden list are the proof.
+- **The vocabulary filters (11.1-11.12).** Blocklist, child-vocabulary list,
+  proper-noun list, `REGISTER_FILTER_FROM_STAGE = 1`, the candidate pool, the
+  synthetic rank base — all untouched. The per-stage word counts after the
+  renumber must therefore be exactly the measured 11.11 counts shifted by one,
+  which is asserted by measurement in the Gates section.
+- **Moderation, §13, all three layers.** No blocklist entry moves.
+- **`mastery.py`, `llm/questions.py`, `api/readings.py`, and the three test
+  files another agent owns.** The single required line in `mastery.py` is
+  handed off (12.4).
+- **Historical records**: `reports/*`, audit docs, prior DEVIATIONS entries,
+  and Langfuse traces keep their old stage numbers — they describe runs that
+  happened on the old ladder. Only the live database rows are renumbered
+  (12.8), because those are not a record, they are the serving state.
+
+### PROVED — driven in a real browser, dev AND the production bundle
+
+Environment, established before anything was believed: FastAPI on **8123** with
+`DEMO_BYPASS_AUTH=false`; `/api/health` → `"demo_bypass_auth": false`; through the
+Vite dev proxy (**5199**) and the `vite preview` proxy (**4199**), `POST
+/api/validate` with **no token → 401** and with **`Bearer garbage.token.here` →
+401**. Real Clerk session minted through the Backend API for
+`user_3HBc8LNBQdWzlwbgKrzXYdH1SDa`. Driven with
+`~/.claude/skills/gstack/browse` at `BROWSE_SERVER_PORT=24811`.
+
+Screenshots: `reports/screenshots/phase8-visual-defects/` (gitignored, so they
+are on disk and not in the history). Before/after pairs at 1024×768, the
+production bundle at 768×1024 portrait, and the question screen at stages 3 and 6.
+
+**Before**, at 1024×768, stage 6, from the live warm pool — the two defects as
+reported:
+- every segment a beige striped rectangle filling half the screen;
+- one screen carrying **five amber outlined boxes** — `cave`, `wings`, `dragon`,
+  `dragon`, `dragon` — each with a meaningless 24px grey striped square inside it;
+- a thin gold rule accumulating under every word tapped, permanently.
+
+**After**, same viewport, same stage, same pool:
+- **art in every frame.** `dragons/cave-01.svg` renders for the segment whose
+  tags select it, from the `assets` row whose id 831 segments already pointed at.
+- **two soft amber stickers with real pictures on the first screen** (`dragon`,
+  `cave`), and **zero marks** on the screen that previously carried five — both
+  words were introduced earlier in the reading, so §07's "then behaves like any
+  tappable word" now holds.
+- **17 words tapped, zero residue.** `data-state="heard"` is still set (read off
+  the DOM) and `borderBottomColor` is `rgba(0, 0, 0, 0)`.
+- theme picker renders the three §06 covers; the emoji has retired.
+
+**§11 floors, by computed geometry, in the PRODUCTION bundle** (`vite preview`,
+worst case forced by a 460px viewport so a chip line wraps):
+- plain word target **62.0 × ≥48.0px**; chip **64.5px** tall (it was 66px before,
+  so the line box grew by *less* than it used to);
+- **worst vertical clearance between two overlapping stacked targets: 10.0px**,
+  between `dragon` and `cave` — above §11's 8px floor, and above the 8.4px this
+  was previously measured at;
+- `Next` **64px**, the §11 kid-primary-action floor;
+- reading text 34px / 40px on the Aa toggle, never below §03's 28px.
+
+**STATE invariant 7, checked in `dist/` two ways.** All six `.sf-tok-*`, all four
+`.verdict-*` and all three `.sf-band-*` rules survive the purge (the admin
+playground and parent dashboard were not touched, and "I did not touch it" is not
+evidence). The new literals survive too, and the two that matter were read off the
+live DOM under `vite preview` rather than grepped: the task band computes
+`background rgb(242, 212, 138)` = `#F2D48A` (gold-300) with `border-color
+rgb(168, 122, 34)` = `#A87A22` (gold-700). `.sf-chip` in the built CSS is exactly
+`{padding-left:6px;background:var(--sf-v-story-bg)}` — **no border-color rule at
+all**, which is 11.27, and **no `[data-state='heard']` rule anywhere in the built
+CSS**, which is 11.28.
+
+**The question screen, at the stage where the text is worst and at a high one.**
+Stage 3, prompt `"Tap it. Hint: that."`: the screen shows the cue `that` on a gold
+card with a speaker, three chevrons pointing down, then `went / sam / then`, and
+the generated sentence as a caption below. Stage 6, prompt `"Tap it if it begins
+like his."`: same pattern with `his`. The `mcq2` beside it is visibly a different
+screen — sky band, open book, prompt leading, two stacked options, no cue card.
+`speechSynthesis.speak` was hooked and the utterance read back: **`"Which word
+starts like that? Tap it."` at rate 0.85**, not the floored prompt. The story-end
+beat spoke **`"Noah, you read the whole story. Now there is one thing to try."`**
+and adapted to the one-question story it was on.
+
+**The chevrons were wrong and the browser is what caught it.** `M12 4l-6 8 6 8`
+rendered as `‹ | ›` — left and right, i.e. "previous / next" — in a place whose
+entire job is "look down here". Invisible in the source, obvious in a screenshot.
+
+**The art itself was reviewed on a contact sheet of all 33 at once**, three times,
+and that is what found the errors no single file review would: every `leaf`/`amber`
+body was taking its `*-100` highlight at full opacity so the dragon read as a
+white seal (fixed by a 0.45 default in `litEllipse`); `hills()` chained two
+quadratics and the join left a dark wedge mid-frame; `spaceBackdrop`'s dark band
+read as a horizon in a picture with no ground; the flying dragon's wings were
+cropped off the top of the frame at every scale that made the body legible; the
+sleeping astronaut was drawing its own bunk on top of the scene's; and `path-01`'s
+knight stood exactly where the fork he was supposed to be lost at was drawn.
+
+**Gates.** `cd apps/web && bunx tsc --noEmit` clean; **`bun test src` 232 passed /
+0 failed** (baseline 201, +31: 11 in `storyWords.test.ts`, 15 in
+`questions.test.ts`, 5 in `art.test.ts`); `bun run build` clean, CSS
+42.55 kB / 8.28 kB gzip, JS 430 kB / 124.63 kB gzip. API:
+`tests/test_scene_tags.py` (+3), `test_stories_api.py`, `test_catalog.py`,
+`test_phase2.py` — **75 passed**, `ruff` clean.
+
+**That 232/0 is from an ISOLATED COPY, and the shared tree says otherwise.** A
+re-run in the working tree at the end of this pass reported 229/3 and then
+228/4, and none of the failures were mine: the concurrent agent had begun the
+twelve-to-eleven stage renumbering, so `data/seed/stages.csv` and
+`decoder/data/gpcs.csv` were mid-edit. `seeds.test.ts` asserts the web's
+`SEEDED_STAGES` mirrors that CSV and that "§4 has twelve"; `phonics.test.ts`
+glosses every row of the GPC inventory. Both files, and both CSVs, are untouched
+by this work. The gate above was re-run in `/tmp/sf-web-gate` — the tree with
+those two seed files restored from HEAD and nothing else changed — which is
+`docs/STATE.md`'s own recipe for the Python suite applied to the web one, and it
+collects the same 232 tests either way, so nothing was skipped to get the green.
+`test_phase2.py::test_validate_endpoint_reproduces_the_demo_sentence` fails in the
+shared tree for the same reason and passes in a `git archive` of HEAD against the
+same live database, which is what proves it is the inventory and not the schema.
+
+The full API suite was not run:
+another agent is mid-edit in `precompute.py`, `generate.py` and four test files,
+and `docs/STATE.md` is explicit that a concurrent writer on the shared Postgres
+makes that suite lie.
+
+**Page weight.** 33 segment + cover SVGs = **348 KiB total on disk, largest 21.5
+KiB**, served once and cached for a year at a version-pinned path. The 15 cutouts
+are under Vite's inline limit and land as data URIs inside the hashed JS, so they
+cost **zero requests** and the immutable-cache hazard does not apply to them at
+all. Nothing approaches the 500 MB registry cap; the whole `dist/` is 2.2 MB.
+
+**`scripts/generate-art.mjs --check` is the ratchet.** It fails if any committed
+file differs from what the generator now produces, if a file exists that the
+generator no longer draws, if an `assets.csv` row has no drawing or a drawing has
+no row, if their tag sets differ, or if any `fill`/`stroke` in any file is outside
+the style guide palette. `tests/test_scene_tags.py::test_every_asset_row_has_a_
+file_on_disk` is the other half and it was **sabotage-checked**: moving
+`dragons/cave-01.svg` aside turns it red naming that url, restoring it turns it
+green. That test is the one that would have caught this defect on day one.
