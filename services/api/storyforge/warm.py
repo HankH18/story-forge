@@ -1,7 +1,24 @@
 """Warm pool (§7).
 
 `make warm` pre-generates >=3 stories per (stage, theme) through the FULL
-pipeline and marks them `status='warm'`. Two things fall out of that:
+pipeline and marks them `status='warm'`. **Every stage and every theme** — that
+sentence was in this docstring, in `docs/STATE.md` and in §7 for five phases while
+the CLI defaulted to `--stages 1,2,3 --themes dragons` and the Makefile target
+passed no arguments, so `make warm` filled 3 of 12 stages and 1 of 3 themes. §17's
+demo is dragons at stage 3, the one cell that was covered, and the §7 ladder
+answers an empty pair by serving a LOWER stage — correctly, and reporting to
+nobody. So a first deploy shipped nine empty stages and the demo passed
+(AUDIT-PHASE7 F4, DEVIATIONS 8.40-8.48). The defaults are now `1..12` / `all`, and
+because a correct default is still only a default there is a gate:
+
+    python -m storyforge.warm --check-coverage   # non-zero while any pair is short
+
+Three guards, none sufficient alone: the defaults, the gate (which `docs/DEPLOY.md`
+§4 requires and which costs nothing), and `run_warm` reading the pool back at the
+end so a pair whose every story was REJECTED fails the run — which neither
+`api_fail` nor the unenriched check can see.
+
+Two more things fall out of the pool's design:
 
 - **The kid never sees an error.** Every §7 failure path — validation_fail,
   api_fail, moderation_fail, budget_exhausted, timeout — terminates in a
@@ -46,6 +63,7 @@ import argparse
 import asyncio
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 from sqlalchemy import select, text
@@ -78,11 +96,80 @@ from storyforge.llm.scene_tags import SceneTagResult, select_asset, tag_segments
 # §8's evidence rule, imported rather than restated: `tap_word` is the only
 # question type that ever moved `gpc_stats`, so it is the only one whose row is
 # irreplaceable once a child has answered it.
-from storyforge.mastery import MASTERY_QTYPES
+from storyforge.mastery import MASTERY_QTYPES, MAX_STAGE, MIN_STAGE
 from storyforge.models import Asset, Question, Story, StorySegment
 from storyforge.pipeline import PipelineResult, load_vocabulary, run_pipeline
 
 TARGET_PER_PAIR = 3
+
+#: §7's matrix — "≥3 stories per (stage, theme)" over every stage and every theme
+#: — spelled the way §14's command line spells it (`eval.py` DEFAULT_STAGES /
+#: DEFAULT_THEMES), so the documented command and the running one cannot drift.
+#:
+#: These were `"1,2,3"` and `"dragons"` for five phases (DEVIATIONS 8.40). The
+#: `warm` Makefile target and `docs/DEPLOY.md`'s first-deploy step both pass no
+#: arguments, so a fresh deployment got 9 stories across 3 of 12 stages and 1 of 3
+#: themes — while this module's own docstring, `docs/STATE.md` and §7 all promised
+#: the full matrix. §17's demo is dragons at stage 3, the one cell that was
+#: covered, and the §7 ladder degrades to a lower stage silently and correctly, so
+#: the demo passed and nine empty stages were invisible.
+DEFAULT_STAGES = "1..12"
+DEFAULT_THEMES = "all"
+
+
+def parse_stages(spec: str) -> list[int]:
+    """`"1..12"`, `"all"`, `"3,6"`, `"1..4,7,9..12"` -> a sorted, deduplicated list.
+
+    A second implementation of `eval.parse_stages` on purpose, not an oversight
+    (DEVIATIONS 8.46): `eval.py` imports `warm._split_segments`, so importing the
+    other way at module level is a cycle and doing it inside a function drags the
+    whole §14 harness into every `make warm`. Bad input raises rather than
+    silently yielding a smaller matrix than the operator asked for — the whole
+    finding this parser exists to serve is a run that quietly covered less than it
+    claimed. Unlike `eval`'s copy this one is BOUNDED: a stage outside
+    `MIN_STAGE..MAX_STAGE` is refused, so the failure direction is a refusal.
+    """
+    if spec.strip() == "all":
+        return list(range(MIN_STAGE, MAX_STAGE + 1))
+    out: set[int] = set()
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
+        lo, sep, hi = part.partition("..")
+        try:
+            bounds = (int(lo), int(hi)) if sep else (int(part), int(part))
+        except ValueError as exc:
+            raise SystemExit(f"bad --stages value {part!r}") from exc
+        if bounds[1] < bounds[0]:
+            raise SystemExit(f"bad --stages range {part!r}: {bounds[1]} < {bounds[0]}")
+        out.update(range(bounds[0], bounds[1] + 1))
+    if not out:
+        raise SystemExit("--stages selected no stages")
+    outside = sorted(s for s in out if not MIN_STAGE <= s <= MAX_STAGE)
+    if outside:
+        raise SystemExit(f"--stages names stage(s) {outside} outside {MIN_STAGE}..{MAX_STAGE}")
+    return sorted(out)
+
+
+def resolve_themes(spec: str, known: Sequence[str]) -> list[str]:
+    """`"all"` -> every seeded theme; otherwise the named ones, validated here.
+
+    `"all"` over an empty `themes` table is a refusal, not an empty list: `make
+    warm --themes all` on an unseeded database would otherwise generate nothing
+    and exit 0, which is the same vacuous-green shape `assert_matrix_seeded`
+    refuses (DEVIATIONS 8.44).
+    """
+    if spec.strip() == "all":
+        if not known:
+            raise SystemExit("--themes all matched no themes — run `make seed`")
+        return sorted(known)
+    themes = [t.strip() for t in spec.split(",") if t.strip()]
+    if not themes:
+        raise SystemExit("--themes selected no themes")
+    unknown = [t for t in themes if t not in known]
+    if unknown:
+        raise SystemExit(f"unknown theme(s) {unknown} — run `make seed`")
+    return themes
 
 
 def _body_verdict(mod: ModerationResult) -> dict:
@@ -105,6 +192,19 @@ def _body_verdict(mod: ModerationResult) -> dict:
 
 
 async def pool_depth(session, stage_id: int, theme_id: int) -> int:
+    """How many stories this pair still holds as `warm` — the REFILL number.
+
+    Deliberately not the same count as `pool_coverage` below, and the difference
+    is documented rather than left to be rediscovered (DEVIATIONS 8.42). §7 asks
+    for generate-ahead, so a story a child has read (`warm -> complete`,
+    `readings.complete_reading`) should be replaced: this is a policy about what to
+    generate next. The coverage GATE asks a different question — can a child at
+    this (stage, theme) be served their own stage and theme at all — and its
+    answer is `SERVABLE_STATUSES`, because that is what `_SERVE_SQL` serves.
+
+    So coverage can pass while this still wants to generate. That is the two
+    policies doing their separate jobs.
+    """
     return (
         await session.execute(
             text(
@@ -114,6 +214,219 @@ async def pool_depth(session, stage_id: int, theme_id: int) -> int:
             {"s": stage_id, "t": theme_id},
         )
     ).scalar_one()
+
+
+# --- §7 coverage: the floor, as a refusal (DEVIATIONS 8.41) -------------------
+
+
+@dataclass(frozen=True)
+class PairDepth:
+    """One cell of §7's (stage, theme) matrix and how many stories a kid can get."""
+
+    stage_id: int
+    theme_slug: str
+    servable: int
+
+
+# CROSS JOIN, and the status filter is in the ON clause rather than the WHERE:
+# a pair with no stories at all has to come back as a row with 0, and a WHERE
+# would drop exactly the rows the gate exists to find. That is the whole query.
+_COVERAGE_SQL = text(
+    """
+    SELECT st.id AS stage_id, t.slug AS theme_slug, count(s.id) AS servable
+    FROM stages st
+    CROSS JOIN themes t
+    LEFT JOIN stories s
+      ON s.stage_id = st.id
+     AND s.theme_id = t.id
+     AND s.status = ANY(:statuses)
+    GROUP BY st.id, t.slug
+    ORDER BY st.id, t.slug
+    """
+)
+
+
+async def pool_coverage(session) -> list[PairDepth]:
+    """Servable depth for every (stage, theme) pair. One query, no API calls.
+
+    `SERVABLE_STATUSES` is imported from the endpoint, never re-spelled here, so a
+    fourth `status` value cannot make this gate and the serving path disagree —
+    the same discipline `eval.py` uses for `EVAL_STATUS`.
+    """
+    rows = (await session.execute(_COVERAGE_SQL, {"statuses": list(SERVABLE_STATUSES)})).all()
+    return [PairDepth(r.stage_id, r.theme_slug, r.servable) for r in rows]
+
+
+def coverage_gaps(rows: Sequence[PairDepth], target: int) -> list[PairDepth]:
+    """The pairs a child cannot be served from. Shallowest first, then by pair."""
+    return sorted(
+        (r for r in rows if r.servable < target),
+        key=lambda r: (r.servable, r.stage_id, r.theme_slug),
+    )
+
+
+def assert_matrix_seeded(rows: Sequence[PairDepth]) -> None:
+    """Refuse to answer at all when the matrix itself is missing.
+
+    A coverage check over zero pairs finds zero gaps and exits 0. On a fresh
+    deploy — the exact scenario this gate is for — `stages` and `themes` are empty
+    until `make seed` runs, so the naive gate reports a green pool on an empty
+    database. That is the failure mode, not an edge case (DEVIATIONS 8.44).
+    """
+    stages = sorted({r.stage_id for r in rows})
+    themes = sorted({r.theme_slug for r in rows})
+    expected = list(range(MIN_STAGE, MAX_STAGE + 1))
+    if stages != expected or not themes:
+        raise SystemExit(
+            f"the (stage, theme) matrix itself is not seeded: {len(stages)} stage(s) "
+            f"{stages}, {len(themes)} theme(s) {themes} — expected stages "
+            f"{MIN_STAGE}..{MAX_STAGE} and at least one theme. Run `make seed` first.\n"
+            "Refusing rather than reporting: a coverage check over an empty matrix "
+            "finds no gaps and would exit 0."
+        )
+
+
+def render_coverage(rows: Sequence[PairDepth], target: int) -> list[str]:
+    """The whole matrix as a table, then the gaps by name. Always the FULL matrix.
+
+    A run told `--stages 1,2,3` that reports only on stages 1-3 prints a clean
+    table and teaches the operator nothing, which is the defect (DEVIATIONS 8.43).
+    """
+    themes = sorted({r.theme_slug for r in rows})
+    depth = {(r.stage_id, r.theme_slug): r.servable for r in rows}
+    width = max([len(t) for t in themes] + [5])
+    out = [
+        "",
+        f"POOL COVERAGE — servable ({'|'.join(SERVABLE_STATUSES)}) stories per "
+        f"(stage, theme), target {target}:",
+        "  stage  " + "  ".join(t.rjust(width) for t in themes),
+    ]
+    for stage in sorted({r.stage_id for r in rows}):
+        cells = []
+        for theme in themes:
+            n = depth.get((stage, theme), 0)
+            cells.append((str(n) if n >= target else f"{n} !").rjust(width))
+        out.append(f"  {stage:>5}  " + "  ".join(cells))
+
+    gaps = coverage_gaps(rows, target)
+    at_target = len(rows) - len(gaps)
+    out.append(f"  {at_target} of {len(rows)} pair(s) at target.")
+    if gaps:
+        out.append(f"  {len(gaps)} below target (marked !):")
+        out += [f"    stage {g.stage_id} / {g.theme_slug}: {g.servable}" for g in gaps]
+    return out
+
+
+#: What an operator does about a gap. One string, because it is printed from three
+#: places and a remedy that disagrees with itself is not a remedy.
+_FILL_HINT = (
+    "Fill it with `python -m storyforge.warm` (defaults to §7's full "
+    f"{MAX_STAGE - MIN_STAGE + 1} stages x every theme, and fills only the "
+    "shortfall — `--dry-run` prices it first). Verify with "
+    "`python -m storyforge.warm --check-coverage`."
+)
+
+#: Why a gap is invisible without this gate, in the terms §7 uses. Kept next to
+#: the exit so the message names the consequence and not just the number.
+_SILENT_FALLBACK = (
+    "Every child at those pairs is served a §7 fallback — a lower stage, or "
+    "another theme — which the ladder does correctly and reports to nobody."
+)
+
+
+async def run_coverage_check(target: int = TARGET_PER_PAIR) -> None:
+    """§7's floor as an exit code. No API client is constructed; nothing is spent.
+
+    This is the step `docs/DEPLOY.md` §4 requires after the warm run, and it lives
+    here rather than in the Makefile because that step is executed in a
+    DigitalOcean console with bare `python -m …` — `make` does not exist there
+    (DEVIATIONS 8.41).
+    """
+    async with SessionLocal() as session:
+        rows = await pool_coverage(session)
+    assert_matrix_seeded(rows)
+    for line in render_coverage(rows, target):
+        # stdout is block-buffered when this runs under a pipe, and `SystemExit`'s
+        # message goes to stderr — without the flush the verdict prints ABOVE the
+        # table it is a verdict on.
+        print(line, flush=True)
+
+    gaps = coverage_gaps(rows, target)
+    if gaps:
+        raise SystemExit(
+            f"\n{len(gaps)} of {len(rows)} (stage, theme) pair(s) hold fewer than "
+            f"{target} servable story/stories.\n{_SILENT_FALLBACK}\n{_FILL_HINT}"
+        )
+    print(f"\nOK — all {len(rows)} (stage, theme) pair(s) hold >= {target} servable story/stories.")
+
+
+_OBSERVED_COST_SQL = text(
+    """
+    SELECT count(*) AS n, avg((gen_meta->>'cost_usd')::float) AS mean
+    FROM stories
+    WHERE status = ANY(:statuses) AND gen_meta ? 'cost_usd'
+    """
+)
+
+
+async def observed_cost_per_story(session) -> tuple[int, float | None]:
+    """`(n, mean $/story)` over the servable pool's own recorded costs.
+
+    Measured, not assumed. `gen_meta.cost_usd` is written by `_record_enrichment`
+    and already folds enrichment into the story's cost (DEVIATIONS 5.16), so it is
+    the right multiplier for "one more warm story". Returns `None` when there is no
+    history rather than a plausible-looking zero — AUDIT-PHASE7 F13.4 is a price
+    lookup that returned `0.0` on a miss and reported it as a cost.
+    """
+    row = (await session.execute(_OBSERVED_COST_SQL, {"statuses": list(SERVABLE_STATUSES)})).one()
+    return int(row.n), (float(row.mean) if row.mean is not None else None)
+
+
+async def run_dry_run(stages: Sequence[int], themes: Sequence[str], target: int) -> None:
+    """What `make warm` would generate, and roughly what it would cost. No API call.
+
+    DEPLOY.md's warm step says "SLOW. Costs money." and gave the operator no way to
+    find out how much before paying it — which matters more now that the default is
+    the full matrix (DEVIATIONS 8.45).
+    """
+    async with SessionLocal() as session:
+        theme_ids = {
+            slug: tid
+            for tid, slug in (await session.execute(text("SELECT id, slug FROM themes"))).all()
+        }
+        resolve_themes(",".join(themes), list(theme_ids))
+        plan: list[tuple[int, str, int, int]] = []
+        for stage in stages:
+            for theme in themes:
+                have = await pool_depth(session, stage, theme_ids[theme])
+                plan.append((stage, theme, have, max(0, target - have)))
+        coverage = await pool_coverage(session)
+        n_priced, mean_cost = await observed_cost_per_story(session)
+
+    print(
+        f"--dry-run: {len(plan)} (stage, theme) pair(s) requested, target {target} "
+        "warm story/stories each. No API calls."
+    )
+    for stage, theme, have, need in plan:
+        verb = "skip" if need == 0 else f"generate {need}"
+        print(f"  stage {stage} / {theme}: warm depth {have} — {verb}")
+    to_make = sum(need for *_, need in plan)
+    print(f"\n  {to_make} story/stories would be generated.")
+    if mean_cost is None:
+        print(
+            "  Spend: unknown — no story in the pool carries a recorded "
+            "`gen_meta.cost_usd`, so there is nothing to extrapolate from."
+        )
+    else:
+        print(
+            f"  Spend: ~${to_make * mean_cost:.2f}, extrapolated from the "
+            f"{n_priced} priced story/stories already in the pool "
+            f"(mean ${mean_cost:.5f} each, enrichment included). A FLOOR: those "
+            f"stories are concentrated at the low stages and stages "
+            f"{MAX_STAGE - 3}-{MAX_STAGE} are longer."
+        )
+    for line in render_coverage(coverage, target):
+        print(line, flush=True)
 
 
 async def persist(session, result: PipelineResult, theme_id: int, today: date) -> Story:
@@ -749,17 +1062,27 @@ def _finish(
     summary: str,
     failures: dict,
     api_failures: Sequence[tuple[int, str, str]] = (),
+    coverage_gaps_: Sequence[PairDepth] = (),
+    target: int = TARGET_PER_PAIR,
 ) -> None:
     """The one exit point that decides whether the run succeeded.
 
-    Two kinds of failure, kept on separate lines because they have different
-    remedies (DEVIATIONS 8.4). `failures` is a story that reached the pool
+    Three kinds of failure, kept on separate lines because they have different
+    remedies (DEVIATIONS 8.4, 8.43). `failures` is a story that reached the pool
     unenriched — the fix is `--backfill`. `api_failures` is a cell that produced
     no story at all, usually `anthropic.APITimeoutError`; nothing is wrong with
     the pool, it is just shallower than the target, and the fix is to re-run
     `make warm`, which `pool_depth` already makes idempotent.
+
+    `coverage_gaps_` is the third, and it is the only one that looks at the POOL
+    rather than at this run's bookkeeping. It is passed non-empty only when the run
+    covered the whole matrix and pairs are still short — which the other two
+    cannot detect: a pair whose every generation succeeded and was then REJECTED
+    (gate or moderation) leaves `failures` and `api_failures` both empty, `made`
+    non-zero, and the pair empty. That is a second route to AUDIT-PHASE7 F4 and it
+    survives the default-matrix fix, so the exit code has to key off the pool.
     """
-    print(f"\n{summary}")
+    print(f"\n{summary}", flush=True)
     if api_failures:
         print(
             f"\n{len(api_failures)} generation(s) never produced a story "
@@ -768,7 +1091,7 @@ def _finish(
         for stage, theme, why in api_failures:
             print(f"  stage {stage} / {theme}: {why}")
 
-    if not failures and not api_failures:
+    if not failures and not api_failures and not coverage_gaps_:
         return
 
     parts = []
@@ -786,6 +1109,17 @@ def _finish(
             f"{len(api_failures)} generation(s) failed outright, so those "
             f"(stage, theme) pairs are below target:\n{lines}\n"
             "Re-run `make warm` — it fills only the shortfall."
+        )
+    if coverage_gaps_:
+        lines = "\n".join(
+            f"  stage {g.stage_id} / {g.theme_slug}: {g.servable}" for g in coverage_gaps_
+        )
+        parts.append(
+            f"this run covered §7's whole matrix and {len(coverage_gaps_)} "
+            f"(stage, theme) pair(s) still hold fewer than {target} servable "
+            f"story/stories:\n{lines}\n{_SILENT_FALLBACK}\n"
+            "Re-run `make warm`; if a pair stays empty its stories are being "
+            "REJECTED, not lost — look at `status='rejected'` for that pair."
         )
     # Loud and non-zero. The whole point of Phase 4's audit: a run that
     # printed success with both enrichment nodes gutted.
@@ -879,6 +1213,28 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
                         )
                         print(f"    REJECT #{story.id} — {why}")
 
+        # DEVIATIONS 8.43: the run's verdict on the thing the pool is FOR, read
+        # back from the database rather than accumulated from the loop. Same
+        # session, after every commit.
+        coverage = await pool_coverage(session)
+
+    full_matrix = set(stages) >= set(range(MIN_STAGE, MAX_STAGE + 1)) and set(themes) >= set(
+        theme_ids
+    )
+    assert_matrix_seeded(coverage)
+    for line in render_coverage(coverage, target):
+        print(line, flush=True)
+    gaps = coverage_gaps(coverage, target)
+    if gaps and not full_matrix:
+        # A slice did what it was asked, so this is not a failure — but the
+        # operator sees the whole picture and the command that closes it, which is
+        # the half AUDIT-PHASE7 F4 says nobody ever saw.
+        print(
+            f"\n  This run covered {len(stages)} of {MAX_STAGE} stage(s) and "
+            f"{len(themes)} of {len(theme_ids)} theme(s) by request, so the gaps "
+            f"above are expected.\n  {_SILENT_FALLBACK}\n  {_FILL_HINT}"
+        )
+
     if made == 0 and skipped == 0:
         # Still the first thing checked, and now it names the reason when the
         # reason is that every generation failed rather than that every story
@@ -895,6 +1251,8 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
         f"{skipped} pair(s) already full. Cost ${total_cost:.4f}",
         failures,
         api_failures,
+        gaps if full_matrix else (),
+        target,
     )
 
 
@@ -1408,12 +1766,54 @@ async def run_grammar_backfill(
         print("  Run `make warm` to refill. Nothing was deleted; §8 evidence is intact.")
 
 
+async def _run(a: argparse.Namespace) -> None:
+    """Resolve the matrix, then generate (or price) it.
+
+    Split out of `main` because `--themes all` needs the database to know what
+    "all" is, and `--stages` has to be rejected before a session is opened — a bad
+    matrix is an argument error, not a database error.
+    """
+    stages = parse_stages(a.stages)
+    async with SessionLocal() as session:
+        known = list((await session.execute(text("SELECT slug FROM themes"))).scalars().all())
+    themes = resolve_themes(a.themes, known)
+    if a.dry_run:
+        await run_dry_run(stages, themes, a.target)
+    else:
+        await run_warm(stages, themes, a.target, a.effort)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="storyforge.warm")
-    p.add_argument("--stages", default="1,2,3", help="comma-separated stage ids")
-    p.add_argument("--themes", default="dragons", help="comma-separated theme slugs")
+    p.add_argument(
+        "--stages",
+        default=DEFAULT_STAGES,
+        help=f"'1..12', 'all', '3,6', '1..4,9..12' (default: {DEFAULT_STAGES} — §7's full matrix)",
+    )
+    p.add_argument(
+        "--themes",
+        default=DEFAULT_THEMES,
+        help=f"'all' or comma-separated theme slugs (default: {DEFAULT_THEMES})",
+    )
     p.add_argument("-n", "--target", type=int, default=TARGET_PER_PAIR)
     p.add_argument("--effort", default="medium")
+    p.add_argument(
+        "--check-coverage",
+        action="store_true",
+        help=(
+            "report servable depth for every (stage, theme) pair and exit NON-ZERO "
+            "while any is below --target, then exit. No API calls, nothing spent. "
+            "This is the post-deploy gate (§7, DEVIATIONS 8.41)"
+        ),
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "print what would be generated and roughly what it would cost, then "
+            "exit. No API calls (DEVIATIONS 8.45)"
+        ),
+    )
     p.add_argument(
         "--backfill",
         action="store_true",
@@ -1444,21 +1844,16 @@ def main() -> None:
     a = p.parse_args()
     only = [int(x) for x in a.only.split(",")] if a.only else None
     try:
-        if a.cue_repair:
+        if a.check_coverage:
+            asyncio.run(run_coverage_check(a.target))
+        elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
         elif a.grammar_backfill:
             asyncio.run(run_grammar_backfill(only=only))
         elif a.backfill:
             asyncio.run(run_backfill(only=only))
         else:
-            asyncio.run(
-                run_warm(
-                    [int(x) for x in a.stages.split(",")],
-                    a.themes.split(","),
-                    a.target,
-                    a.effort,
-                )
-            )
+            asyncio.run(_run(a))
     finally:
         # §15: Langfuse batches exports on a background thread. A CLI that runs
         # for seconds can exit with every span still queued — the integration

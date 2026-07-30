@@ -116,40 +116,90 @@ Then redeploy so the values take: `doctl apps create-deployment <app-id>`.
 
 The database is empty. Run these once, in order, from a console on the running
 `api` component (`doctl apps console <app-id> --component api`, or the *Console*
-tab in the dashboard). They are the same three `make` targets, minus the local
-`make` wrapper:
+tab in the dashboard). They are the same `make` targets — `seed`, `precompute`,
+`warm-plan`, `warm`, `warm-check` — minus the local `make` wrapper, which does not
+exist on that container:
 
 ```bash
 cd /app/services/api
 
 python -m storyforge.seed        # make seed       — stages, GPCs, sight words, themes, assets (§4)
 python -m storyforge.precompute  # make precompute — the allowed_words table (§5.4), ~2s
-python -m storyforge.warm        # make warm       — pre-generate the story pool (§7). SLOW. Costs money.
+python -m storyforge.warm --dry-run   # what warm would generate + roughly what it costs. Free.
+python -m storyforge.warm        # make warm       — the story pool (§7). SLOW. Costs money.
+python -m storyforge.warm --check-coverage   # MANDATORY. Non-zero = partial pool. Free.
 ```
 
 - `make seed`'s `migrate` prerequisite is already satisfied by the PRE_DEPLOY job.
-- All three are **idempotent**; re-running them is safe.
-- `make warm` calls Anthropic per story, takes many minutes, and is the only step
-  that spends money. It is also the step §17's demo depends on — without a warm
-  pool, `POST /api/stories/request` returns **503** telling you to run it
-  (DEVIATIONS 4.11). Run it in a `tmux`/`screen` or expect the console to
+- All of them are **idempotent**; re-running them is safe.
+- `python -m storyforge.warm` calls Anthropic per story, takes many minutes, and is
+  the only step that spends money. It is also the step §17's demo depends on —
+  without a warm pool, `POST /api/stories/request` returns **503** telling you to
+  run it (DEVIATIONS 4.11). Run it in a `tmux`/`screen` or expect the console to
   disconnect.
+- **It generates the full §7 matrix: 12 stages x every theme x 3 stories = 108 on
+  an empty database.** `--dry-run` prints the plan and extrapolates the spend from
+  whatever the pool already holds before you commit to it; on the observed
+  ~$0.02–0.04 per story a first fill is single-digit dollars. Both figures are
+  floors — the high stages are longer.
 - Watch its exit code. `run_warm` exits **non-zero** if any story lands with no
   questions or no tagged segments (DEVIATIONS 5.14) — repair with
-  `python -m storyforge.warm --backfill`.
+  `python -m storyforge.warm --backfill` — and now also if it covered the whole
+  matrix and a (stage, theme) pair is *still* short, which means those stories are
+  being **rejected**, not lost (check `status='rejected'` for that pair).
+
+### The `--check-coverage` line is not optional, and this is why
+
+**A partial warm pool is invisible at runtime.** §7's fallback ladder answers an
+empty (stage, theme) pair by serving the nearest **lower** stage, or another theme
+— correctly, by design, and reporting to nobody. There is no error, no 5xx, no log
+line: a child at stage 8 is quietly handed stage-3 text and the product looks like
+it is working.
+
+This is not hypothetical. For five phases `make warm` defaulted to
+`--stages 1,2,3 --themes dragons`, this page told the first-deploy operator to run
+exactly that, and `docs/STATE.md` claimed it filled ">=3 per (stage,theme)". A
+fresh deploy got **9 stories across 3 of 12 stages and 1 of 3 themes** — and §17's
+demo item 3 is *dragons at stage 3*, the one cell that was covered, so the demo
+passed on a deployment where nine stages held nothing (AUDIT-PHASE7 F4, DEVIATIONS
+8.40–8.48).
+
+`--check-coverage` prints servable depth for all 36 pairs and **exits non-zero
+while any is below 3**. It makes no API call and takes about a second, so there is
+no reason to skip it — and no way to conclude "the pool is fine" from the app's
+own behaviour if you do. `make warm-check` is the same thing locally.
+
+```
+POOL COVERAGE — servable (warm|complete) stories per (stage, theme), target 3:
+  stage  animals  dragons    space
+      1        3        3        4
+      6      0 !      0 !      0 !     <- every stage-6 child gets stage-5 text
+```
 
 ## 5. One manual Clerk step the API cannot do for you
 
+**A fresh Clerk instance silently downgrades every user to `parent`.** Not an
+error — no 500, no log line, nothing in `/api/health`. Just missing permissions,
+which reads as "the app is fine, I must not have the right account".
+
 Every `require_admin` route (`POST /api/validate`, the allowed-words browser —
 i.e. §17 demo items 1 and 2) will **403 for everyone**, including you, until a
-human customises the session token. A real Clerk session token carries no
-`public_metadata` claim by default, so `auth.py` correctly resolves every session
-to `parent` (DEVIATIONS 6.20, verified empirically — this is not settable through
-the Clerk API).
+human customises the session token. Clerk's default session token carries **none**
+of the four spellings `auth.py` walks (`public_metadata.role` →
+`user_public_metadata.role` → `metadata.role` → `role`) — a real minted token holds
+only `exp, fva, iat, iss, nbf, sid, sts, sub, v` — **even with
+`public_metadata = {"role":"admin"}` already set on the user**. So `auth.py`
+correctly resolves every session to `parent`. Setting the dashboard metadata field
+looks like it should be sufficient and is not.
 
 > Clerk dashboard → **Sessions** → *Customize session token* →
 > `{"public_metadata": "{{user.public_metadata}}"}`
 > and set `public_metadata = {"role": "admin"}` on your own user.
+
+**There is no Backend API for this.** `/v1/instance` exposes no such field, so it
+cannot be scripted, cannot be captured in `.do/app.yaml`, and must be redone by
+hand on every new Clerk instance. Verified empirically by minting a real session
+token and decoding it (DEVIATIONS 6.13; the 403's wording is 6.20).
 
 Also add the app's domain to Clerk's allowed origins, or the SDK will refuse to
 mint tokens for it.
@@ -170,7 +220,23 @@ status code, so **a database outage will not fail DO's check.** The Dockerfile's
 own `HEALTHCHECK` does read the body; DO does not use it. Read the JSON yourself
 after a deploy, do not trust the green dot.
 
-Then walk §17 in a browser: kid mode, a story, the parent dashboard.
+`/api/health` says nothing about the story pool, and no HTTP probe can: a partial
+pool answers **200 with a real story**, just not the one that was asked for. So the
+content half of "is this deployment usable" is one command in the `api` console,
+and it is the same one §4 ends with —
+
+```bash
+python -m storyforge.warm --check-coverage   # exit 0, or the pool is partial
+```
+
+Worth re-running after anything that could move the pool: a database restore, a
+`--grammar-backfill` sweep (it can *pull* stories out of the servable pool —
+DEVIATIONS 6.25), or a stage/theme added to `seed`.
+
+Then walk §17 in a browser: kid mode, a story, the parent dashboard. If you want
+to see the ladder rather than trust it, request a stage with no pool of its own and
+read `fallback` in the response body — `{"kind": "lower_stage"}` is the ladder
+working, and on a full pool you should not see it at all for a stage you seeded.
 
 ## 7. Things that will bite
 

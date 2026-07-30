@@ -31,6 +31,12 @@ from storyforge.config import get_settings
 #: measured MODERATING at a p95 of 2.87s.
 FAST_TIMEOUT_S = 15.0
 
+#: §7's `api_fail(retry<=2, exp backoff)`, named so the eval report can DISCLOSE
+#: the retry budget rather than re-type it (DEVIATIONS 8.35). It is what makes a
+#: wall-clock reading around one SDK call an upper bound of three HTTP attempts,
+#: which is the whole of audit F7.
+SDK_MAX_RETRIES = 2
+
 #: The slowest sustained output rate measured on this model, over 94 real calls
 #: (20 uncensored probes + 74 single-attempt eval generations, DEVIATIONS 8.2).
 #: p50 is 94-98 tok/s; this is the floor, used deliberately.
@@ -106,7 +112,7 @@ def get_client() -> AsyncAnthropic:
         # This IS §7's `api_fail(retry<=2, exp backoff)` — the only retry budget
         # in the system, not a lower layer under a second one (DEVIATIONS 8.3).
         # It multiplies every per-call timeout by three; see `generation_timeout`.
-        max_retries=2,
+        max_retries=SDK_MAX_RETRIES,
     )
 
 

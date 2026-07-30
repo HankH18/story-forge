@@ -27,12 +27,22 @@ promise: `api/stories.py::SERVABLE_STATUSES` is an allowlist.
 every story. The pre-flight projection is a token model over prompt sizes the
 harness can measure with no API call and is explicitly not a promise
 (DEVIATIONS 7.44).
+
+**Provenance.** A number is evidence only if a later reader can tell what produced
+it, and the Phase 7 audit found this harness could not say (F1, F2, F3). So every
+item records the model each API call was made with, the price sheet applied, and
+the per-call timeout in force; `eval_runs.config` records the vocabulary
+fingerprint, a dirty-tree flag and a content hash of the code that ran; and
+`--resume` verifies the values it cannot restore and refuses rather than claiming
+to enforce them (DEVIATIONS 8.30-8.39). Exit codes: 0 pass, 1 criteria not met or
+run aborted, 2 spend cap, 3 a resume refused on config drift.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import platform
 import statistics
@@ -50,8 +60,14 @@ from storyforge import obs
 from storyforge.api.stories import SERVABLE_STATUSES
 from storyforge.db import SessionLocal
 from storyforge.decoder import WordVerdict
-from storyforge.llm.client import fast_model, generation_model
-from storyforge.llm.generate import SYSTEM_RULES, build_request_block, build_vocabulary_block
+from storyforge.decoder.resources import load_gpcs, load_lexicon
+from storyforge.llm.client import SDK_MAX_RETRIES, fast_model, generation_model, generation_timeout
+from storyforge.llm.generate import (
+    MAX_OUTPUT_TOKENS,
+    SYSTEM_RULES,
+    build_request_block,
+    build_vocabulary_block,
+)
 from storyforge.llm.moderate import UNGRAMMATICAL_PREFIX
 from storyforge.llm.pricing import (
     CACHE_READ_MULTIPLIER,
@@ -246,12 +262,29 @@ def story_metrics(
     outcome: str,
     on: date,
     story_id: int | None,
+    requested_models: dict[str, str] | None = None,
+    per_call_timeout_s: float | None = None,
+    sdk_max_retries: int | None = None,
 ) -> dict:
-    """§14's per-story metric row. Pure given a finished `PipelineResult`."""
+    """§14's per-story metric row. Pure given a finished `PipelineResult`.
+
+    `requested_models`, `per_call_timeout_s` and `sdk_max_retries` are properties
+    of THIS measurement rather than of the report, and they are recorded per item
+    for the same reason `gate` and `pricing_date` already were (DEVIATIONS 8.30,
+    8.35): a claim about the whole matrix that cannot be checked row by row is a
+    claim a later reader has to take on trust. Optional only so a caller with no
+    live client can still build a row; every production call site passes them.
+    """
     report = result.final_report
     words = word_tokens(report.words) if report else []
     counts = dict(report.counts) if report else {}
     n_words = len(words)
+    # §5.1's denominator: sight and story words are classified before any
+    # alignment is attempted, so they can carry none of the flags below. Dividing
+    # by every word token halved §18's designated alarm (audit F6, DEVIATIONS
+    # 8.34), so the flag rates divide by the population that can carry a flag —
+    # which is the decodability denominator, spelled out in the field name.
+    scored = report.scored_word_count if report else 0
 
     gen_cost = result.generation_cost_usd(on)
     mod_cost = result.moderation_cost_usd(on)
@@ -307,14 +340,22 @@ def story_metrics(
         "story_words_offered": len(vocab.story_words),
         "story_word_cap": MAX_STORY_WORDS,
         # --- the decoder's own disclosed limitations (§5.3, §18) ---
+        # Rates are over SCORED words (DEVIATIONS 8.34). The suffix is the
+        # denominator: a column header that does not name one is how audit F6
+        # went unnoticed through a whole report.
+        "flag_rate_denominator": "scored_word_count",
         "schwa_relaxed": report.schwa_relaxed_count if report else 0,
-        "schwa_relaxed_rate": round((report.schwa_relaxed_count / n_words) if n_words else 0.0, 4),
+        "schwa_relaxed_rate_scored": round(
+            (report.schwa_relaxed_count / scored) if scored else 0.0, 4
+        ),
         "ambiguity_flags": report.ambiguity_count if report else 0,
-        "ambiguity_rate": round((report.ambiguity_count / n_words) if n_words else 0.0, 4),
+        "ambiguity_rate_scored": round((report.ambiguity_count / scored) if scored else 0.0, 4),
         "heteronym_flags": report.heteronym_count if report else 0,
-        "heteronym_rate": round((report.heteronym_count / n_words) if n_words else 0.0, 4),
+        "heteronym_rate_scored": round((report.heteronym_count / scored) if scored else 0.0, 4),
         "unalignable": report.unalignable_count if report else 0,
-        "unalignable_rate": round((report.unalignable_count / n_words) if n_words else 0.0, 4),
+        "unalignable_rate_scored": round(
+            (report.unalignable_count / scored) if scored else 0.0, 4
+        ),
         "unalignable_words": sorted(
             {w.word for w in (report.violations if report else []) if not w.alignable}
         ),
@@ -354,6 +395,30 @@ def story_metrics(
         },
         "tokens": dict(tok),
         "pricing_date": on.isoformat(),
+        # --- what produced this row (DEVIATIONS 8.30) ---
+        # `generation`/`moderation` are read off each call's own `Usage`, so they
+        # are what the API was CALLED with rather than what the environment says
+        # at report time — which is the difference audit F1 turned on. An
+        # `api_fail` has no response to read, hence `requested` beside them.
+        "models": {
+            "generation": sorted({a.usage.model for a in result.attempts}),
+            "moderation": (
+                [mod.usage.model] if mod is not None and mod.usage is not None else []
+            ),
+            "requested": dict(requested_models) if requested_models else None,
+        },
+        "prices": {
+            m: price_for(m, on).model_dump()
+            for m in sorted(
+                {a.usage.model for a in result.attempts}
+                | ({mod.usage.model} if mod is not None and mod.usage is not None else set())
+            )
+        },
+        # The per-HTTP-attempt budget in force for THIS measurement, not the
+        # constant in force when the report is rendered (DEVIATIONS 8.35). Without
+        # it, a wall-clock latency cannot be separated from a retry after the fact.
+        "per_call_timeout_s": per_call_timeout_s,
+        "sdk_max_retries": sdk_max_retries,
     }
 
 
@@ -368,8 +433,148 @@ def _group(items: Sequence[dict], key: str) -> dict:
     return out
 
 
-def aggregate(items: Sequence[dict], *, on: date, cells_planned: int) -> dict:
-    """§14's aggregates, plus the distributions the mean would hide."""
+def _model_census(items: Sequence[dict], role: str) -> dict:
+    """`{model: item count}` for one role, counted from the items (DEVIATIONS 8.30).
+
+    More than one key means the matrix is MIXED, which the report has to say out
+    loud — one model name printed over a mixed matrix is audit F1's report.
+    """
+    return dict(
+        sorted(Counter(m for i in items for m in (i.get("models") or {}).get(role) or []).items())
+    )
+
+
+#: The four §5.3/§18 flags, as (report label, item count field).
+_FLAGS: tuple[tuple[str, str], ...] = (
+    ("schwa_relaxed", "schwa_relaxed"),
+    ("ambiguity", "ambiguity_flags"),
+    ("heteronym", "heteronym_flags"),
+    ("unalignable", "unalignable"),
+)
+
+
+def decoder_limitation_rates(items: Sequence[dict]) -> dict:
+    """§5.3/§18's flag rates, over the population that can carry a flag.
+
+    Derived from the recorded COUNTS rather than from the recorded rate fields
+    (DEVIATIONS 8.34), which has two consequences worth stating. It reproduces the
+    corrected figures for items written before the rename, so run 2's report can be
+    re-derived without touching run 2's rows. And it reports the POPULATION rate —
+    total flags over total scored words — beside the mean of per-story rates,
+    because a mean weights a 30-word stage-1 story equally with a 200-word
+    stage-12 one. That is defensible for "the typical story" and wrong for "how
+    often does this happen", which is the question §18 asks.
+
+    Pure. `items` are metric rows; nothing here reads a clock, a model or the DB.
+    """
+    produced = [i for i in items if i["outcome"] != "api_fail"]
+    scored_total = sum(i.get("scored_word_count", 0) for i in produced)
+    token_total = sum(i.get("word_count", 0) for i in produced)
+    out: dict = {
+        "denominator": "scored_word_count",
+        "scored_word_total": scored_total,
+        "word_token_total": token_total,
+        "non_minimal_missing_total": sum(i.get("non_minimal_missing", 0) for i in items),
+        "unalignable_words": dict(
+            sorted(
+                Counter(w for i in items for w in i.get("unalignable_words", [])).items(),
+                key=lambda kv: (-kv[1], kv[0]),
+            )
+        ),
+    }
+    for label, field in _FLAGS:
+        total = sum(i.get(field, 0) for i in items)
+        per_story = [
+            (i.get(field, 0) / i["scored_word_count"])
+            for i in produced
+            if i.get("scored_word_count")
+        ]
+        out[f"{label}_total"] = total
+        out[f"{label}_rate_scored"] = round(total / scored_total, 6) if scored_total else 0.0
+        out[f"{label}_rate_scored_mean"] = round(_mean(per_story), 6)
+    return out
+
+
+def generation_latency_split(
+    items: Sequence[dict], *, fallback_timeout_s: float | None = None
+) -> dict:
+    """GENERATING latency as wall clock AND as the subset with no clock-driven retry.
+
+    Audit F7: `Attempt.latency_ms` is wall time around one SDK call, and that call
+    carries `SDK_MAX_RETRIES`, so a single row could be three HTTP attempts — 23 of
+    run 2's 169 stories were, and the p95 the report quoted was roughly half dead
+    time from the same timeout it separately filed as the availability defect.
+
+    The split uses each item's OWN recorded `per_call_timeout_s`, so a report
+    rendered today cannot re-judge a measurement taken under a different budget.
+    `fallback_timeout_s` covers items written before that field existed and is
+    reported as a supplied value, never as a recorded one.
+
+    The subset is `no_clock_retry`, deliberately not `single_attempt`: a 429 or a
+    5xx retried quickly still hides inside a fast call, so this is an upper bound
+    on retry-free latency, not a proof of one attempt.
+    """
+    produced = [i for i in items if i["outcome"] != "api_fail"]
+    wall = [i["latency_ms"]["generating"] for i in produced if i["latency_ms"]["generating"]]
+    budgets = {i.get("per_call_timeout_s") for i in produced}
+    recorded = {b for b in budgets if b}
+    source = "recorded" if recorded else ("supplied" if fallback_timeout_s else "unknown")
+
+    clean: list[float] = []
+    over: list[float] = []
+    unknown = 0
+    for i in produced:
+        ms = i["latency_ms"]["generating"]
+        if not ms:
+            continue
+        budget = i.get("per_call_timeout_s") or fallback_timeout_s
+        if not budget:
+            unknown += 1
+            continue
+        (over if ms > budget * 1000 else clean).append(ms)
+
+    retries = {i.get("sdk_max_retries") for i in produced if i.get("sdk_max_retries") is not None}
+    return {
+        "timeout_source": source,
+        "per_call_timeout_s": (
+            sorted(recorded) or ([fallback_timeout_s] if fallback_timeout_s else [])
+        ),
+        "sdk_max_retries": sorted(retries) or None,
+        "wall_clock": {
+            "n": len(wall),
+            "p50": quantile(wall, 0.50),
+            "p95": quantile(wall, 0.95),
+            "max": max(wall) if wall else 0.0,
+        },
+        # Attempts whose wall clock is under the per-call budget, so no retry
+        # driven by the clock can be inside them.
+        "no_clock_retry": {
+            "n": len(clean),
+            "p50": quantile(clean, 0.50),
+            "p95": quantile(clean, 0.95),
+            "max": max(clean) if clean else 0.0,
+        },
+        "over_timeout": {
+            "n": len(over),
+            "share": round(len(over) / len(wall), 4) if wall else 0.0,
+        },
+        "timeout_unknown": unknown,
+    }
+
+
+def aggregate(
+    items: Sequence[dict],
+    *,
+    on: date,
+    cells_planned: int,
+    fallback_timeout_s: float | None = None,
+) -> dict:
+    """§14's aggregates, plus the distributions the mean would hide.
+
+    `fallback_timeout_s` is only consulted for items that recorded no per-call
+    timeout of their own (DEVIATIONS 8.35) and is reported as supplied, not
+    recorded.
+    """
     attempted = len(items)
     produced = [i for i in items if i["outcome"] != "api_fail"]
     accepted = [i for i in items if i["outcome"] == "accepted"]
@@ -431,11 +636,18 @@ def aggregate(items: Sequence[dict], *, on: date, cells_planned: int) -> dict:
         g_acc = [i for i in group if i["outcome"] == "accepted"]
         g_below = [i for i in group if i["outcome"] != "api_fail" and not i["meets_gate"]]
         g_words = [i["word_count"] for i in group if i["outcome"] != "api_fail"]
+        g_prod = [i for i in group if i["outcome"] != "api_fail"]
+        g_flags = decoder_limitation_rates(group)
         return {
             "attempted": len(group),
-            "produced": len([i for i in group if i["outcome"] != "api_fail"]),
+            "produced": len(g_prod),
             "accepted": len(g_acc),
+            # Over ATTEMPTED cells, so a cell that produced no text counts as the
+            # failure it is. The `_produced` twin is beside it because the two
+            # answer different questions and an unlabelled denominator is audit
+            # F9 (DEVIATIONS 8.34).
             "gate_pass_rate": (len(g_acc) / len(group)) if group else 0.0,
+            "gate_pass_rate_produced": (len(g_acc) / len(g_prod)) if g_prod else 0.0,
             "below_gate": len(g_below),
             "decodability": {
                 "min": min(g_dec) if g_dec else 0.0,
@@ -470,12 +682,18 @@ def aggregate(items: Sequence[dict], *, on: date, cells_planned: int) -> dict:
             "length_compliance_rate": (
                 sum(1 for i in group if i["length_compliant"]) / len(group) if group else 0.0
             ),
+            "length_compliance_rate_produced": (
+                sum(1 for i in g_prod if i["length_compliant"]) / len(g_prod) if g_prod else 0.0
+            ),
             "type_token_ratio_mean": round(_mean([i["type_token_ratio"] for i in group]), 4),
             "oov": sum(i["oov"] for i in group),
-            "schwa_relaxed_rate": round(_mean([i["schwa_relaxed_rate"] for i in group]), 4),
-            "ambiguity_rate": round(_mean([i["ambiguity_rate"] for i in group]), 4),
-            "heteronym_rate": round(_mean([i["heteronym_rate"] for i in group]), 4),
-            "unalignable_rate": round(_mean([i["unalignable_rate"] for i in group]), 4),
+            # Population rates over SCORED words (DEVIATIONS 8.34), derived from
+            # the counts so they hold for items written before the rename.
+            "schwa_relaxed_rate_scored": g_flags["schwa_relaxed_rate_scored"],
+            "ambiguity_rate_scored": g_flags["ambiguity_rate_scored"],
+            "heteronym_rate_scored": g_flags["heteronym_rate_scored"],
+            "unalignable_rate_scored": g_flags["unalignable_rate_scored"],
+            "scored_word_total": g_flags["scored_word_total"],
             "unalignable_words": sorted({w for i in group for w in i["unalignable_words"]}),
             "story_words_mean": round(_mean([len(i["distinct_story_words"]) for i in group]), 2),
         }
@@ -550,6 +768,11 @@ def aggregate(items: Sequence[dict], *, on: date, cells_planned: int) -> dict:
             "total_max": max(totals) if totals else 0.0,
             "generating_p50": quantile(gen_latencies, 0.50),
             "generating_p95": quantile(gen_latencies, 0.95),
+            # The same GENERATING numbers, split so a retry can never be priced
+            # as generation time (audit F7, DEVIATIONS 8.35).
+            "generating_split": generation_latency_split(
+                items, fallback_timeout_s=fallback_timeout_s
+            ),
             "rewriting_p50": quantile(rw_latencies, 0.50),
             "rewriting_p95": quantile(rw_latencies, 0.95),
             "validating_p50": quantile(val_latencies, 0.50),
@@ -567,22 +790,22 @@ def aggregate(items: Sequence[dict], *, on: date, cells_planned: int) -> dict:
                 1 for r in content_rejects if r["hazard_suspect_heuristic"]
             ),
         },
-        "decoder_limitations": {
-            "schwa_relaxed_total": sum(i["schwa_relaxed"] for i in items),
-            "schwa_relaxed_rate_mean": round(_mean([i["schwa_relaxed_rate"] for i in produced]), 4),
-            "ambiguity_total": sum(i["ambiguity_flags"] for i in items),
-            "ambiguity_rate_mean": round(_mean([i["ambiguity_rate"] for i in produced]), 4),
-            "heteronym_total": sum(i["heteronym_flags"] for i in items),
-            "heteronym_rate_mean": round(_mean([i["heteronym_rate"] for i in produced]), 4),
-            "unalignable_total": sum(i["unalignable"] for i in items),
-            "unalignable_rate_mean": round(_mean([i["unalignable_rate"] for i in produced]), 4),
-            "unalignable_words": dict(
-                sorted(
-                    Counter(w for i in items for w in i["unalignable_words"]).items(),
-                    key=lambda kv: (-kv[1], kv[0]),
-                )
+        # §5.3/§18's flags over the population that can carry one (DEVIATIONS
+        # 8.34). `decoder_limitation_rates` owns the arithmetic so the same
+        # function serves the report, the per-stage slices and `eval_doc.py`.
+        "decoder_limitations": decoder_limitation_rates(items),
+        # Which models produced this matrix, counted from the items rather than
+        # asserted from the config (DEVIATIONS 8.30). More than one entry in
+        # `generation` means the matrix is MIXED and the report says so.
+        "models_observed": {
+            "generation": _model_census(items, "generation"),
+            "moderation": _model_census(items, "moderation"),
+            "items_without_model_record": sum(1 for i in items if not i.get("models")),
+            "items_with_no_api_response": sum(
+                1
+                for i in items
+                if i.get("models") and not i["models"].get("generation")
             ),
-            "non_minimal_missing_total": sum(i["non_minimal_missing"] for i in items),
         },
         "oov": {
             "total": sum(i["oov"] for i in items),
@@ -613,8 +836,17 @@ def aggregate(items: Sequence[dict], *, on: date, cells_planned: int) -> dict:
             },
         },
         "length": {
+            # Denominator named (DEVIATIONS 8.34): a cell that produced no text is
+            # not length-compliant, and moving it out of the denominator would
+            # flatter the figure by exactly the availability failure rate.
+            "compliance_denominator": "attempted",
             "compliance_rate": (
                 sum(1 for i in items if i["length_compliant"]) / attempted if attempted else 0.0
+            ),
+            "compliance_rate_produced": (
+                sum(1 for i in produced if i["length_compliant"]) / len(produced)
+                if produced
+                else 0.0
             ),
             "word_count_p50": quantile([i["word_count"] for i in produced], 0.50),
             "type_token_ratio_mean": round(_mean([i["type_token_ratio"] for i in produced]), 4),
@@ -818,6 +1050,207 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
     return "\n".join(out)
 
 
+_NOT_RECORDED = "**not recorded by this run** (DEVIATIONS 8.32-8.35)"
+
+
+def _commit_cell(cfg: dict) -> str:
+    """The commit AND whether the tree was dirty, in one cell.
+
+    Audit F2: the recorded commit `559f102` cannot run the documented command —
+    `eval.py` is 102 lines there. Printing a commit without the dirty flag is what
+    let a whole report cite provenance it did not have, so the two are never
+    separated (DEVIATIONS 8.32).
+    """
+    prov = cfg.get("provenance") or {}
+    commit = cfg.get("git_commit", "unknown")
+    dirty = prov.get("git_dirty")
+    if dirty is None:
+        return f"`{commit}` — dirty-tree state {_NOT_RECORDED}"
+    if not dirty:
+        return f"`{commit}` — working tree CLEAN, so this commit contains the code that ran"
+    paths = prov.get("git_dirty_paths") or []
+    harness = [p for p in paths if "storyforge/eval.py" in p or "storyforge/pipeline.py" in p]
+    note = (
+        " **including the harness itself**" if harness else " (none of them the harness)"
+    )
+    return (
+        f"`{commit}` — **working tree DIRTY**: {prov.get('git_dirty_path_count', len(paths))} "
+        f"modified path(s){note}, so this commit is NOT the code that ran"
+    )
+
+
+def _code_cell(cfg: dict) -> str:
+    prov = cfg.get("provenance") or {}
+    sha = (prov.get("code_sha256") or {}).get("storyforge/eval.py")
+    if not sha:
+        return _NOT_RECORDED
+    return (
+        f"`{sha[:16]}…` — check with `git show <commit>:services/api/storyforge/"
+        f"eval.py | shasum -a 256`"
+    )
+
+
+def _timeout_cell(cfg: dict) -> str:
+    t, r = cfg.get("generation_timeout_s"), cfg.get("sdk_max_retries")
+    if t is None:
+        return _NOT_RECORDED
+    return (
+        f"{t:.0f}s per HTTP attempt x up to {(r or 0) + 1} attempts "
+        f"(`SDK_MAX_RETRIES={r}`) — a wall-clock latency can be that many calls"
+    )
+
+
+def _vocabulary_cell(cfg: dict) -> str:
+    v = cfg.get("vocabulary")
+    if not v:
+        return _NOT_RECORDED
+    return (
+        f"{v['gpc_count']} GPCs `{v['gpcs_sha256'][:12]}…`, "
+        f"{v['sight_word_count']} sight words `{v['sight_words_sha256'][:12]}…`, "
+        f"{v['allowed_words_count']:,} allowed words, "
+        f"{v['cmudict_entries']:,} CMUdict entries"
+    )
+
+
+def _models_observed_paragraph(mo: dict, cfg: dict) -> str:
+    gen = mo.get("generation") or {}
+    if not gen:
+        return (
+            "**No per-item model record.** This run wrote no model onto its items, "
+            "so the generation model in the table above is the config's claim and "
+            "nothing in the data can confirm it (audit F1, fixed in DEVIATIONS "
+            "8.30).\n"
+        )
+    line = ", ".join(f"`{m}` x{c}" for m, c in gen.items())
+    mixed = (
+        "\n\n**This matrix is MIXED**: more than one generation model answered, so "
+        "no single model name describes it. The per-item `metrics.models` field "
+        "says which cells belong to which."
+        if len(gen) > 1
+        else ""
+    )
+    return (
+        f"**Models the items themselves record** (DEVIATIONS 8.30, read off each "
+        f"call's own `Usage` rather than off the environment at report time): "
+        f"generation {line}. "
+        f"{mo.get('items_with_no_api_response', 0)} item(s) carry no generation "
+        f"model because no call returned.{mixed}\n"
+    )
+
+
+def _retry_budget_phrase(retries) -> str:
+    """The SDK retry budget as prose, from a recorded set that may be empty.
+
+    An unrecorded retry budget is not "0 retries" — the SDK's default is not zero —
+    so an absent value says so rather than printing a number nobody measured.
+    """
+    vals = [v for v in (retries or []) if v is not None]
+    if not vals:
+        return "retries an unrecorded number of times"
+    if len(vals) == 1:
+        return f"retries up to {vals[0]} time(s)"
+    return f"retries up to {min(vals)}-{max(vals)} times (the run is not uniform)"
+
+
+def _latency_split_paragraph(split: dict) -> str:
+    """Wall clock and the no-retry subset, side by side and separately labelled.
+
+    Audit F7: the row labelled "GENERATING (first attempt)" was wall time around one
+    SDK call carrying `SDK_MAX_RETRIES`, so up to three HTTP attempts were priced as
+    one generation — and the report then blamed the §1.6 miss on long stories while
+    filing the same timeout as the availability defect, borrowing one defect's
+    number for two findings in a document that promises it does not.
+    """
+    if not split or split.get("timeout_source") == "unknown":
+        return (
+            "**The retry-free subset cannot be computed for this run**: no per-call "
+            "timeout was recorded on its items, so wall clock is the only latency "
+            "available and it includes any SDK-internal retries "
+            "(DEVIATIONS 8.35).\n"
+        )
+    w, cl, ov = split["wall_clock"], split["no_clock_retry"], split["over_timeout"]
+    budget = ", ".join(f"{b:.0f}s" for b in split.get("per_call_timeout_s") or [])
+    retries = _retry_budget_phrase(split.get("sdk_max_retries"))
+    src = (
+        "recorded per item"
+        if split["timeout_source"] == "recorded"
+        else "SUPPLIED at report time, not recorded by the run"
+    )
+    return (
+        f"**Two GENERATING numbers, because one was measuring two things** "
+        f"(DEVIATIONS 8.35). The row above is wall clock around one SDK call, and "
+        f"that call {retries}, so it can contain several HTTP attempts. Against a "
+        f"per-call budget of "
+        f"{budget} ({src}), **{ov['n']} of {w['n']}** generations "
+        f"({_pct(ov['share'])}) ran longer than one attempt could, so they contain "
+        f"at least one attempt that was killed and paid for. Over the {cl['n']} that "
+        f"did not, p50 is **{cl['p50']:.0f} ms** and p95 **{cl['p95']:.0f} ms** "
+        f"against the wall-clock p95 of {w['p95']:.0f} ms.\n\n"
+        f"The subset is named `no_clock_retry`, not `single_attempt`: a fast 429 or "
+        f"5xx retry still hides inside a fast call, so this is a bound on "
+        f"retry-free latency and not a proof of one attempt.\n"
+    )
+
+
+def _resume_paragraph(trail: Sequence[dict], agg: dict) -> str:
+    """What a resume did, in checkable terms.
+
+    This paragraph used to assert, unconditionally, that `--resume` ran the
+    remainder "against the SAME stored config — same model, same gate, same pricing
+    date". It did not: the stored config won the record while the environment won
+    the behaviour (audit F1). It now says which values were restored, which were
+    verified, and prints any drift.
+    """
+    generating = [t for t in trail if t.get("cells_remaining", 1) != 0]
+    first = trail[0].get("items_already_recorded", 0)
+    restored = "stages, themes, n, effort, pricing date, cold, enrich"
+    verified = ", ".join(k for k, _ in _VERIFIED_CONFIG_KEYS)
+    drift = [d for t in trail for d in (t.get("config_drift") or [])]
+    out = [
+        f"**This matrix was gathered in {len(generating) + 1} sitting(s)** "
+        f"(DEVIATIONS 7.51). The first invocation stopped at cell {first} of "
+        f"{agg['cells_planned']}; every item is committed as it completes, so "
+        f"`--resume` ran only the remainder.\n",
+        f"On a resume the matrix parameters ({restored}) are RESTORED from the "
+        f"stored config, which is enforcement because they are arguments. The "
+        f"values that come from the environment or from a module constant "
+        f"({verified}) cannot be restored by passing them, so they are VERIFIED "
+        f"against the stored config and a difference REFUSES the resume with "
+        f"exit code 3 while cells remain (DEVIATIONS 8.31). `concurrency` and "
+        f"`budget_usd` are "
+        f"per-sitting and are recorded on each trail entry rather than attributed "
+        f"to the run. Trail: `{json.dumps(trail, default=str)}`\n",
+    ]
+    if drift:
+        missing = sorted({d["key"] for d in drift if d.get("missing")})
+        differs = sorted({d["key"] for d in drift if not d.get("missing")})
+        out.append(
+            "**CONFIG DRIFT on a re-derivation.** "
+            + (
+                f"Differed from the live process at report time: "
+                f"{', '.join('`' + k + '`' for k in differs)}. "
+                if differs
+                else ""
+            )
+            + (
+                f"Never recorded by this run, so uncheckable: "
+                f"{', '.join('`' + k + '`' for k in missing)}. "
+                if missing
+                else ""
+            )
+            + (
+                "The values in force on the sitting that ran are on its trail entry "
+                "under `unrecorded_live_values`, so what the LATER half ran against "
+                "is pinned even where the run as a whole has no field for it. "
+                if missing
+                else ""
+            )
+            + "The measurements above are the ones recorded at run time and are "
+            "NOT restated against the current values.\n"
+        )
+    return "\n".join(out)
+
+
 def render_report(run: dict, agg: dict) -> str:
     """The §14 markdown report. Every number comes from `agg`; nothing is prose
     that a reader has to take on trust."""
@@ -874,24 +1307,25 @@ def render_report(run: dict, agg: dict) -> str:
                 ["concurrency", cfg["concurrency"]],
                 ["cold (cache bypassed)", cfg["cold"]],
                 ["enrichment run", cfg["enrich"]],
-                ["git commit", f"`{cfg['git_commit']}`"],
+                ["per-call generation timeout", _timeout_cell(cfg)],
+                ["git commit", _commit_cell(cfg)],
+                ["harness code sha256 (eval.py)", _code_cell(cfg)],
+                ["vocabulary (the instrument, §5)", _vocabulary_cell(cfg)],
                 ["python", cfg["python"]],
             ],
         )
         + "\n"
     )
 
+    # Which models actually answered, counted from the items (DEVIATIONS 8.30).
+    # The config row above is a claim about the whole matrix; this is the evidence.
+    mo = agg.get("models_observed")
+    if mo:
+        L.append(_models_observed_paragraph(mo, cfg))
+
     trail = cfg.get("resumed") or []
     if trail:
-        L.append(
-            f"**This matrix was gathered in {len(trail) + 1} sitting(s)** "
-            f"(DEVIATIONS 7.51). The first invocation was killed by its launcher "
-            f"at cell {trail[0]['items_already_recorded']} of "
-            f"{agg['cells_planned']}; every item is committed as it completes, so "
-            f"`--resume` ran only the remainder against the SAME stored config — "
-            f"same model, same gate, same pricing date. Trail: "
-            f"`{json.dumps(trail)}`\n"
-        )
+        L.append(_resume_paragraph(trail, agg))
 
     L.append("## Does the thesis hold?\n")
     L.append(
@@ -1111,11 +1545,37 @@ def render_report(run: dict, agg: dict) -> str:
         "story's total cost, so the cost of a story a child could actually be "
         "served is roughly double the per-accepted figure above.\n"
     )
-    if run.get("post_intro_cost_usd") is not None:
+    # The price pair is derived from the sheet actually used, not spelled out:
+    # `eval.py` used to hard-code "$3/$15" beside a number computed from whatever
+    # model the shell named (audit F1, DEVIATIONS 8.36).
+    pi = run.get("post_intro") or {}
+    if pi.get("total_usd") is not None:
+        pair = ", ".join(
+            f"`{m}` ${p['input_per_mtok']}/${p['output_per_mtok']}"
+            for m, p in (pi.get("prices") or {}).items()
+            if p
+        )
+        fb = pi.get("items_priced_from_fallback") or 0
         L.append(
-            f"Same run priced after the Sonnet 5 introductory rate ends "
-            f"(2026-09-01, $3/$15): **${run['post_intro_cost_usd']:.4f}** "
-            f"(x{run['post_intro_cost_usd'] / max(c['total_usd'], 1e-9):.2f}).\n"
+            f"Same token counts priced on {pi['on']}, after the Sonnet 5 "
+            f"introductory rate ends: **${pi['total_usd']:.4f}** "
+            f"(x{pi['total_usd'] / max(c['total_usd'], 1e-9):.2f}) at {pair}. "
+            f"Priced per item against the model each item recorded"
+            + (
+                f"; {fb} item(s) had no model record and were priced from the "
+                f"config's models."
+                if fb
+                else "."
+            )
+            + "\n"
+        )
+    elif pi.get("unpriced_models"):
+        L.append(
+            f"**This run could not be repriced for {pi['on']}**: no price sheet for "
+            f"{', '.join('`' + m + '`' for m in pi['unpriced_models'])}. Reported as "
+            f"unpriceable rather than as $0.00 (DEVIATIONS 8.36) — the partial total "
+            f"over the models that DO have a sheet is "
+            f"${pi.get('partial_total_usd') or 0:.4f}.\n"
         )
     if run.get("projection"):
         p = run["projection"]
@@ -1133,7 +1593,7 @@ def render_report(run: dict, agg: dict) -> str:
             ["node", "p50", "p95"],
             [
                 [
-                    "GENERATING (first attempt)",
+                    "GENERATING (wall clock, retries INCLUDED)",
                     f"{lat['generating_p50']:.0f} ms",
                     f"{lat['generating_p95']:.0f} ms",
                 ],
@@ -1157,6 +1617,7 @@ def render_report(run: dict, agg: dict) -> str:
         )
         + "\n"
     )
+    L.append(_latency_split_paragraph(lat.get("generating_split") or {}))
     L.append(
         f"§1 item 6 asks for cold generation p95 < "
         f"{COLD_LATENCY_P95_TARGET_MS / 1000:.0f}s: measured p95 "
@@ -1248,22 +1709,43 @@ def render_report(run: dict, agg: dict) -> str:
         "rule is over-crediting words.\n"
     )
     L.append(
+        f"**Denominator: SCORED words** — {dl['scored_word_total']:,} of "
+        f"{dl['word_token_total']:,} word tokens. Sight and story words are "
+        f"classified before any alignment is attempted, so they can carry none of "
+        f"these flags; counting them halved §18's designated alarm in the first "
+        f"§14 report (audit F6, DEVIATIONS 8.34). The rate column is the population "
+        f"rate (flags / scored words); the mean-per-story column is beside it "
+        f"because the two answer different questions.\n"
+    )
+    L.append(
         _table(
-            ["flag", "total word instances", "mean rate per story"],
+            ["flag", "total instances", "rate over SCORED words", "mean rate per story"],
             [
                 [
                     "schwa_relaxed (§5.2.6)",
                     dl["schwa_relaxed_total"],
-                    _pct(dl["schwa_relaxed_rate_mean"]),
+                    _pct(dl["schwa_relaxed_rate_scored"]),
+                    _pct(dl["schwa_relaxed_rate_scored_mean"]),
                 ],
-                ["ambiguity_flag (§5.2.5)", dl["ambiguity_total"], _pct(dl["ambiguity_rate_mean"])],
-                ["heteronym_flag", dl["heteronym_total"], _pct(dl["heteronym_rate_mean"])],
+                [
+                    "ambiguity_flag (§5.2.5)",
+                    dl["ambiguity_total"],
+                    _pct(dl["ambiguity_rate_scored"]),
+                    _pct(dl["ambiguity_rate_scored_mean"]),
+                ],
+                [
+                    "heteronym_flag",
+                    dl["heteronym_total"],
+                    _pct(dl["heteronym_rate_scored"]),
+                    _pct(dl["heteronym_rate_scored_mean"]),
+                ],
                 [
                     "alignable=False (unalignable)",
                     dl["unalignable_total"],
-                    _pct(dl["unalignable_rate_mean"]),
+                    _pct(dl["unalignable_rate_scored"]),
+                    _pct(dl["unalignable_rate_scored_mean"]),
                 ],
-                ["non-minimal missing-GPC set", dl["non_minimal_missing_total"], "—"],
+                ["non-minimal missing-GPC set", dl["non_minimal_missing_total"], "—", "—"],
             ],
         )
         + "\n"
@@ -1275,17 +1757,26 @@ def render_report(run: dict, agg: dict) -> str:
         )
     else:
         L.append("No unalignable word appeared in any story — the §18 alarm is quiet.\n")
-    L.append("### Per stage\n")
+    L.append("### Per stage (all rates over SCORED words)\n")
     L.append(
         _table(
-            ["stage", "schwa", "ambiguity", "heteronym", "unalignable", "unalignable words"],
+            [
+                "stage",
+                "scored words",
+                "schwa",
+                "ambiguity",
+                "heteronym",
+                "unalignable",
+                "unalignable words",
+            ],
             [
                 [
                     s,
-                    _pct(v["schwa_relaxed_rate"]),
-                    _pct(v["ambiguity_rate"]),
-                    _pct(v["heteronym_rate"]),
-                    _pct(v["unalignable_rate"]),
+                    v["scored_word_total"],
+                    _pct(v["schwa_relaxed_rate_scored"]),
+                    _pct(v["ambiguity_rate_scored"]),
+                    _pct(v["heteronym_rate_scored"]),
+                    _pct(v["unalignable_rate_scored"]),
                     ", ".join(v["unalignable_words"]) or "—",
                 ]
                 for s, v in agg["by_stage"].items()
@@ -1328,12 +1819,26 @@ def render_report(run: dict, agg: dict) -> str:
         _table(
             ["metric", "value"],
             [
-                ["within the stage's target word range", _pct(agg["length"]["compliance_rate"])],
+                [
+                    "within the stage's target range (of ATTEMPTED cells)",
+                    _pct(agg["length"]["compliance_rate"]),
+                ],
+                [
+                    "within the stage's target range (of PRODUCED stories)",
+                    _pct(agg["length"].get("compliance_rate_produced", 0.0)),
+                ],
                 ["median word count", agg["length"]["word_count_p50"]],
                 ["mean type-token ratio", f"{agg['length']['type_token_ratio_mean']:.3f}"],
             ],
         )
         + "\n"
+    )
+    L.append(
+        "Both denominators are printed because they answer different questions and "
+        "an unlabelled one is audit F9 (DEVIATIONS 8.34). A cell that produced no "
+        "text is not length-compliant, so the ATTEMPTED figure is the one that "
+        "counts availability honestly; the PRODUCED figure is the generation "
+        "quality of the text that exists.\n"
     )
     L.append(
         "§18 predicts a low type-token ratio at the early stages and calls it "
@@ -1369,17 +1874,194 @@ def _cells(stages: Sequence[int], themes: Sequence[str], n: int) -> Iterator[tup
                 yield stage, theme, i
 
 
-def _git_commit() -> str:
+def remaining_cells(
+    stages: Sequence[int], themes: Sequence[str], n: int, done_items: Sequence[dict]
+) -> list[tuple[int, str, int]]:
+    """The cells a resume still has to run, derived from the recorded items.
+
+    Counted per (stage, theme) rather than assumed from ordering, so an interrupted
+    matrix resumes correctly regardless of the order the items were committed in.
+    One function for both the run loop and the drift decision (DEVIATIONS 8.31) —
+    "how many cells are left" has to mean the same thing in both places, because a
+    resume with 0 cells left is allowed to disclose drift where a resume with work
+    to do must refuse it.
+    """
+    done = Counter((it["stage_id"], it["theme"]) for it in done_items)
+    out: list[tuple[int, str, int]] = []
+    for stage, theme, i in _cells(stages, themes, n):
+        if done[(stage, theme)] > 0:
+            done[(stage, theme)] -= 1
+            continue
+        out.append((stage, theme, i))
+    return out
+
+
+def _git(*args: str) -> str | None:
     try:
         return subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", *args],
             capture_output=True,
             text=True,
             timeout=5,
             check=True,
+            cwd=repo_root(),
         ).stdout.strip()
-    except Exception:  # noqa: BLE001 — provenance is nice to have, not load-bearing
-        return "unknown"
+    except Exception:  # noqa: BLE001 — provenance is recorded, never load-bearing
+        return None
+
+
+def _git_commit() -> str:
+    return _git("rev-parse", "--short", "HEAD") or "unknown"
+
+
+#: The code whose content decides what a run MEASURES: the harness, the state
+#: machine it drives, the gate, and the client that prices it. Hashed so a reader
+#: can settle by arithmetic what audit F2 had to settle by hand — the recorded
+#: commit either contains this code or it does not.
+_FINGERPRINTED_CODE: tuple[str, ...] = (
+    "storyforge/eval.py",
+    "storyforge/pipeline.py",
+    "storyforge/llm",
+    "storyforge/decoder",
+)
+
+
+def _sha256_path(path: Path) -> str:
+    h = hashlib.sha256()
+    if path.is_dir():
+        for f in sorted(p for p in path.rglob("*.py")):
+            h.update(f.relative_to(path).as_posix().encode())
+            h.update(f.read_bytes())
+    else:
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def _provenance() -> dict:
+    """What produced this run, in a form a later reader can check.
+
+    Audit F2: `config.git_commit` recorded a commit at which `eval.py` is 102 lines
+    with only a `smoke` subparser, so the recorded provenance could not run the
+    documented command — every §14 number came from uncommitted code and nothing in
+    the record said so. A bare `git rev-parse` cannot say so, because it never
+    looks at the working tree (DEVIATIONS 8.32).
+
+    `git_dirty_paths` is capped and sorted so the interesting case — the harness
+    itself was modified — is visible rather than buried in a count.
+    """
+    commit = _git_commit()
+    porcelain = _git("status", "--porcelain")
+    dirty_paths = (
+        sorted({ln[3:].split(" -> ")[-1].strip() for ln in porcelain.splitlines() if ln.strip()})
+        if porcelain
+        else []
+    )
+    api = Path(__file__).resolve().parents[1]
+    per_file = {}
+    for rel in _FINGERPRINTED_CODE:
+        try:
+            per_file[rel] = _sha256_path(api / rel)
+        except OSError:
+            per_file[rel] = "unreadable"
+    combined = hashlib.sha256()
+    for rel in _FINGERPRINTED_CODE:
+        combined.update(f"{rel}:{per_file[rel]}\n".encode())
+    return {
+        "git_commit": commit,
+        # None (not False) when git could not be consulted at all: "we did not
+        # look" and "we looked and it was clean" are different facts.
+        "git_dirty": (bool(dirty_paths) if porcelain is not None else None),
+        "git_dirty_paths": dirty_paths[:40],
+        "git_dirty_path_count": len(dirty_paths),
+        "code_sha256": per_file,
+        "code_sha256_combined": combined.hexdigest(),
+    }
+
+
+async def vocabulary_fingerprint(session) -> dict:
+    """The vocabulary the gate was computed against (audit F3, DEVIATIONS 8.33).
+
+    An eval run is a MEASUREMENT, and 11 of run 2's 169 decodability figures
+    stopped reproducing fourteen minutes after they were verified because a
+    parallel agent re-seeded `sight_words` and added a GPC. `eval_runs.config`
+    carried the model, prices, gate, rewrite budget, prompt allowlist size, python
+    version and git commit — and nothing about the vocabulary, so the report could
+    not detect its own staleness.
+
+    Hashes, not contents: the goal is that a later reader can tell whether a
+    re-derivation is comparable, not to rebuild the vocabulary from the record. The
+    GPC hash is taken over `load_gpcs()` rather than the CSV bytes because
+    `data/seed/gpcs.csv` is a symlink into the package (STATE invariant 8), so the
+    path is not the artifact.
+    """
+    gpcs = load_gpcs()
+    gpc_rows = "\n".join(
+        f"{g.id}|{g.stage}|{g.kind}|{g.position}|{int(g.schwa_ok)}" for g in gpcs
+    )
+    gpc_hash = hashlib.sha256(gpc_rows.encode()).hexdigest()
+
+    sight = (
+        await session.execute(
+            text("SELECT word, stage_id FROM sight_words ORDER BY word, stage_id")
+        )
+    ).all()
+    sight_hash = hashlib.sha256("\n".join(f"{w}|{s}" for w, s in sight).encode()).hexdigest()
+
+    allowed = (
+        await session.execute(
+            text("SELECT stage_id, count(*) FROM allowed_words GROUP BY stage_id ORDER BY stage_id")
+        )
+    ).all()
+    allowed_hash = hashlib.sha256("\n".join(f"{s}|{c}" for s, c in allowed).encode()).hexdigest()
+
+    return {
+        "gpc_count": len(gpcs),
+        "gpcs_sha256": gpc_hash,
+        "sight_word_count": len(sight),
+        "sight_words_sha256": sight_hash,
+        "allowed_words_count": sum(c for _, c in allowed),
+        "allowed_words_per_stage_sha256": allowed_hash,
+        # §18 asks for the CMUdict snapshot to be vendored so the proof is
+        # reproducible; the entry count is the cheapest check that the snapshot
+        # that ran is the one that was pinned (`decoder/data/PINS.md`).
+        "cmudict_entries": len(load_lexicon()),
+    }
+
+
+#: Config keys whose value comes from the ENVIRONMENT or from a module constant,
+#: so a resume can never restore them by passing an argument — it can only check
+#: them and refuse (DEVIATIONS 8.31). Audit F1 is exactly the absence of this list.
+_VERIFIED_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
+    ("models", "ANTHROPIC_MODEL_GENERATE / ANTHROPIC_MODEL_FAST"),
+    ("prices", "storyforge.llm.pricing.PRICES (and --pricing-date)"),
+    ("gate", "storyforge.pipeline.DECODABILITY_GATE"),
+    ("max_rewrites", "storyforge.pipeline.MAX_REWRITES"),
+    ("max_story_words", "storyforge.pipeline.MAX_STORY_WORDS"),
+    ("prompt_word_limit", "storyforge.pipeline.PROMPT_WORD_LIMIT"),
+    ("generation_timeout_s", "ANTHROPIC_GENERATION_TIMEOUT_S"),
+    ("sdk_max_retries", "storyforge.llm.client.SDK_MAX_RETRIES"),
+    ("vocabulary", "make seed / make precompute (DEVIATIONS 8.33)"),
+    ("themes", "the themes table"),
+)
+
+
+def config_drift(stored: dict, live: dict, *, keys=_VERIFIED_CONFIG_KEYS) -> list[dict]:
+    """Every verified key on which the stored run and the live process disagree.
+
+    A key the stored config never recorded is NOT drift — it is a run that predates
+    the record, and reporting it as a difference would refuse every resume of every
+    run written before DEVIATIONS 8.31. It is disclosed instead (`missing`).
+    """
+    out: list[dict] = []
+    for key, source in keys:
+        if key not in stored:
+            out.append({"key": key, "stored": None, "live": live.get(key), "source": source,
+                        "missing": True})
+            continue
+        if stored[key] != live.get(key):
+            out.append({"key": key, "stored": stored[key], "live": live.get(key),
+                        "source": source, "missing": False})
+    return out
 
 
 def repo_root() -> Path:
@@ -1408,14 +2090,29 @@ async def run_full(
     is committed as it completes (DEVIATIONS 7.47), so a 70-minute matrix killed
     at cell 154 still holds 154 real measurements — and the same argument that
     says an `api_fail` must not throw away 179 other cells says a SIGTERM must
-    not either. The stored `config` wins over the command line on a resume, so
-    the two halves of the matrix cannot be measured against different models, a
-    different gate or a different pricing date.
+    not either.
+
+    **What a resume does with the stored config** (DEVIATIONS 8.31; this used to be
+    a claim rather than a behaviour — audit F1). Three kinds of value, three
+    treatments:
+
+    * RESTORED — real arguments, so restoring them IS enforcement: the matrix
+      (`stages_spec`, `themes_spec`, the resolved `themes` list, `n`), `effort`,
+      `pricing_date`, `cold`, `enrich`.
+    * VERIFIED — environment reads and module constants no argument can carry
+      (`_VERIFIED_CONFIG_KEYS`): the models, prices, gate, rewrite budget,
+      allowlist size, timeouts, retry budget and vocabulary fingerprint. A
+      difference REFUSES the resume with exit code 3 while cells remain, and is
+      disclosed in the report when the run is already complete and nothing but the
+      report can change.
+    * PER-SITTING — `concurrency` and `budget_usd`, recorded on the resume trail
+      entry rather than pretended to be the run's.
     """
     stages = parse_stages(stages_spec)
     started = datetime.now(UTC)
     resumed_items: list[dict] = []
     resumed_config: dict | None = None
+    resumed_themes: list[str] | None = None
 
     async with SessionLocal() as session:
         if resume_run_id is not None:
@@ -1440,20 +2137,28 @@ async def run_full(
             themes_spec = resumed_config.get("themes_spec", themes_spec)
             n = int(resumed_config.get("n", n))
             effort = resumed_config.get("effort", effort)
+            cold = bool(resumed_config.get("cold", cold))
+            enrich = bool(resumed_config.get("enrich", enrich))
             stages = parse_stages(stages_spec)
             pricing_date = date.fromisoformat(
                 resumed_config.get("pricing_date", pricing_date.isoformat())
             )
+            resumed_themes = list(resumed_config.get("themes") or []) or None
         theme_ids = await _theme_ids(session)
-        themes = (
+        themes_live = (
             sorted(theme_ids)
             if themes_spec.strip() == "all"
             else [t.strip() for t in themes_spec.split(",") if t.strip()]
         )
+        # Audit S2: `--themes all` re-resolved after a new theme was seeded grows
+        # `cells_planned` under a config that records the old list. The stored LIST
+        # wins; the live resolution is kept only so the drift check can see it.
+        themes = resumed_themes or themes_live
         unknown = [t for t in themes if t not in theme_ids]
         if unknown:
             raise SystemExit(f"unknown theme(s) {unknown} — run `make seed`")
 
+        vocab_fingerprint = await vocabulary_fingerprint(session)
         vocabs = [await load_vocabulary(session, s, themes[0]) for s in stages]
         projection = project_cost(vocabs, n * len(themes), pricing_date)
         cells_planned = len(stages) * len(themes) * n
@@ -1461,6 +2166,8 @@ async def run_full(
 
     gen_model, fast = generation_model(), fast_model()
     gp, fp = price_for(gen_model, pricing_date), price_for(fast, pricing_date)
+    prov = _provenance()
+    per_call_timeout_s = generation_timeout(MAX_OUTPUT_TOKENS).read
     config = {
         "stages_spec": stages_spec,
         "themes_spec": themes_spec,
@@ -1482,24 +2189,109 @@ async def run_full(
         "max_rewrites": MAX_REWRITES,
         "max_story_words": MAX_STORY_WORDS,
         "prompt_word_limit": PROMPT_WORD_LIMIT,
+        # The per-HTTP-attempt budget and the retry budget that multiplies it.
+        # Recorded because a latency number cannot be read without them (8.35).
+        "generation_timeout_s": per_call_timeout_s,
+        "sdk_max_retries": SDK_MAX_RETRIES,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        # The instrument, not just the subject (8.33).
+        "vocabulary": vocab_fingerprint,
         "cells_planned": cells_planned,
-        "git_commit": _git_commit(),
+        # Kept as a top-level key for every existing reader; `provenance` carries
+        # the dirty-tree flag and the content hashes that make it checkable (8.32).
+        "git_commit": prov["git_commit"],
+        "provenance": prov,
         "python": platform.python_version(),
         "projection_usd": projection,
     }
+    remaining = remaining_cells(stages, themes, n, resumed_items)
     if resumed_config is not None:
-        # The stored config is authoritative — the two halves of one matrix must
-        # not be measured against different models or a different gate. Only the
-        # resume trail is added.
+        # `themes` in `config` is the RESTORED list, so the drift check is handed
+        # the LIVE resolution — otherwise it compares the stored value with itself.
+        drift = config_drift(resumed_config, {**config, "themes": themes_live})
+        # A key the stored run never recorded cannot be checked. That is a fact
+        # about the older run, not a difference, so it is disclosed rather than
+        # treated as drift — otherwise no run written before 8.31 is resumable.
+        hard = [d for d in drift if not d["missing"]]
+        if remaining and int(resumed_config.get("concurrency", concurrency)) != concurrency:
+            hard.append(
+                {
+                    "key": "concurrency",
+                    "stored": resumed_config.get("concurrency"),
+                    "live": concurrency,
+                    "source": "--concurrency",
+                    "missing": False,
+                }
+            )
+        if hard and remaining:
+            print(
+                f"\nRESUME REFUSED: {len(hard)} value(s) that decide what this "
+                f"harness MEASURES differ from the ones eval_runs.id={resume_run_id} "
+                f"recorded, and {len(remaining)} of {cells_planned} cells still have "
+                f"to run. Two halves of one matrix measured against different values "
+                f"are two runs, not one (§14, DEVIATIONS 8.31).",
+                file=sys.stderr,
+            )
+            for d in hard:
+                print(
+                    f"  - {d['key']}: stored {json.dumps(d['stored'], default=str)} "
+                    f"!= live {json.dumps(d['live'], default=str)}"
+                    f"\n      set by: {d['source']}",
+                    file=sys.stderr,
+                )
+            print(
+                "\nRestore the values above and resume, or start a new run — a new "
+                "`eval_runs` row is the honest way to measure something different.",
+                file=sys.stderr,
+            )
+            return 3
         trail = list(resumed_config.get("resumed", []))
         trail.append(
             {
                 "at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "items_already_recorded": len(resumed_items),
-                "git_commit": _git_commit(),
+                "cells_remaining": len(remaining),
+                "git_commit": prov["git_commit"],
+                "git_dirty": prov["git_dirty"],
+                "code_sha256_combined": prov["code_sha256_combined"],
+                # Per-sitting, because they came from THIS command line and the
+                # stored config's values were never in force here (audit S1, F10).
+                "concurrency": concurrency,
+                "budget_usd": budget_usd,
+                "config_drift": drift or None,
+                # A value the run never recorded is recorded HERE, on the sitting
+                # that knows it, rather than being written into the run's config —
+                # where it would imply the earlier sitting had used it too. Resuming
+                # a pre-8.31 run therefore still pins what the NEW half ran
+                # against, without back-dating a fingerprint onto the old half.
+                "unrecorded_live_values": {
+                    d["key"]: d["live"] for d in drift if d["missing"]
+                }
+                or None,
             }
         )
+        # The stored config still wins the record — that part was right. What is
+        # new is that the values it records were CHECKED against the live process
+        # above, so recording them is a measurement rather than a hope.
         config = {**resumed_config, "resumed": trail}
+        if drift:
+            # Reached only when nothing HARD differs or nothing is left to run; the
+            # refusal above owns the other case. The wording says which, because
+            # "we continued anyway" and "there was nothing left to continue" are
+            # different facts about the same message.
+            why = (
+                "the run is complete, so nothing but the report can change"
+                if not remaining
+                else "none of these is a value this run recorded, so none can be checked"
+            )
+            print(
+                f"\nCONFIG DRIFT ({len(drift)} key(s)) — {why}, and the report will "
+                f"say so:",
+                file=sys.stderr,
+            )
+            for d in drift:
+                label = "NOT RECORDED by this run" if d["missing"] else "differs"
+                print(f"  - {d['key']}: {label}", file=sys.stderr)
 
     print(
         f"\n§14 eval run — {len(stages)} stage(s) x {len(themes)} theme(s) x {n} = "
@@ -1561,10 +2353,6 @@ async def run_full(
             await session.commit()
             print(f"  eval_runs.id = {run_id}\n")
 
-        # Cells already recorded, counted per (stage, theme) so the remainder is
-        # derived from the DATA rather than from an assumption about ordering.
-        done = Counter((it["stage_id"], it["theme"]) for it in items)
-
         async def one(stage: int, theme: str, i: int) -> None:
             async with sem:
                 await _attempt(
@@ -1577,15 +2365,14 @@ async def run_full(
                     effort=effort,
                     pricing_date=pricing_date,
                     items=items,
+                    requested_models={"generation": gen_model, "fast": fast},
+                    per_call_timeout_s=per_call_timeout_s,
                 )
 
         t0 = time.perf_counter()
         try:
             if concurrency <= 1:
-                for stage, theme, i in _cells(stages, themes, n):
-                    if done[(stage, theme)] > 0:
-                        done[(stage, theme)] -= 1
-                        continue
+                for stage, theme, i in remaining:
                     await one(stage, theme, i)
                     stories_written += 1 if items and items[-1]["story_id"] else 0
                     running_cost = sum(it["cost_usd"]["total"] for it in items)
@@ -1612,13 +2399,7 @@ async def run_full(
                 # Batched by stage so the cache-warming argument still holds and
                 # the budget is checked between batches rather than never.
                 for stage in stages:
-                    batch = []
-                    for t in themes:
-                        for i in range(n):
-                            if done[(stage, t)] > 0:
-                                done[(stage, t)] -= 1
-                                continue
-                            batch.append((stage, t, i))
+                    batch = [c for c in remaining if c[0] == stage]
                     if not batch:
                         continue
                     await asyncio.gather(*(one(s, t, i) for s, t, i in batch))
@@ -1643,7 +2424,17 @@ async def run_full(
 
         stories_written = sum(1 for it in items if it["story_id"])
         wall_s = time.perf_counter() - t0
-        agg = aggregate(items, on=pricing_date, cells_planned=cells_planned)
+        agg = aggregate(
+            items,
+            on=pricing_date,
+            cells_planned=cells_planned,
+            # Only reached by items that recorded no budget of their own, i.e. rows
+            # written before DEVIATIONS 8.35. Read off the CONFIG rather than off
+            # the live process: resuming a pre-8.35 run has no recorded budget for
+            # its items and must report the split as unavailable, not judge a 30s
+            # measurement against today's 240s.
+            fallback_timeout_s=config.get("generation_timeout_s"),
+        )
         agg["wall_clock_s"] = round(wall_s, 1)
 
         status = "budget_stopped" if budget_stopped else ("failed" if fatal else "completed")
@@ -1655,8 +2446,10 @@ async def run_full(
         db_run.finished_at = finished
         await session.commit()
 
-    # The same token counts re-priced after the Sonnet 5 intro rate expires.
-    post_intro = _reprice(items, date(2026, 9, 1))
+    # The same token counts re-priced after the Sonnet 5 intro rate expires,
+    # against the models the ITEMS recorded rather than the current shell (8.36).
+    post_intro_date = date(2026, 9, 1)
+    post_intro = _reprice(items, post_intro_date, fallback_models=config.get("models"))
 
     run_meta = {
         "id": run_id,
@@ -1668,7 +2461,8 @@ async def run_full(
         "stories_written": stories_written,
         "servable_before": servable_before,
         "servable_after": servable_after,
-        "post_intro_cost_usd": post_intro,
+        "post_intro_cost_usd": post_intro["total_usd"],
+        "post_intro": post_intro,
         "fatal": fatal,
     }
 
@@ -1686,6 +2480,14 @@ async def run_full(
     print(_console_summary(agg, run_meta))
     print(f"report: {path}")
     print(f"raw:    {json_path}")
+    # `reports/` is gitignored, so `docs/EVAL.md` is the committed record and it is
+    # regenerated from this JSON, never hand-edited. Printed rather than run: a
+    # failed matrix must not silently rewrite the committed report, and "someone
+    # remembered to regenerate it" is what DEVIATIONS 8.39 is an entry about.
+    print(
+        f"\nregenerate the committed §14 report:\n"
+        f"  services/api/.venv/bin/python scripts/eval_doc.py {json_path} docs/EVAL.md"
+    )
 
     verdict = criteria_verdict(agg)
     if fatal:
@@ -1704,30 +2506,74 @@ async def run_full(
     return 0
 
 
-def _reprice(items: Sequence[dict], on: date) -> float:
+def _reprice(items: Sequence[dict], on: date, *, fallback_models: dict | None = None) -> dict:
     """Total cost of the same token counts on another date.
 
     Exists because `price_for` takes an explicit date precisely so a report can
     say "and here is what this run costs in September". Recomputed from the token
     counts on the items rather than from a stored dollar figure.
+
+    **Priced against the model each ITEM recorded** (DEVIATIONS 8.36). This used
+    to call `generation_model()`, which made the September figure a function of the
+    current shell: the audit's Opus-flavoured resume priced run 2's tokens at
+    $6.5718 in a report whose config table said Sonnet at $2/$10. `fallback_models`
+    covers items written before 8.30 recorded a model, and is reported as a
+    fallback so a reader knows which rows were priced on an assumption.
+
+    Returns the total, the sheets used, and — instead of audit F13.4's silent
+    `0.0` — an explicit `unpriced` list when a model has no price sheet. An
+    unpriced model reported as free is a cost defect dressed as a cost report.
     """
-    gen, fast = generation_model(), fast_model()
-    try:
-        gp, fp = price_for(gen, on), price_for(fast, on)
-    except KeyError:
-        return 0.0
+    fb = fallback_models or {}
+    sheets: dict[str, object] = {}
+    unpriced: set[str] = set()
+    assumed = 0
+
+    def sheet(model: str | None):
+        if not model:
+            return None
+        if model in sheets:
+            return sheets[model]
+        try:
+            sheets[model] = price_for(model, on)
+        except KeyError:
+            unpriced.add(model)
+            sheets[model] = None
+        return sheets[model]
+
     total = 0.0
     for it in items:
         t = it["tokens"]
-        total += (
-            t.get("input", 0) * gp.input_per_mtok / 1e6
-            + t.get("cache_read", 0) * gp.input_per_mtok / 1e6 * CACHE_READ_MULTIPLIER
-            + t.get("cache_write", 0) * gp.input_per_mtok / 1e6 * CACHE_WRITE_MULTIPLIER
-            + t.get("output", 0) * gp.output_per_mtok / 1e6
-            + t.get("mod_input", 0) * fp.input_per_mtok / 1e6
-            + t.get("mod_output", 0) * fp.output_per_mtok / 1e6
-        )
-    return round(total, 6)
+        rec = it.get("models") or {}
+        gen_models = rec.get("generation") or []
+        mod_models = rec.get("moderation") or []
+        if not gen_models and not mod_models:
+            assumed += 1
+        gp = sheet(gen_models[0] if gen_models else (rec.get("requested") or fb).get("generation"))
+        fp = sheet(mod_models[0] if mod_models else (rec.get("requested") or fb).get("fast"))
+        if gp is not None:
+            total += (
+                t.get("input", 0) * gp.input_per_mtok / 1e6
+                + t.get("cache_read", 0) * gp.input_per_mtok / 1e6 * CACHE_READ_MULTIPLIER
+                + t.get("cache_write", 0) * gp.input_per_mtok / 1e6 * CACHE_WRITE_MULTIPLIER
+                + t.get("output", 0) * gp.output_per_mtok / 1e6
+            )
+        if fp is not None:
+            total += (
+                t.get("mod_input", 0) * fp.input_per_mtok / 1e6
+                + t.get("mod_output", 0) * fp.output_per_mtok / 1e6
+            )
+    return {
+        "on": on.isoformat(),
+        # None, not 0.0: "we could not price this" is not "this was free".
+        "total_usd": None if unpriced else round(total, 6),
+        "partial_total_usd": round(total, 6) if unpriced else None,
+        "prices": {
+            m: (p.model_dump() if p is not None else None) for m, p in sorted(sheets.items())
+        },
+        "unpriced_models": sorted(unpriced),
+        "items_priced_from_fallback": assumed,
+    }
 
 
 async def _attempt(
@@ -1741,6 +2587,8 @@ async def _attempt(
     effort: str,
     pricing_date: date,
     items: list[dict],
+    requested_models: dict[str, str] | None = None,
+    per_call_timeout_s: float | None = None,
 ) -> None:
     """One cell of the matrix. Never raises (DEVIATIONS 7.47).
 
@@ -1751,6 +2599,11 @@ async def _attempt(
     aggregates exactly these events.
     """
     vocab = await load_vocabulary(session, stage, theme)
+    provenance = {
+        "requested_models": requested_models,
+        "per_call_timeout_s": per_call_timeout_s,
+        "sdk_max_retries": SDK_MAX_RETRIES,
+    }
     t0 = time.perf_counter()
     try:
         result = await run_pipeline(session, stage, theme, effort=effort)
@@ -1761,7 +2614,13 @@ async def _attempt(
         result = PipelineResult(stage_id=stage, theme=theme, passed=False)
         result.total_ms = elapsed
         item = story_metrics(
-            result, vocab, index=index, outcome="api_fail", on=pricing_date, story_id=None
+            result,
+            vocab,
+            index=index,
+            outcome="api_fail",
+            on=pricing_date,
+            story_id=None,
+            **provenance,
         )
         item["api_error"] = f"{type(exc).__name__}: {exc}"
         items.append(item)
@@ -1778,7 +2637,13 @@ async def _attempt(
 
     story = await persist_eval_story(session, result, theme_ids[theme], run_id, pricing_date)
     item = story_metrics(
-        result, vocab, index=index, outcome=outcome, on=pricing_date, story_id=story.id
+        result,
+        vocab,
+        index=index,
+        outcome=outcome,
+        on=pricing_date,
+        story_id=story.id,
+        **provenance,
     )
     items.append(item)
     session.add(EvalRunItem(run_id=run_id, story_id=story.id, metrics=item))
@@ -1801,10 +2666,11 @@ def _console_summary(agg: dict, run: dict) -> str:
         f"  rewrite depth    p50 {r['p50']} · p95 {r['p95']} · max {r['max']} · "
         f"hist {json.dumps(r['hist'])}",
         f"  moderation       {json.dumps(agg['moderation']['classes'])}",
-        f"  decoder flags    schwa {agg['decoder_limitations']['schwa_relaxed_rate_mean']:.1%} · "
-        f"ambig {agg['decoder_limitations']['ambiguity_rate_mean']:.1%} · "
-        f"heteronym {agg['decoder_limitations']['heteronym_rate_mean']:.1%} · "
-        f"unalignable {agg['decoder_limitations']['unalignable_rate_mean']:.1%}",
+        f"  decoder flags    (over SCORED words) "
+        f"schwa {agg['decoder_limitations']['schwa_relaxed_rate_scored']:.1%} · "
+        f"ambig {agg['decoder_limitations']['ambiguity_rate_scored']:.1%} · "
+        f"heteronym {agg['decoder_limitations']['heteronym_rate_scored']:.1%} · "
+        f"unalignable {agg['decoder_limitations']['unalignable_rate_scored']:.1%}",
         f"  oov              {agg['oov']['total']} instance(s) in "
         f"{agg['oov']['stories_with_oov']} story/stories",
         f"  latency          p50 {agg['latency_ms']['total_p50'] / 1000:.1f}s · "
@@ -1853,6 +2719,40 @@ def _fmt(results: list[PipelineResult], today: date) -> str:
     return "\n".join(lines)
 
 
+def _smoke_reason(r: PipelineResult) -> str:
+    """Why this smoke story failed, in one line.
+
+    Smoke does not persist anything, so whatever is not printed here is gone
+    (DEVIATIONS 8.38). A run that failed 3 of 4 on a story measuring 100%
+    decodable printed `FAIL 100.0%` with `violations: []` and no reason — the
+    verdict was a moderation rejection and the harness had no way to say so.
+    """
+    if r.passed:
+        return "passed"
+    mod = r.moderation
+    if mod is not None and not mod.approved:
+        bits = [f"moderation {moderation_class(mod)} (layer {mod.layer})"]
+        if mod.blocked_words:
+            bits.append(f"blocked words {mod.blocked_words}")
+        if mod.grammar_note:
+            bits.append(f"grammar note: {mod.grammar_note}")
+        bits.append(f"reason: {mod.reason}")
+        return " · ".join(bits)
+    if r.final_report is not None and r.final_report.decodability < DECODABILITY_GATE:
+        return (
+            f"below the gate at {r.final_report.decodability:.1%} · "
+            f"violations {r.attempts[-1].violations[:8] if r.attempts else []}"
+        )
+    if r.final_report is not None and r.final_report.counts.get("oov"):
+        return f"{r.final_report.counts['oov']} OOV word(s) — the gate requires zero"
+    if r.final_report is not None and len(r.final_report.distinct_story_words) > MAX_STORY_WORDS:
+        return (
+            f"{len(r.final_report.distinct_story_words)} distinct story words over "
+            f"the cap of {MAX_STORY_WORDS}"
+        )
+    return "rewrite budget exhausted without clearing the gate"
+
+
 async def run_smoke(stages: list[int], themes: list[str], n: int, effort: str):
     today = date.today()
     results: list[PipelineResult] = []
@@ -1870,7 +2770,11 @@ async def run_smoke(stages: list[int], themes: list[str], n: int, effort: str):
                         flush=True,
                     )
                     if not r.passed:
+                        print(f"    why: {_smoke_reason(r)}", flush=True)
                         print(f"    violations: {r.attempts[-1].violations[:8]}", flush=True)
+                        # Nothing here is persisted, so the text goes out too or
+                        # the failure is unreproducible (DEVIATIONS 8.38).
+                        print(f"    text: {r.final_text}", flush=True)
 
     print(_fmt(results, today))
     for r in results:
@@ -1881,7 +2785,14 @@ async def run_smoke(stages: list[int], themes: list[str], n: int, effort: str):
     # §14: the smoke gate must fail loudly in CI, not just print a table.
     failures = [r for r in results if not r.passed]
     if failures:
-        raise SystemExit(f"eval-smoke FAILED: {len(failures)}/{len(results)} below gate")
+        # NOT "below gate": a moderation rejection is a verdict on a story that
+        # already cleared the gate, and calling it a gate failure is the same
+        # conflation DEVIATIONS 7.49 keeps out of the full run's exit code.
+        why = Counter(_smoke_reason(r).split(" · ")[0] for r in failures)
+        raise SystemExit(
+            f"eval-smoke FAILED: {len(failures)}/{len(results)} did not pass — "
+            + ", ".join(f"{k} x{v}" for k, v in sorted(why.items()))
+        )
     print("eval-smoke PASSED")
 
 
@@ -1939,7 +2850,10 @@ def main() -> None:
         help=(
             "continue an eval_runs row that never finished. Every item is "
             "committed as it completes, so a matrix killed mid-flight keeps its "
-            "measurements; the STORED config wins over these flags"
+            "measurements. The stored matrix parameters are RESTORED over these "
+            "flags; the models, gate, prices, timeouts and vocabulary are VERIFIED "
+            "against the stored config and a difference exits 3 while cells remain "
+            "(DEVIATIONS 8.31)"
         ),
     )
     f.add_argument("--out", default=None, help="directory for the report (default <repo>/reports)")

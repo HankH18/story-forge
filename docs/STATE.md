@@ -12,12 +12,21 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 | 0 scaffold | `make dev` boots PG16 + FastAPI + Vite. Style-guide tokens confirmed in a real browser (computed styles, not just a 200). |
 | 1 decoder | Pure validator, **93**-GPC inventory, vendored SHA-pinned CMUdict. 18/18 §5.7 goldens. Anti-golden suite + vacuity ratchet (**44.75%**, ceiling 50%) — both sabotage-tested, and the ratchet has now refused a real proposed row (DEVIATIONS 8.12). `wh`→/w/ added at stage 3 (8.13). |
 | 2 precompute | `make seed` idempotent; `make precompute` → **64,290** rows / 12 stages in 1.5s (stage 1 = 157, the tightest, above §18's 150 floor). `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **224** entries, **38** sight words (DEVIATIONS 8.10–8.17). |
-| 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` fills ≥3 per (stage,theme), idempotent. Moderation = free blocklist + Haiku judge. |
+| 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` **targets** ≥3 per (stage,theme) over all 12 stages × 3 themes, idempotent — see the pool row below for what the database actually holds. Moderation = free blocklist + Haiku judge. |
+| warm pool | **`make warm-check` is RED and that is the honest state: 13 of 36 (stage,theme) pairs hold ≥3 servable stories (53 servable in all); stages 7–12 hold none, stage 6 holds one dragons story.** The earlier version of this row said "`make warm` fills ≥3 per (stage,theme)" — false about the command (it defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories over 3 of 12 stages) and still false about the database. The command is fixed and gated (DEVIATIONS 8.40–8.48); the pool needs one `make warm` run, ~$1.30 by `make warm-plan`'s projection (a floor — the high stages are longer), and until then §7's ladder serves those children a lower stage silently and correctly. |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
 
-**API: 643 passed, 1 skipped** (`cd services/api && uv run pytest`; the suite uses
+**API: 686 passed, 2 skipped** (`cd services/api && uv run pytest`; the suite uses
 pytest-randomly and has pre-existing order-dependent failures under a random seed
 — use `-p no:randomly` for a clean baseline).
+**The suite shares one live Postgres, so a concurrent writer makes it lie.** Two
+agents running it at once produced *moving* failures — `test_eval.py` x7, then
+`test_readings`, then `test_auth` — none reproducible alone, because these tests
+sweep real rows (`SELECT … WHERE status = ANY(SERVABLE_STATUSES)`) and delete by id
+window. Before believing a red suite, re-run it against a private copy:
+`docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfscratch'`
+then `DATABASE_URL=…/sfscratch uv run pytest`. The 686/2 above is from exactly that
+(DEVIATIONS 8.47).
 **Web: 110 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers.
 `make test` = `test-api` + `test-web`, and **`test-web` is now typecheck AND
 tests** — it was typecheck alone for five phases, which is why the "395 tests
@@ -28,9 +37,17 @@ Lint: `cd services/api && uv run ruff check storyforge tests`.
 
 ## Commands
 ```
-make dev | test | seed | precompute | warm | eval | eval-smoke
+make dev | test | seed | precompute | warm | warm-check | warm-plan | eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
+`make warm` covers §7's whole matrix — **12 stages x every theme x 3 stories**, the
+defaults are `--stages 1..12 --themes all`, and it is the only step that spends
+money. `make warm-plan` (`--dry-run`) prices it first; **`make warm-check`
+(`--check-coverage`) is the gate and exits non-zero while any (stage,theme) pair
+holds fewer than 3 servable stories.** Run it after every warm run and after
+anything that moves the pool: a partial pool is invisible at runtime, because §7's
+ladder answers an empty pair by silently serving a lower stage (DEVIATIONS
+8.40–8.48).
 `make eval` is the §14 harness and the §1-item-2 check: 12 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
 `reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest

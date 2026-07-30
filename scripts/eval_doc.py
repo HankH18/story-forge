@@ -6,9 +6,26 @@ Every figure below is read out of `eval-{ts}.json`, which the harness wrote from
 the same `aggregate()` the report used. The prose is mine; the numbers are not.
 
 Usage: services/api/.venv/bin/python scripts/eval_doc.py \
-           reports/eval-<ts>.json docs/EVAL.md
+           reports/eval-<ts>.json docs/EVAL.md \
+           [--assume-per-call-timeout SECONDS]
 
 Run from the repo root.
+
+**Two things this file must never do again** (AUDIT-PHASE7 F1/F2/F3,
+DEVIATIONS 8.37/8.39). It must not describe a guarantee the harness does not
+implement — the provenance paragraph used to say `--resume` was "enforced by the
+code rather than by care", which was false, and the code that would have made it
+true landed only with 8.31. And it must not print a figure the run did not record
+as though it had: anything absent from an older run's JSON prints as **not
+recorded**, because a blank where the record is blank is the only way a reader can
+tell a run that fixed the provenance gap from one that had it.
+
+The decoder-limitation rates and the retry split are recomputed here from the
+run's own ITEMS, using `storyforge.eval`'s own functions rather than arithmetic
+re-typed in this file, so a run whose stored aggregate predates DEVIATIONS 8.34
+and 8.35 still gets the corrected denominators without anybody editing the
+recorded rows. `--assume-per-call-timeout` supplies the per-HTTP-attempt budget for
+a run that never recorded one; the document says it was supplied.
 """
 
 import json
@@ -17,21 +34,119 @@ from pathlib import Path
 
 sys.path.insert(0, "services/api")
 
-from storyforge.eval import (  # noqa: E402
+from storyforge.eval import (
     DECODABILITY_BINS,
     _pct,
+    _retry_budget_phrase,
     _table,
     criteria_verdict,
+    decoder_limitation_rates,
+    generation_latency_split,
 )
 
-src, dest = Path(sys.argv[1]), Path(sys.argv[2])
+argv = list(sys.argv[1:])
+assumed_timeout_s: float | None = None
+if "--assume-per-call-timeout" in argv:
+    i = argv.index("--assume-per-call-timeout")
+    assumed_timeout_s = float(argv[i + 1])
+    del argv[i : i + 2]
+
+src, dest = Path(argv[0]), Path(argv[1])
 payload = json.loads(src.read_text())
 run, agg, items = payload["run"], payload["metrics"], payload["items"]
 cfg = run["config"]
 d, c, r, m = agg["decodability"], agg["cost"], agg["rewrite_depth"], agg["moderation"]
-dl, lat = agg["decoder_limitations"], agg["latency_ms"]
+lat = agg["latency_ms"]
 verdict = criteria_verdict(agg)
 ok = all(v[1] for v in verdict)
+
+#: Recomputed from the items rather than read from `agg`, so the denominator is the
+#: scored set for every run including the ones recorded before 8.34.
+dl = decoder_limitation_rates(items)
+by_stage_flags = {
+    _s: decoder_limitation_rates([i for i in items if str(i["stage_id"]) == str(_s)])
+    for _s in agg["by_stage"]
+}
+split = generation_latency_split(
+    items, fallback_timeout_s=cfg.get("generation_timeout_s") or assumed_timeout_s
+)
+prov = cfg.get("provenance") or {}
+NOT_RECORDED = "**not recorded by this run** — see `docs/DEVIATIONS.md` 8.30-8.39"
+
+
+def produced_rate(field: str) -> float:
+    prod = [i for i in items if i["outcome"] != "api_fail"]
+    return (sum(1 for i in prod if i[field]) / len(prod)) if prod else 0.0
+
+
+def commit_cell() -> str:
+    """The commit and the dirty flag, never one without the other.
+
+    AUDIT-PHASE7 F2: this run recorded `559f102`, at which `eval.py` is 102 lines
+    with only a `smoke` subparser — the recorded commit cannot run the command
+    printed above it. A commit alone is not provenance (DEVIATIONS 8.32).
+    """
+    commit = cfg.get("git_commit", "unknown")
+    dirty = prov.get("git_dirty")
+    if dirty is None:
+        return (
+            f"`{commit}` — whether the working tree was dirty is {NOT_RECORDED}, so"
+            f" this commit is not evidence that it contains the code that ran"
+        )
+    if not dirty:
+        return f"`{commit}` — working tree CLEAN, so this commit IS the code that ran"
+    paths = prov.get("git_dirty_paths") or []
+    harness = [p for p in paths if "storyforge/eval.py" in p or "storyforge/pipeline.py" in p]
+    return (
+        f"`{commit}` — **working tree DIRTY** ({prov.get('git_dirty_path_count', len(paths))}"
+        f" path(s){', including the harness itself' if harness else ', none of them the harness'}),"
+        f" so this commit is NOT the code that ran"
+    )
+
+
+def code_cell() -> str:
+    sha = (prov.get("code_sha256") or {}).get("storyforge/eval.py")
+    if not sha:
+        return NOT_RECORDED
+    return f"`{sha[:16]}…` (`storyforge/eval.py`; verify with `git show <commit>:… | shasum -a 256`)"
+
+
+def vocabulary_cell() -> str:
+    v = cfg.get("vocabulary")
+    if not v:
+        return (
+            NOT_RECORDED
+            + " — and this is the gap that already bit: 11 of this run's decodability"
+            " figures stopped reproducing when a concurrent agent re-seeded"
+            " `sight_words` 33 → 38 and added the `wh` GPC (AUDIT-PHASE7 F3)"
+        )
+    return (
+        f"{v['gpc_count']} GPCs `{v['gpcs_sha256'][:12]}…` · "
+        f"{v['sight_word_count']} sight words `{v['sight_words_sha256'][:12]}…` · "
+        f"{v['allowed_words_count']:,} allowed words · "
+        f"{v['cmudict_entries']:,} CMUdict entries"
+    )
+
+
+def timeout_cell() -> str:
+    t = cfg.get("generation_timeout_s")
+    if t is None and assumed_timeout_s is not None:
+        return (
+            f"{assumed_timeout_s:.0f}s — **supplied to this document**, not recorded by"
+            f" the run (DEVIATIONS 8.35)"
+        )
+    if t is None:
+        return NOT_RECORDED
+    rr = cfg.get("sdk_max_retries")
+    return f"{t:.0f}s x up to {(rr or 0) + 1} attempts (`SDK_MAX_RETRIES={rr}`)"
+
+
+def model_census_cell() -> str:
+    census = (agg.get("models_observed") or {}).get("generation") or {}
+    if not census:
+        return NOT_RECORDED + " (AUDIT-PHASE7 F1 — the claim above is unverifiable)"
+    body = ", ".join(f"`{k}` x{v}" for k, v in census.items())
+    return body + (" — **MIXED matrix**" if len(census) > 1 else " — one model, confirmed per item")
 
 out: list[str] = []
 W = out.append
@@ -70,17 +185,37 @@ W(
 )
 W("")
 if not coverage_ok:
+    _budget = cfg.get("generation_timeout_s") or assumed_timeout_s
+    _retries = cfg.get("sdk_max_retries")
     W(
         f"**`make eval` nonetheless exits non-zero, and the reason is availability,"
         f" not decodability.** {agg['outcomes'].get('api_fail', 0)} of"
-        f" {agg['cells_planned']} cells never produced any text: §7 sets the"
-        f" generation node's timeout at 30s, the SDK retries twice, and at the"
-        f" 120-200 word stages a single generation frequently needs longer than"
-        f" 30s — so those cells burned 3 x 30s and raised `APITimeoutError`. That"
-        f" is a real defect and it is reported as one. It is not evidence against"
-        f" §0's thesis, and this report is written so that neither reading can"
-        f" borrow the other's number: section 2 keeps the two kinds of criterion"
-        f" on separate lines."
+        f" {agg['cells_planned']} cells never produced any text."
+        + (
+            f" The generation node's per-HTTP-attempt budget on this run was"
+            f" {_budget:.0f}s"
+            + (
+                ""
+                if cfg.get("generation_timeout_s")
+                else " (supplied to this document, not recorded by the run)"
+            )
+            + (
+                f", and the SDK retries up to {_retries} times, so a dead cell costs"
+                f" {(_retries or 0) + 1} attempts plus backoff"
+                if _retries is not None
+                else ", and the SDK retry budget that multiplies it is "
+                + NOT_RECORDED
+            )
+            + "."
+            if _budget
+            else " The per-attempt timeout in force is " + NOT_RECORDED + "."
+        )
+        + " That is a real defect and it is reported as one. It is not evidence"
+        " against §0's thesis, and this report is written so that neither reading"
+        " can borrow the other's number: section 2 keeps the two kinds of"
+        " criterion on separate lines, and section 7 keeps wall-clock latency on a"
+        " separate line from the retries inside it — which the first version of"
+        " this report did not do (AUDIT-PHASE7 F7, DEVIATIONS 8.35)."
     )
     W("")
 W(
@@ -103,6 +238,7 @@ trail = cfg.get("resumed") or []
 # re-derived the report from the stored measurements. Counting those as
 # "sittings" would overstate how fragmented the data collection was.
 generating = [t for t in trail if t["items_already_recorded"] < agg["cells_planned"]]
+drift = [x for t in trail for x in (t.get("config_drift") or [])]
 if trail:
     W(
         f"**Provenance.** This matrix was generated in"
@@ -110,19 +246,92 @@ if trail:
         f" invocation was killed by its launcher at cell"
         f" {generating[0]['items_already_recorded'] if generating else agg['cells_planned']}"
         f" of {agg['cells_planned']}. Every `eval_run_items` row is committed as"
-        f" its story completes, so `--resume` ran only the remainder, against the"
-        f" **stored** config — same model, same gate, same `n`, same pricing date,"
-        f" enforced by the code rather than by care. It is one matrix, not two runs"
-        f" stapled together."
+        f" its story completes, so `--resume` ran only the remainder. It is one"
+        f" matrix, not two runs stapled together."
     )
     W("")
+    # What a resume does with the stored config, stated as the mechanism rather
+    # than as a guarantee. The sentence this replaces claimed the model and the
+    # gate were "enforced by the code rather than by care"; they were not — the
+    # stored config won the record and the environment won the behaviour, so one
+    # supported command could produce a report naming a model it had not used
+    # (AUDIT-PHASE7 F1). 8.31 is the code that closes it.
+    W(
+        "On a resume the matrix parameters — stages, themes, `n`, effort, pricing"
+        " date, `--cold`, enrichment — are RESTORED from the stored config, which is"
+        " enforcement because they are arguments. The values that come from the"
+        " environment or from a module constant cannot be restored by passing them:"
+        " the model ids, the price sheets, the gate, the rewrite budget, the prompt"
+        " allowlist size, the timeouts and the vocabulary fingerprint. Those are"
+        " VERIFIED against the stored config, and a difference REFUSES the resume"
+        " with exit code 3 while any cell still has to run; when the run is already"
+        " complete and only the report can change, the difference is printed instead"
+        " (DEVIATIONS 8.31). `concurrency` and `budget_usd` belong to the sitting,"
+        " not to the run, and are recorded on each trail entry."
+    )
+    W("")
+    if not any("config_drift" in t for t in trail):
+        W(
+            "**This run predates that check.** Its resumes ran before DEVIATIONS"
+            " 8.31, so the stored config was written back over freshly computed"
+            " values without either enforcing or verifying them, and nothing in the"
+            " record shows which model each half of the matrix used. That is"
+            " AUDIT-PHASE7 F1, and it is why section 3 reports the per-item model"
+            " census as not recorded (DEVIATIONS 8.30)."
+        )
+        W("")
+    if drift:
+        _differs = sorted({x["key"] for x in drift if not x.get("missing")})
+        _missing = sorted({x["key"] for x in drift if x.get("missing")})
+        W(
+            "**CONFIG DRIFT on a re-derivation.**"
+            + (
+                f" Differed from the live process: {', '.join('`' + k + '`' for k in _differs)}."
+                if _differs
+                else ""
+            )
+            + (
+                f" Never recorded by this run, so uncheckable:"
+                f" {', '.join('`' + k + '`' for k in _missing)}."
+                if _missing
+                else ""
+            )
+            + (
+                " The values in force on the sitting that ran are on its trail entry"
+                " under `unrecorded_live_values`."
+                if _missing
+                else ""
+            )
+            + " Every figure below is the measurement recorded at run time and is"
+            " deliberately not restated against the current values."
+        )
+        W("")
     W(
         f"A further {len(trail) - len(generating)} invocation(s) re-derived this"
-        f" report from the recorded measurements without calling the API at all"
-        f" (`--resume` on a complete run is idempotent, and re-finalising it"
-        f" reproduced the identical verdict and exit code — which is the cheapest"
-        f" available check that the report is a pure function of the data). Full"
-        f" trail: `{json.dumps(trail)}`"
+        f" report from the recorded measurements without calling the API at all."
+        f" `--resume` on a complete run is idempotent, and re-finalising it"
+        f" reproduced the identical verdict and exit code. That checks that the"
+        f" **verdict** is a pure function of the recorded items — it is silent about"
+        f" the config table, which the same exercise proved could disagree with the"
+        f" process that produced it. Full trail: `{json.dumps(trail)}`"
+    )
+    W("")
+if not cfg.get("vocabulary"):
+    # The point of the fingerprint is that a later reader can tell whether two runs
+    # are measurements of the same thing. This run has no fingerprint, so the
+    # comparison has to be spelled out in prose instead — once (DEVIATIONS 8.33).
+    W(
+        "**This matrix is not comparable to a later one, and the record cannot say"
+        " so by itself.** It measured against the vocabulary as it stood at the time:"
+        " 33 sight words and a 92-GPC inventory. Both have since moved — `of`, `so`,"
+        " `do`, `be` and `from` became sight words and `wh`→/w/ was added"
+        " (DEVIATIONS 8.10-8.13) — along with the generation timeout (8.7), the"
+        " length instruction (8.22), the grammar judge (8.20) and the blocklist"
+        " (8.14). A run after those changes samples a different population, and every"
+        " figure here should be read as the measurement of a different instrument"
+        " rather than as a baseline to diff against. Runs from DEVIATIONS 8.33 onward"
+        " carry `config.vocabulary`, so that judgement stops depending on someone"
+        " remembering this paragraph."
     )
     W("")
 W("---")
@@ -140,7 +349,15 @@ W(
 )
 W("```")
 W("")
-W("`make eval` runs exactly that line.")
+W(
+    "`make eval` runs the first two lines — the matrix and `--cold`. It does NOT pass"
+    " `--effort`, `--budget` or `--concurrency` (the values above are the defaults it"
+    " inherits) and it does NOT pass `--pricing-date`, which defaults to the day of"
+    " the run: the date in the line above is the date THIS run priced at, not a"
+    " constant. A run on or after 2026-09-01 will price at Sonnet 5's standard rate"
+    " with no flag change, which is why the date is printed rather than assumed"
+    " (AUDIT-PHASE7 F10)."
+)
 W("")
 W(
     _table(
@@ -153,8 +370,12 @@ W(
                 "pipeline time (summed per story)",
                 f"{agg.get('pipeline_seconds', 0) / 60:.0f} min",
             ],
-            ["git commit", f"`{cfg['git_commit']}`"],
-            ["generation model", f"`{cfg['models']['generation']}`"],
+            ["git commit", commit_cell()],
+            ["harness code sha256", code_cell()],
+            ["vocabulary the gate ran against", vocabulary_cell()],
+            ["per-HTTP-attempt generation timeout", timeout_cell()],
+            ["generation model (config's claim)", f"`{cfg['models']['generation']}`"],
+            ["generation model (the items' record)", model_census_cell()],
             ["fast model (moderation)", f"`{cfg['models']['fast']}`"],
             [
                 "pricing date",
@@ -163,12 +384,12 @@ W(
             [
                 "generation price",
                 f"${cfg['prices']['generation']['input_per_mtok']} in / "
-                f"${cfg['prices']['generation']['output_per_mtok']} out per Mtok",
+                + f"${cfg['prices']['generation']['output_per_mtok']} out per Mtok",
             ],
             [
                 "fast price",
                 f"${cfg['prices']['fast']['input_per_mtok']} in / "
-                f"${cfg['prices']['fast']['output_per_mtok']} out per Mtok",
+                + f"${cfg['prices']['fast']['output_per_mtok']} out per Mtok",
             ],
             ["stages", ", ".join(str(s) for s in cfg["stages"])],
             ["themes", ", ".join(cfg["themes"])],
@@ -177,7 +398,7 @@ W(
             [
                 "gate (never lowered, §0)",
                 f"{cfg['gate']:.0%} decodability AND 0 OOV AND <= {cfg['max_story_words']} "
-                "distinct story words",
+                + "distinct story words",
             ],
             ["rewrite budget (§7)", cfg["max_rewrites"]],
             ["prompt allowlist size (§6)", cfg["prompt_word_limit"]],
@@ -420,7 +641,18 @@ W(
     )
 )
 W("")
-if run.get("post_intro_cost_usd"):
+_pi = run.get("post_intro") or {}
+if _pi.get("unpriced_models"):
+    # F13.4: `_reprice` used to return 0.0 on a missing price sheet, so an unpriced
+    # model reported a $0.00 future cost. "We could not price this" is not "free".
+    W(
+        f"**This run could not be repriced for {_pi['on']}**: no price sheet for"
+        f" {', '.join('`' + x + '`' for x in _pi['unpriced_models'])}. Reported as"
+        f" unpriceable rather than as $0.00 (DEVIATIONS 8.36); the partial total over"
+        f" the models that do have a sheet is ${_pi.get('partial_total_usd') or 0:.4f}."
+    )
+    W("")
+elif run.get("post_intro_cost_usd"):
     W(
         f"**The pricing date matters.** Sonnet 5's introductory $2/$10 rate expires"
         f" 2026-08-31. The same token counts re-priced at the standard $3/$15"
@@ -458,7 +690,11 @@ W(
     _table(
         ["§7 node", "p50", "p95"],
         [
-            ["GENERATING (first attempt)", f"{lat['generating_p50']:.0f} ms", f"{lat['generating_p95']:.0f} ms"],
+            [
+                "GENERATING (wall clock, retries INCLUDED)",
+                f"{lat['generating_p50']:.0f} ms",
+                f"{lat['generating_p95']:.0f} ms",
+            ],
             ["REWRITING (per rewrite)", f"{lat['rewriting_p50']:.0f} ms", f"{lat['rewriting_p95']:.0f} ms"],
             ["VALIDATING (the gate — pure function)", f"{lat['validating_p50']:.2f} ms", f"{lat['validating_p95']:.2f} ms"],
             ["MODERATING (Haiku)", f"{lat['moderating_p50']:.0f} ms", f"{lat['moderating_p95']:.0f} ms"],
@@ -467,6 +703,49 @@ W(
     )
 )
 W("")
+# The GENERATING row above is wall time around ONE SDK call, and that call carries
+# a retry budget — so it could be three HTTP attempts. The first version of this
+# report quoted it as a generation time and blamed the §1.6 miss on long stories,
+# while separately filing the timeout as the availability defect: one defect priced
+# twice, in a document that promises the two readings stay on separate lines
+# (AUDIT-PHASE7 F7, DEVIATIONS 8.35).
+if split.get("timeout_source") == "unknown":
+    W(
+        "**The retry-free subset cannot be computed from this run's record**: no"
+        " per-HTTP-attempt timeout was stored on its items, so the row above is the"
+        " only latency available and it includes any SDK-internal retries. Re-run"
+        " this generator with `--assume-per-call-timeout SECONDS` to split it against"
+        " a budget supplied from outside the record (DEVIATIONS 8.35)."
+    )
+    W("")
+else:
+    _w, _cl, _ov = split["wall_clock"], split["no_clock_retry"], split["over_timeout"]
+    _budget_txt = ", ".join(f"{b:.0f}s" for b in split.get("per_call_timeout_s") or [])
+    _src = (
+        "recorded per item"
+        if split["timeout_source"] == "recorded"
+        else "**supplied to this document**, not recorded by the run"
+    )
+    W(
+        f"**Two GENERATING numbers, because one number was measuring two things.**"
+        f" The row above is wall clock around a single SDK call, and that call"
+        f" {_retry_budget_phrase(split.get('sdk_max_retries'))}, so it can contain"
+        f" several HTTP attempts. Against a per-attempt budget of {_budget_txt}"
+        f" ({_src}), **{_ov['n']} of {_w['n']}** generations ({_pct(_ov['share'])}) ran"
+        f" longer than one attempt could — each of those contains at least one attempt"
+        f" that was killed by the clock and paid for. Over the {_cl['n']} that did"
+        f" not, p50 is **{_cl['p50']:.0f} ms** and p95 **{_cl['p95']:.0f} ms**, against"
+        f" the wall-clock p95 of {_w['p95']:.0f} ms."
+    )
+    W("")
+    W(
+        "The subset is named *no clock-driven retry*, not *single attempt*: a fast 429"
+        " or 5xx retry still hides inside a fast call, so it is a bound on retry-free"
+        " latency rather than a proof of one attempt (DEVIATIONS 8.35). Exact"
+        " per-attempt counts need `x-stainless-retry-count` off the raw response,"
+        " which is a change to the generation path and is named there as deferred."
+    )
+    W("")
 meets = lat["total_p95"] < 12_000
 W(
     f"§1 item 6 asks for cold generation p95 < 12s. Measured p95 is"
@@ -475,10 +754,14 @@ W(
     + (
         ""
         if meets
-        else " Per-stage p95 is in the table in section 4: the miss is concentrated"
-        " in the long-story stages, where the target length is 120-200 words."
-        " Warm-pool serving is unaffected — §7 makes the demo path a database read,"
-        " and that latency is not measured here."
+        else " Per-stage p95 is in the table in section 4. The miss is NOT attributed"
+        " here to long stories: DEVIATIONS 8.6/8.8 measured latency as a function of"
+        " output tokens (r = +0.997) and barely of stage (r = +0.50), and the split"
+        " above shows how much of this figure is retry rather than generation. §1.6 is"
+        " recorded as unmet and unreachable as written — 12s buys roughly 1,200 tokens"
+        " and a stage-12 story is 1,700-3,300 — and the criterion is not relaxed to"
+        " match. Warm-pool serving is unaffected either way: §7 makes the demo path a"
+        " database read, and that latency is not measured here."
     )
 )
 W("")
@@ -574,37 +857,55 @@ W(
 )
 W("")
 W(
+    f"**Denominator: SCORED words — {dl['scored_word_total']:,} of"
+    f" {dl['word_token_total']:,} word tokens.** A sight or story word is classified"
+    f" before any alignment is attempted (`decoder/validate.py`), so it can carry none"
+    f" of these flags; the first version of this report divided by every word token,"
+    f" which put roughly twice as many words in the denominator as could ever appear"
+    f" in the numerator and reported §18's designated alarm at about half strength"
+    f" (AUDIT-PHASE7 F6, DEVIATIONS 8.34). The rates below are recomputed from this"
+    f" run's own recorded counts; the recorded rows were not edited. The population"
+    f" rate is flags over scored words; the mean-per-story column is beside it because"
+    f" a mean weights a 30-word stage-1 story equally with a 200-word stage-12 one."
+)
+W("")
+W(
     _table(
-        ["flag", "what it means", "total word instances", "mean rate per story"],
+        ["flag", "what it means", "total instances", "rate over SCORED words", "mean per story"],
         [
             [
                 "`schwa_relaxed`",
                 "§5.2.6 let an unstressed vowel match its citation GPC",
                 dl["schwa_relaxed_total"],
-                _pct(dl["schwa_relaxed_rate_mean"]),
+                _pct(dl["schwa_relaxed_rate_scored"]),
+                _pct(dl["schwa_relaxed_rate_scored_mean"]),
             ],
             [
                 "`ambiguity_flag`",
                 "more than one legal alignment existed; any was taken",
                 dl["ambiguity_total"],
-                _pct(dl["ambiguity_rate_mean"]),
+                _pct(dl["ambiguity_rate_scored"]),
+                _pct(dl["ambiguity_rate_scored_mean"]),
             ],
             [
                 "`heteronym_flag`",
                 "multiple pronunciations, only some decodable — §5.2.5 may over-credit",
                 dl["heteronym_total"],
-                _pct(dl["heteronym_rate_mean"]),
+                _pct(dl["heteronym_rate_scored"]),
+                _pct(dl["heteronym_rate_scored_mean"]),
             ],
             [
                 "`alignable=False`",
                 "**the §18 alarm** — the inventory cannot spell the word at any stage",
                 dl["unalignable_total"],
-                _pct(dl["unalignable_rate_mean"]),
+                _pct(dl["unalignable_rate_scored"]),
+                _pct(dl["unalignable_rate_scored_mean"]),
             ],
             [
                 "non-minimal missing set",
                 "the minimal-missing-GPC search hit its bound and approximated",
                 dl["non_minimal_missing_total"],
+                "—",
                 "—",
             ],
         ],
@@ -624,38 +925,64 @@ else:
         " cannot spell."
     )
 W("")
-W(
-    "**The actionable item in that list was `of`, and it has since been fixed.**"
-    " It is among the most frequent words in English and the GPC inventory cannot"
-    " spell it at any stage \u2014 CMUdict gives it one pronunciation, `AH1 V`, so"
-    " an alignment needs `f`\u2192/v/, which no scope & sequence teaches and which"
-    " `tests/decoder/test_anti_golden.py::NEVER_DECODABLE` forbids by name. At the"
-    " time of this matrix it was **not a sight word at any stage** either, so"
-    " every story reaching for it spent part of its 5% violation budget on a word"
-    " a child meets constantly. `of` is now a stage-2 sight word, together with"
-    " `so`, `do`, `be` and `from`, and `wh`\u2192/w/ was added to the inventory"
-    " (docs/DEVIATIONS.md 8.10\u20138.13). Re-scoring this run\u2019s 169 stored"
-    " stories against the corrected vocabulary improved 12 of them and made none"
-    " worse; the figures ABOVE are the measurements as recorded at run time and"
-    " are deliberately not restated. A future matrix should show `of` gone from"
-    " this list."
-    "\n\nOf the other words above, only `come` is a sight word (stage 6), and it"
-    " appears here at stage 5, before it unlocks, which is the list working"
-    " correctly."
-)
+# Conditional on the DATA, not on the reader's memory: `of` was the one actionable
+# item in the first matrix's unalignable list and was fixed as a sight word
+# (DEVIATIONS 8.10). Its absence from a later run is the fix landing, and printing
+# the paragraph either way would eventually make this document describe a defect
+# the run does not have.
+if "of" in dl["unalignable_words"]:
+    W(
+        "**The actionable item in that list was `of`, and it has since been fixed.**"
+        " It is among the most frequent words in English and the GPC inventory cannot"
+        " spell it at any stage \u2014 CMUdict gives it one pronunciation, `AH1 V`, so"
+        " an alignment needs `f`\u2192/v/, which no scope & sequence teaches and which"
+        " `tests/decoder/test_anti_golden.py::NEVER_DECODABLE` forbids by name. At the"
+        " time of this matrix it was **not a sight word at any stage** either, so"
+        " every story reaching for it spent part of its 5% violation budget on a word"
+        " a child meets constantly. `of` is now a stage-2 sight word, together with"
+        " `so`, `do`, `be` and `from`, and `wh`\u2192/w/ was added to the inventory"
+        " (docs/DEVIATIONS.md 8.10\u20138.13). Re-scoring this run\u2019s 169 stored"
+        " stories against the corrected vocabulary improved 12 of them and made none"
+        " worse; the figures ABOVE are the measurements as recorded at run time and"
+        " are deliberately not restated. A future matrix should show `of` gone from"
+        " this list."
+        "\n\nOf the other words above, only `come` is a sight word (stage 6), and it"
+        " appears here at stage 5, before it unlocks, which is the list working"
+        " correctly."
+    )
+else:
+    W(
+        "**`of` is absent from that list, and that is the previous matrix's one"
+        " actionable finding closing.** It was the most frequent word the 92-GPC"
+        " inventory could not spell at any stage and was not a sight word either, so"
+        " every story reaching for it spent part of its 5% violation budget; it is a"
+        " stage-2 sight word now, with `so`, `do`, `be` and `from`"
+        " (docs/DEVIATIONS.md 8.10\u20138.13). Whatever remains above is the honest"
+        " residue \u2014 8.18 records which of those words were measured against the"
+        " inventory ratchet and deliberately NOT added."
+    )
 W("")
-W("### Per stage")
+W("### Per stage (every rate over SCORED words)")
 W("")
 W(
     _table(
-        ["stage", "schwa", "ambiguity", "heteronym", "unalignable", "unalignable words"],
+        [
+            "stage",
+            "scored words",
+            "schwa",
+            "ambiguity",
+            "heteronym",
+            "unalignable",
+            "unalignable words",
+        ],
         [
             [
                 s,
-                _pct(v["schwa_relaxed_rate"]),
-                _pct(v["ambiguity_rate"]),
-                _pct(v["heteronym_rate"]),
-                _pct(v["unalignable_rate"]),
+                by_stage_flags[s]["scored_word_total"],
+                _pct(by_stage_flags[s]["schwa_relaxed_rate_scored"]),
+                _pct(by_stage_flags[s]["ambiguity_rate_scored"]),
+                _pct(by_stage_flags[s]["heteronym_rate_scored"]),
+                _pct(by_stage_flags[s]["unalignable_rate_scored"]),
                 ", ".join(v["unalignable_words"]) or "—",
             ]
             for s, v in agg["by_stage"].items()
@@ -725,11 +1052,27 @@ W(
     _table(
         ["metric", "value"],
         [
-            ["stories inside the stage's target word range", _pct(agg["length"]["compliance_rate"])],
+            [
+                "inside the stage's target range (of ATTEMPTED cells)",
+                _pct(agg["length"]["compliance_rate"]),
+            ],
+            [
+                "inside the stage's target range (of PRODUCED stories)",
+                _pct(agg["length"].get("compliance_rate_produced") or produced_rate("length_compliant")),
+            ],
             ["median word count", agg["length"]["word_count_p50"]],
             ["mean type-token ratio", f"{agg['length']['type_token_ratio_mean']:.3f}"],
         ],
     )
+)
+W("")
+W(
+    "Both denominators are printed because they answer different questions, and an"
+    " unlabelled one is AUDIT-PHASE7 F9 (DEVIATIONS 8.34). A cell that produced no"
+    " text is not length-compliant, so the ATTEMPTED figure is the one that counts"
+    " availability honestly; the PRODUCED figure is the generation quality of the text"
+    " that exists. The same caveat applies to the per-stage “pass rate”"
+    " column in section 4, which is over attempted cells."
 )
 W("")
 W(
@@ -830,7 +1173,25 @@ W(
     "8. **The admin portal view.** §14 requires the portal to read these tables"
     " rather than duplicate the logic. The tables and the CLI exist; §9's"
     " `GET /api/admin/eval-runs` endpoints and the §11 admin views are Phase 8 and"
-    " are **not built**."
+    " are **not built**.\n"
+    "9. **Whether the persisted segments reconstruct the text that was scored.**"
+    " `persist_eval_story` writes `_split_segments(final_text)` and nothing checks the"
+    " round-trip, which is the exact shape of the `warm.persist` grammar defect"
+    " (STATE, DEVIATIONS 4.12). The Phase 7 audit verified the round-trip holds for"
+    " all 169 stories, so this is a missing GUARD rather than a live defect — but the"
+    " only thing that would catch a regression is"
+    " `tests/test_eval.py::test_the_gate_still_agrees_with_what_the_harness_recorded`,"
+    " and that test compares against the CURRENT vocabulary.\n"
+    "10. **Whether the untrusted-generator guard ever fired.** §11's intersection is"
+    " what stops the model shrinking its own denominator, and the model's raw"
+    " `story_words_used` claim goes to the Langfuse span but to no column, so the run"
+    " can show the guard is sound (0 stories carry an unoffered story word) and cannot"
+    " show it did work (AUDIT-PHASE7 F12).\n"
+    "11. **The selection effect of the cells that produced nothing.** Decodability is"
+    " measured on the cells that produced text; when some did not, they are not a"
+    " random sample — the Phase 7 audit measured the resulting bias for this matrix at"
+    " roughly 0.03 SD and bounded the worst case, and that argument belongs with the"
+    " numbers rather than being asserted (AUDIT-PHASE7 F8)."
 )
 W("")
 
@@ -838,10 +1199,32 @@ W("## 15. Re-running and comparing")
 W("")
 W(
     "The run is reproducible in configuration, not in output — the model is not"
-    " deterministic. `eval_runs.config` holds the matrix, the model ids, the pricing"
-    " date, the gate, the rewrite budget and the git commit, so two runs are"
-    " comparable as distributions. `--pricing-date` is explicit precisely so a cost"
-    " figure regenerated later cannot silently disagree with the one printed here."
+    " deterministic."
+    + (
+        " For runs from DEVIATIONS 8.32-8.33 onward — which does NOT include this"
+        " one, see section 1 —"
+        if not cfg.get("vocabulary")
+        else ""
+    )
+    + " `eval_runs.config` holds the matrix, the model ids, the pricing"
+    " date, the gate, the rewrite budget, the timeouts, the git commit **with a"
+    " dirty-tree flag and a content hash of the code that ran**, and **a fingerprint"
+    " of the vocabulary the gate was computed against** — so two runs are"
+    " comparable as distributions, and a reader can tell when they are not"
+    " (DEVIATIONS 8.32-8.33). Each item additionally records the model every call was"
+    " made with and the price sheet applied to it, so no claim about the model rests"
+    " on the config table alone (8.30). `--pricing-date` is explicit precisely so a"
+    " cost figure regenerated later cannot silently disagree with the one printed"
+    " here."
+)
+W("")
+W(
+    "`--resume RUN_ID` restores the matrix parameters and **verifies** everything it"
+    " cannot restore, refusing with exit code 3 rather than continuing one matrix"
+    " under a different model, gate, price sheet, timeout or vocabulary (8.31)."
+    " Comparing two runs starts with their `config.vocabulary` and"
+    " `config.provenance.code_sha256`: if either differs, the two distributions are"
+    " measurements of different things."
 )
 W("")
 W(
@@ -850,7 +1233,21 @@ W(
     f"{c['total_usd']:.2f}, ~{agg.get('pipeline_seconds', 0) / 60:.0f} min of pipeline time\n"
     "make eval EVAL_ARGS=\"--estimate-only\"      # project the spend, no API call\n"
     "make eval-smoke                            # 4-story regression gate, ~$0.06\n"
+    "\n"
+    "# this document, regenerated from the run's own JSON — never hand-edited\n"
+    "services/api/.venv/bin/python scripts/eval_doc.py reports/eval-<ts>.json docs/EVAL.md\n"
     "```"
+)
+W("")
+W(
+    f"_Generated by `scripts/eval_doc.py` from `{src.name}`"
+    + (
+        f", with the per-HTTP-attempt timeout supplied as {assumed_timeout_s:.0f}s"
+        f" because the run recorded none."
+        if assumed_timeout_s is not None and not cfg.get("generation_timeout_s")
+        else "."
+    )
+    + "_"
 )
 W("")
 

@@ -10,7 +10,7 @@ WEB := apps/web
 
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
-        migrate seed precompute warm eval eval-smoke codegen clean
+        migrate seed precompute warm warm-check warm-plan eval eval-smoke codegen clean
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -68,13 +68,44 @@ seed: migrate ## Load stages, GPCs and sight words (§4, Appendix A)
 precompute: ## Build the allowed_words table (§5.4)
 	cd $(API) && uv run python -m storyforge.precompute
 
-warm: ## Pre-generate the warm story pool (§7)
+# §7's matrix is EVERY (stage, theme) pair, and the defaults now say so
+# (`--stages 1..12 --themes all`). They said `1,2,3` / `dragons` for five phases,
+# so this argument-free target filled 3 of 12 stages and 1 of 3 themes while
+# docs/STATE.md claimed ">=3 per (stage,theme)" — and because §7's ladder answers
+# an empty pair by serving a LOWER stage, silently and correctly, nothing reported
+# it. §17's demo is dragons at stage 3, the one cell that was covered, so the demo
+# passed on a nine-empty-stage pool (AUDIT-PHASE7 F4, DEVIATIONS 8.40).
+#
+# Idempotent: `pool_depth` fills only the shortfall. `make warm-plan` prices it
+# first; `make warm-check` is the gate and must be run afterwards.
+warm: ## Pre-generate the warm story pool over §7's full 12 x 3 matrix (SLOW, spends money)
 	cd $(API) && uv run python -m storyforge.warm
+
+# The guard, not a reminder (DEVIATIONS 8.41). Non-zero while any (stage, theme)
+# pair holds fewer than 3 servable stories, which is the only way a partial pool is
+# detectable — at runtime it looks like a working product serving fallbacks. Costs
+# nothing: one SQL query, no API client. The module flag is what docs/DEPLOY.md §4
+# calls, because that step runs in a DigitalOcean console where `make` does not
+# exist; this target is the local wrapper.
+warm-check: ## Refuse a partial warm pool: non-zero while any (stage, theme) is below §7's floor
+	cd $(API) && uv run python -m storyforge.warm --check-coverage
+
+warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
+	cd $(API) && uv run python -m storyforge.warm --dry-run
 
 # §14's documented command line, verbatim. 12 stages x 3 themes x 5 stories is
 # §1 item 2's acceptance matrix, so this target IS the §1 item 2 check: it exits
 # non-zero when the criterion is not met and when the spend cap is reached, and
 # writes reports/eval-{ts}.md either way. Never a silent success.
+# Exit codes: 0 pass · 1 criteria not met or run aborted · 2 spend cap ·
+# 3 a `--resume` refused because the live config differs from the stored one
+# (DEVIATIONS 8.31).
+# `--pricing-date` is deliberately NOT passed and defaults to today, so a run on or
+# after 2026-09-01 prices at Sonnet 5's standard rate: freezing a date in this file
+# would price every future run against a stale sheet. The report prints the date it
+# used, which is what makes the difference visible (AUDIT-PHASE7 F10).
+# `reports/` is gitignored, so the run prints the `scripts/eval_doc.py` line that
+# regenerates the committed docs/EVAL.md from its own JSON (DEVIATIONS 8.39).
 # `make eval EVAL_ARGS="--estimate-only"` projects the spend with no API call.
 eval: ## Full eval harness run across stages and themes (§14)
 	cd $(API) && uv run python -m storyforge.eval run \

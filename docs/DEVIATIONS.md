@@ -3127,3 +3127,545 @@ demand, and `friend` is already in `NEVER_DECODABLE` by name. `come` appears in 
 list at stage 5 while being a sight word from stage 6, which is the list working
 correctly and not a defect.
 
+
+---
+
+## Phase 8 — the warm pool's coverage (`docs/AUDIT-PHASE7.md` F4)
+
+Numbered 8.40-8.49 to stay clear of every block above. Logged **before** the
+changes, per §0. Every claim marked **PROVED** was measured in this repo with the
+command shown; everything else is reasoning and is labelled **ASSUMED**.
+
+The defect, restated so the fix can be judged against it: `warm.py:1413-1414`
+defaults `--stages 1,2,3 --themes dragons`, the `warm` Makefile target passes no
+arguments, and `docs/DEPLOY.md:127` hands a first-deploy operator exactly
+`python -m storyforge.warm` under the description "pre-generate the story pool
+(§7)". With `TARGET_PER_PAIR = 3` that is 9 stories over 3 of 12 stages and 1 of 3
+themes, while `docs/STATE.md:15`, `warm.py`'s own module docstring and §7 itself
+all say "≥3 per (stage, theme)". §17's demo item 3 is *dragons at stage 3* — the
+one cell the default covers — so the demo passes on a deployment where nine stages
+hold nothing, and the §7 ladder degrades to a lower stage silently and correctly,
+which is precisely why nobody notices.
+
+**8.40 — The default becomes §7's full matrix (`--stages 1..12 --themes all`),
+rather than a second `warm-all` target, a required argument, or a doc note.**
+
+Four options were on the table and the choice is against three of them, for
+reasons that are about *who is holding the checklist*, not about elegance.
+
+- **A second target (`make warm-all` / `--full`)** leaves the trap exactly where
+  it is. The finding is not "the operator picked the wrong command"; it is that
+  the command DEPLOY.md prints is the defective one. Adding a second target means
+  the protection is again "DEPLOY.md names the right one", which is the doc
+  discipline that already failed here — and DEPLOY.md §4 runs the module directly
+  in a DigitalOcean console, where `make` does not exist, so a Makefile-only
+  distinction is invisible on the deploy path.
+- **Refusing to run without arguments** converts one silent failure into a
+  guaranteed stumble for every existing caller, and — worse — it makes the
+  operator *type a matrix*, which is an invitation to paste `--stages 1,2,3` from
+  a stale example and be back where we started, now with the wrong matrix
+  recorded in shell history as a deliberate choice.
+- **A doc note** is what §18's floor-style guards exist to replace. A sentence
+  asking the operator to be careful is not a control.
+
+What the default should be is not really a judgement call: three documents and
+the spec already assert the full matrix. The code was the outlier. Spelled
+`1..12` / `all` — the same strings `storyforge/eval.py:77-78` uses — so the
+documented line and the running line cannot drift apart in the way
+`docs/EVAL.md` F10 describes for `--pricing-date`.
+
+The cost objection is real and is answered by mechanism, not by hope: `pool_depth`
+already makes the run fill only the shortfall (**PROVED** — 11 of the 36 pairs
+are already at target and are skipped, so a re-run costs nothing for them), `--dry-run` (8.45) prices the run before it is paid for, and a developer
+who wants the old cheap slice passes `--stages 1,2,3 --themes dragons`
+explicitly, which is one line of habit and is now *visible* rather than implied.
+
+**8.41 — The guard is a refusal in the module, not a step in the Makefile:
+`python -m storyforge.warm --check-coverage` exits non-zero while any (stage,
+theme) pair is below the target.**
+
+§18's pattern (the vacuity ratchet, the stage-1 allowlist floor, `run_warm`'s own
+non-zero exits) is a check that *refuses*. The placement is the load-bearing part:
+DEPLOY.md §4 is executed in a DO web console with `cd /app/services/api` and bare
+`python -m …` invocations, so a `make warm-check` target alone would not exist on
+the machine where it matters. The Makefile target is added too, for local use, but
+it is a wrapper over the module flag and not the guard itself.
+
+Costs nothing and calls nothing: one grouped SQL query, no API client is
+constructed. **PROVED** below.
+
+**8.42 — Coverage counts `warm|complete` (servable); `pool_depth` keeps counting
+`warm`. Two denominators, on purpose, and the difference is stated because a
+single unexplained mismatch is how F1-shaped defects start.**
+
+`pool_depth` (`warm.py:107-116`) counts `status='warm'` because it is a *refill*
+policy — §7 asks for generate-ahead, so a story that a child has read
+(`warm → complete`, `readings.py:903`) should be replaced. The coverage gate
+counts `SERVABLE_STATUSES` (`api/stories.py:105`) because it answers a different
+question: *can a child at this (stage, theme) be served their own stage and
+theme?* `_SERVE_SQL` serves `warm|complete`, so servable is the child-facing
+number and warm-only would fail the gate on a pool that is working perfectly —
+e.g. stage 5 / dragons is 2 warm + 1 complete right now, which is 3 servable.
+
+Consequence, stated rather than discovered later: coverage can pass while
+`pool_depth` still wants to generate. That is the two policies doing their
+separate jobs, not an inconsistency. The gate imports `SERVABLE_STATUSES` from
+the endpoint rather than re-spelling the tuple, so a fourth status cannot make
+the gate and the serving path disagree — the same import discipline
+`eval.py:93` uses for `EVAL_STATUS`.
+
+Not changed: `pool_depth`'s warm-only count means a pair holding 3 `complete` and
+0 `warm` is regenerated in full on every run. That is pre-existing (Phase 3) and
+is a spend question, not a correctness one; it is out of this change's scope and
+is recorded here so it is not rediscovered as new.
+
+**8.43 — `run_warm` now ends by printing the full-matrix coverage verdict, and a
+run that COVERED the full matrix exits non-zero on a remaining gap. This closes a
+hole that neither existing non-zero exit reaches.**
+
+`_finish` (`warm.py:748-792`) has two failure categories: a story that landed
+unenriched, and an `api_fail` cell that produced nothing. Neither fires when a
+pair's generations all *succeeded and were then rejected* — gate or moderation.
+Walk it: stage 1 makes 3, stage 6's 3 attempts are all rejected on content →
+`made = 3`, so the `made == 0` check at `warm.py:882` does not fire; `failures`
+is empty (a rejected story is never enriched); `api_failures` is empty. `_finish`
+returns, `make warm` exits **0**, and stage 6 is empty. That is a second,
+independent route to F4's outcome and it survives the default change in 8.40, so
+the exit code has to key off the pool rather than off the run's own bookkeeping.
+
+Why the report is over the FULL 12x3 matrix regardless of what was requested: a
+run told `--stages 1,2,3` that reports only on stages 1-3 prints a clean table and
+teaches the operator nothing, which is the entire failure mode. A sliced run
+therefore prints the whole picture and the command that fills it, and exits **0** —
+it did what it was asked. Only a full-matrix run turns a gap into a non-zero exit.
+
+Deliberate asymmetry, and the reason it is safe: with 8.40's defaults the deploy
+path IS the full-matrix path, so the deploy operator gets the refusal; and if
+someone later re-narrows the defaults, 8.44's test goes red and
+`--check-coverage` still refuses. Three guards, no single point.
+
+The floor used is the run's own `--target`, not a separate constant: `-n 1`
+means "I want 1 per pair" and the verdict honours it. `--check-coverage` uses the
+`TARGET_PER_PAIR = 3` default, so the checklist step measures §7's floor.
+
+**8.44 — The gate refuses to pass vacuously on an unseeded matrix, and a unit test
+pins the defaults.**
+
+A coverage check over zero (stage, theme) pairs finds zero gaps and exits 0. On a
+fresh deploy — the exact scenario — `stages` and `themes` are empty until
+`make seed` runs, so the naive gate would report a green pool on an empty database.
+It now refuses unless `stages` is exactly `1..12` and at least one theme exists,
+naming what it found. This is the same class of defect as DEVIATIONS 6.15's
+blocklist (a count moving the wrong way as the only symptom) and it is checked
+rather than reasoned about.
+
+Second half: `tests/test_enrich.py` gains a test that the CLI's parsed defaults
+are the full matrix. That is the guard that goes RED against the defective
+default rather than merely green after the fix, per the gate on this change.
+
+**8.45 — `--dry-run`: the plan and a spend projection with no API call, and the
+per-story figure is measured rather than assumed.**
+
+DEPLOY.md's warm step says "SLOW. Costs money." and gives the operator no way to
+find out how much before committing. `--dry-run` prints per-pair have/need over
+the requested slice, the total stories it would generate, and — only if the
+database already holds priced stories — `avg(gen_meta->>'cost_usd')` over the
+servable pool times that count, labelled an extrapolation from N observations.
+With no history it says so instead of inventing a number; `_reprice` returning
+`0.0` on a missing price (AUDIT-PHASE7 F13.4) is the shape being avoided.
+
+Current observed figure, **PROVED**: 53 servable stories, mean recorded
+`gen_meta.cost_usd` **$0.01991** (it was $0.01958 over 52 before this change's own
+story landed, which is the extrapolation updating itself as intended). That number includes enrichment (DEVIATIONS
+5.16's `_record_enrichment` folds it in) so it is the right multiplier for a warm
+story, and it is an extrapolation across stages — stages 9-12 are longer and will
+cost more, so the projection is a **floor**. Said in the output, not just here.
+
+**8.46 — `--stages 1..12` / `--themes all` parsing is a second implementation, not
+a shared one, and the duplication is deliberate.**
+
+`eval.parse_stages` (`eval.py:133-159`) already does this. Sharing it would mean
+either `warm` importing `eval` — backwards, since `eval.py:72` imports
+`warm._split_segments`, so a module-level import is a cycle and a function-local
+one drags the whole §14 harness into every `make warm` — or moving the parser to a
+third module, which is an edit to `eval.py`, owned by a concurrent agent on this
+branch. So `warm._parse_stages` is written fresh, accepts the same three forms
+(`1..12`, `3,6`, `1..4,9..12`) plus `all`, and raises on input that would silently
+yield a smaller matrix than the operator asked for — the same rule `eval.py:137`
+states. **ASSUMED** and flagged for later: the two can now drift. The compensating
+control is that `warm`'s copy is bounded (it rejects anything outside `1..12`,
+which `eval`'s does not), so the failure direction is refusal rather than a quiet
+partial run.
+
+**8.47 — What was actually spent, and what is therefore NOT proved.**
+
+Spend on this change: **$0.0374**, one story. `--stages 6 --themes dragons -n 1`
+against the live API — one (stage, theme) pair that had never held a warm story.
+No `make warm` over the matrix, no `make eval`. The full 12x3 fill was **not** run.
+
+That single story is the one thing a dry run could not establish, and it is worth
+the four cents: **stages 6-12 had never produced a warm story in this repo's
+history**, so "the new default will fill them" rested on the pipeline working at a
+stage nothing had exercised outside the eval harness. Story **6416**, stage 6 /
+dragons: `status='warm'`, decodability **1.0000**, 2 questions, 7 tagged segments,
+$0.037428 recorded in `gen_meta.cost_usd`. First draft, no rewrite, no api_fail.
+
+**PROVED** (everything below reproducible; only the item above cost anything):
+
+- `--check-coverage` is RED against the pool as it stands: **23 of 36 pairs below
+  3, exit code 1**, stages 6-12 at zero. A live sabotage-test of the guard against
+  the *actual* state F4 describes, not a planted fixture. `make warm-check` exits
+  non-zero through make as well.
+- Sabotage-tested in three independent directions, each RED before green:
+  restoring `DEFAULT_STAGES = "1,2,3"` / `DEFAULT_THEMES = "dragons"` fails the
+  three default tests; neutering `assert_matrix_seeded` fails the vacuous-pass
+  test; removing the pool-read exit category fails the full-matrix test — and that
+  last sabotage run printed `99 warm, 9 rejected, 0 api_fail` **and exited 0 with a
+  pair still empty**, which is F4's mechanism reproduced on demand.
+- `--dry-run` prints the plan and the projection — **66 stories, ~$1.31** now,
+  67 before the slice below — with no Anthropic client constructed at all
+  (verified by spying on `AsyncAnthropic.__init__`: 0 constructions), and it runs
+  to completion with `ANTHROPIC_API_KEY` blank. Same for `--check-coverage`, which
+  exits 1 on the gate rather than on a missing credential.
+- The §7 ladder still never climbs (STATE invariant 6), re-verified against
+  `_SERVE_SQL` now that a stage-6 story exists and is the pool's ceiling: requests
+  at stages 1/3/5 are unchanged, stage 6 gets the stage-6 story, and stages 8 and
+  12 fall back to **6** rather than climbing. F4 observed stage 12 falling back to
+  stage 5; it is now one rung closer for the same reason the fix exists.
+- The suite: **672 passed / 2 skipped** before, **686 passed / 2 skipped** after —
+  672 + the 14 new tests, nothing displaced.
+
+On that last number: the shared development database made the suite look red twice,
+with the failures *moving between runs* (`test_eval.py` x7, then `test_readings`,
+then `test_auth`) while a concurrent agent wrote to the same Postgres. Diagnosed
+rather than re-run until green: the eval failures were that agent's in-progress
+`eval.py` (reproduced absent in a `git worktree` at HEAD carrying only this
+change), and the rest were cross-process races of the kind `test_enrich.py`'s own
+comments already describe. The 686/2 figure is from a **private `pg_dump` copy of
+the database** (`sfwarm`, since dropped) with no other writer — which is the only
+configuration in which this suite's result means anything right now.
+
+**NOT proved, and the honest consequence:** that a real full-matrix
+`python -m storyforge.warm` fills all 36 pairs. One stage-6 story is evidence about
+stage 6, not about stages 7-12; AUDIT-PHASE7 F8 measured an 18.3% `api_fail` rate
+at stages 9-12 in the §14 run — since addressed by the 240s timeout (8.7) but never
+re-measured on the warm path. So the *mechanism* is proved and the *outcome* is
+not. That is exactly what the new non-zero exit is for: the first real run will say
+so rather than exit 0 on a partial pool.
+
+**8.48 — `docs/STATE.md:15` is CORRECTED, not made true. The live pool is 13 of 36
+pairs, and the doc now says so.**
+
+The claim "`make warm` fills ≥3 per (stage,theme)" was false about the command and
+is now true about it (8.40) — but it was also read as a claim about the *database*,
+and that is still false and is not being fixed with money this change does not have
+permission to spend. **PROVED**, after the one story above: **13 of 36** pairs hold
+≥3 servable stories, **53** servable in total (mean $0.01991 each), stages **7-12**
+hold none, stage 6 holds one. STATE.md now states the command's matrix, the live
+coverage, and the fact that `make warm-check` exits non-zero on it *today*. A green
+claim next to a red gate would be the fourth "metric computed and discarded" entry
+in this file.
+
+Same for `DEPLOY.md`: the warm step gains the mandatory `--check-coverage` line
+and the note that the default is now the full matrix and is therefore the
+expensive one.
+
+**8.49 — DEPLOY.md's Clerk trap (6.13) was already documented; what was missing was
+the DEPLOY.md §6 verification, and that is F5's, not this change's.**
+
+Checked rather than assumed: `docs/DEPLOY.md:141-155` §5 already carries the trap
+in full — every `require_admin` route 403s for everyone, the default session token
+carries no `public_metadata`, the dashboard JWT-template edit is the only fix, and
+6.13's "no Backend API for it" is stated as "not settable through the Clerk API".
+6.13's own "**DEPLOY NOTE: … `docs/DEPLOY.md` must say so**" is discharged. One
+gap closed while verifying: §5 cited 6.20 only, which is the *403 message*
+deviation; 6.13 is the one holding the empirical finding, so the citation now
+names both, and the invisibility is stated in the terms the audit uses — no error,
+no log line, just missing permissions.
+---
+
+## Phase 8 — the §14 harness's PROVENANCE (audit F1, F2, F3, F6, F7)
+
+`docs/AUDIT-PHASE7.md` established two things about §14. The numbers reproduce —
+all 169 decodability figures, every one of the 180 per-item costs to under 2e-6 —
+and the gate is the reason they are what they are. And nothing in the record pins
+*what produced them*: no per-item model, no vocabulary version, a git commit at
+which the harness does not exist, and a `--resume` path that takes its behaviour
+from the environment while overwriting the record of it with the stored values.
+The evidence is sound; its durability is not, and `docs/EVAL.md` asserted a
+durability guarantee that did not exist.
+
+These ten entries are logged before the change. They touch `storyforge/eval.py`,
+`scripts/eval_doc.py`, `docs/EVAL.md` and the `eval` Makefile target, plus one
+named constant in `llm/client.py`. **No measurement is rewritten**: run 2's
+`eval_run_items.metrics` rows are untouched, `stories.decodability` is untouched,
+the gate constant is untouched, and §1.6 stays recorded as unmet and unreachable.
+What changes is what the *next* run records about itself, and what the report is
+allowed to claim.
+
+**8.30 — Every eval item records the model each API call was actually made with,
+and the price sheet applied to it.**
+The aggravating half of F1 is that `SELECT count(*) FROM eval_run_items WHERE
+metrics ? 'model'` was **0**, so "this matrix ran on `claude-sonnet-5`" was
+unfalsifiable after the fact — while `gate` and `pricing_date` were already
+per-item and therefore auditable. The model is not read from the environment at
+report time. `Usage.model` is already carried on every `Attempt` and on the
+moderation result (`llm/pricing.py:56`, set by `usage_from_response` in
+`pipeline._call`), so the item records the model each *call* was made with, as a
+sorted list — a mid-matrix model switch appears as two entries in one item or as
+two distinct values across items, and the report says so out loud instead of
+printing one model name over a mixed matrix.
+
+`models.requested` is recorded beside it, because an `api_fail` item has no
+response to read a model off and its model is still a fact worth keeping. The two
+fields answer different questions ("what did we ask for" versus "what answered"),
+and conflating them is how F1 happened.
+
+**8.31 — `--resume` enforces the stored config by REFUSING to continue when the
+live config differs, rather than by claiming to and not.**
+F1's mechanism: `eval.py:1490-1502` did `config = {**resumed_config, ...}`, which
+makes the stored config win the **record** and the environment win the
+**behaviour**. Two ways out. Genuinely enforce — thread a model parameter from
+`config` through `run_pipeline` → `_call` → `generation_model()`, and likewise for
+`DECODABILITY_GATE`, `MAX_REWRITES` and `PROMPT_WORD_LIMIT`, all of which are
+module constants. Or refuse. **Refusal is what ships**, for three reasons: a
+model parameter on the generation path is a change to the serving pipeline in
+order to fix a reporting defect; a *gate* parameter is the one thing §0 forbids
+adding, because a gate that can be passed in is a gate that can be passed a lower
+number; and a refusal is verifiable from outside the process, which "we plumbed it
+through correctly" is not.
+
+So on a resume the harness now splits the config into three kinds of value and
+treats each honestly:
+
+- **Restored** — real function arguments, so restoring them *is* enforcement:
+  `stages_spec`, `themes_spec`, the RESOLVED `themes` list, `n`, `effort`,
+  `pricing_date`, `cold`, `enrich`.
+- **Verified** — environment reads and module constants that no parameter can
+  carry: `models.generation`, `models.fast`, `prices`, `gate`, `max_rewrites`,
+  `max_story_words`, `prompt_word_limit`, `generation_timeout_s`,
+  `sdk_max_retries`, the vocabulary fingerprint (8.33), and `concurrency`
+  whenever cells remain. A difference on any of them **refuses the resume with
+  exit code 3** and prints the stored value, the live value and the environment
+  variable that would restore it.
+- **Per-sitting** — `concurrency` and `budget_usd` when the run is already
+  complete, recorded in the resume trail entry rather than pretended to be the
+  run's. `config.concurrency` used to record the stored `1` while
+  `eval.py:1538` built the semaphore from the CLI value (audit S1), which is the
+  same defect in the same place.
+
+Resolving `themes` from the stored LIST rather than re-resolving `"all"` closes
+audit S2: a theme seeded mid-matrix can no longer widen `cells_planned` under a
+config that records the old one.
+
+A value the stored run never recorded cannot be checked, and that is a fact about
+the older run rather than a difference — treating it as drift would make every run
+written before this entry unresumable. It is disclosed instead, and the live value
+is recorded on the TRAIL ENTRY rather than written into the run's config, where it
+would imply the earlier sitting had used it too. So resuming a pre-8.31 matrix
+still pins what the NEW half ran against without back-dating a fingerprint onto
+the old half.
+
+**A refusal cannot be the only path**, because re-deriving the report from a
+complete run is a legitimate, zero-API operation and it is how run 2's report was
+regenerated twice. When nothing remains to run, a drift is **disclosed instead of
+refused**: the trail entry records it and the report opens with a DRIFT block
+naming every key that moved. That is the distinction the audit's reproduction was
+missing — resuming complete run 2 under `ANTHROPIC_MODEL_GENERATE=claude-opus-4-8`
+now either refuses (if work remained) or prints, at the top of the report, that
+the live generation model is not the one this matrix was measured with.
+
+**8.32 — Provenance is a commit, a dirty-tree flag, and a content hash of the code
+that ran.**
+F2: `config.git_commit` recorded `559f102`, at which `eval.py` is 102 lines with
+only a `smoke` subparser — the recorded commit **cannot run the documented
+command**. Every number in §14 was produced by uncommitted code and nothing in the
+record said so. `_git_commit()` asked `git rev-parse` and never looked at the
+working tree.
+
+`_provenance()` now records `git_commit`, `git_dirty` (from `git status
+--porcelain`), `git_dirty_paths` (sorted, capped, so a reader can see whether
+`eval.py` ITSELF was dirty — which is the case that matters), and
+`code_sha256`: a SHA-256 per file over `storyforge/eval.py`,
+`storyforge/pipeline.py`, `storyforge/llm/` and `storyforge/decoder/`, plus one
+combined digest. A reader can now settle the question the audit had to settle by
+hand: `git show <commit>:services/api/storyforge/eval.py | shasum -a 256` either
+matches the recorded hash or it does not. The report prints the dirty flag next to
+the commit, in the same cell, so the commit can never again be read as provenance
+it is not.
+
+`git_commit` is kept as a top-level config key rather than moved under
+`provenance`, so `scripts/eval_doc.py` and any future admin view keep reading it.
+
+**8.33 — `eval_runs.config` pins the vocabulary the run was measured against.**
+F3 is the one that already bit. At 00:44 all 169 decodability values reproduced;
+at 00:58, after a concurrent agent re-seeded `sight_words` 33 → 38 and added the
+`wh` GPC, 11 no longer did and `tests/test_eval.py::test_the_gate_still_agrees
+_with_what_the_harness_recorded` went red. `stories.decodability` is a *cache* of
+the gate and was repaired in place (8.19, `scripts/rescore_stored_stories.py`),
+but an eval RUN is a **measurement**, and a measurement that does not name its
+instrument cannot be compared to a later one.
+
+`config.vocabulary` now carries: the GPC count and a SHA-256 of the inventory as
+the decoder loaded it (`load_gpcs()`, not the CSV bytes — the symlink of STATE
+invariant 8 means the file path is not the artifact); the `sight_words` row count
+and a hash over the sorted `(word, stage_id)` pairs; the `allowed_words` row count
+and per-stage counts hash; and the CMUdict entry count, because §18 asks for the
+snapshot to be vendored so the proof is reproducible and the entry count is the
+cheapest check that the vendored snapshot is the one that ran.
+
+A hash is enough for the goal, which is that a later reader can tell whether a
+re-derivation is comparable — not to reconstruct the vocabulary from the record.
+On resume the fingerprint is one of the verified values (8.31).
+
+**What this does NOT do:** it does not make
+`test_the_gate_still_agrees_with_what_the_harness_recorded` vocabulary-scoped. The
+audit suggested scoping the assertion to the recorded vocabulary; that assertion
+is about `stories.decodability` being a live cache of the gate, and it SHOULD go
+red when the vocabulary moves — that is how the drift was caught, and the repair
+was to rescore the cache, not to narrow the test. Scoping it would silence a
+working alarm to remove an inconvenience. Left alone deliberately.
+
+**8.34 — The decoder-limitation rates get the denominator they were always about:
+SCORED words.**
+F6, and it is the finding with the most consequence for §18. `story_metrics`
+divided `heteronym_flag`, `alignable=False`, `schwa_relaxed` and the ambiguity
+count by `n_words` — **all** non-punctuation tokens, including sight and story
+words. A sight or story word is classified before any alignment is attempted
+(`decoder/validate.py:33-36`) and can carry none of these flags, so it inflated
+the denominator and nothing else. Over the population that can actually carry a
+flag — the scored set, which is also the decodability denominator — run 2's
+figures are:
+
+| flag | total | reported | over SCORED words |
+|---|---|---|---|
+| `ambiguity_flag` | 1272 | 12.4% | **22.7%** |
+| `schwa_relaxed` | 443 | 4.0% | **7.9%** |
+| `heteronym_flag` | 377 | 3.1% | **6.7%** |
+| `alignable=False` | 28 | 0.19% | **0.50%** |
+
+§18 names a rising unalignable rate as the signal that the inventory is too small.
+Reporting it at 0.19% instead of 0.50% halves the alarm, which is the wrong
+direction for the one number the spec designates as a tripwire. The item fields
+are renamed `*_rate_scored` so the name carries the denominator, and the aggregate
+now reports the **population** rate (total flags / total scored words) beside the
+mean per story, with the denominator named in the table header. The population
+rate is what the audit computed independently and is the figure the report leads
+with; a mean of per-story rates weights a 30-word stage-1 story equally with a
+200-word stage-12 one, which is defensible for "the typical story" and wrong for
+"how often does this happen".
+
+Because the aggregate derives these from the recorded *counts* rather than from
+the recorded rate fields, it produces the corrected figures for run 2's existing
+items too — without touching them.
+
+Same entry, smaller sibling (audit F9): `length.compliance_rate` and `_slice`'s
+`gate_pass_rate` / `length_compliance_rate` divide by all ATTEMPTED cells,
+including the 11 that produced no text and therefore have `word_count = 0` and
+`length_compliant = False`. The direction is unflattering, so nothing was
+inflated — stage 9's "73.3% pass rate" is 11 of 15 attempted where 11 of 11
+produced stories were accepted. `*_produced` variants are added alongside and both
+denominators are named in the report. The primary figure does not move: a cell
+that never produced text is a real failure and hiding it in a smaller denominator
+would be the mirror of the defect above.
+
+**8.35 — Generation latency is reported twice, because one number was measuring
+two things.**
+F7. `Attempt.latency_ms` is wall time around `_call`, and `_call` goes through an
+SDK client with `max_retries=2`, so the row labelled "GENERATING (first attempt)"
+measured up to **three** HTTP attempts. 23 of run 2's 169 stories burned at least
+one dead attempt under the old 30s timeout; p95 over the 146 that did not is
+**26.4s** against the **58.3s** reported. The report then attributed the §1.6 miss
+to long stories while separately and correctly filing the timeout as the
+availability defect — so one defect was priced twice, in a document whose own
+preamble promises "neither reading can borrow the other's number".
+
+The reporting defect is independent of the timeout value, so it is fixed
+independently of 8.0-8.8's raise to 240s. Each item records
+`per_call_timeout_s` and `sdk_max_retries` — the budget in force for *that*
+measurement, not the constant in force at report time — and the aggregate reports:
+
+- **wall clock** p50/p95/max over first attempts, labelled as including any
+  SDK-internal retries, with the retry budget named; and
+- the subset whose wall clock is **under the recorded per-call timeout**, so no
+  *clock-driven* retry can be inside it, with its own n.
+
+The second is deliberately named "no clock-driven retry" and not "single
+attempt": a 429 or a 5xx retried quickly would still hide inside a fast call, so
+the subset is a bound rather than a proof, and calling it a proof would be the
+same overstatement this whole section exists to remove. Getting the exact count
+means reading `x-stainless-retry-count` off the raw response, which needs
+`with_raw_response` in `pipeline._call` and a new `Attempt` field — a change to
+the generation path for a reporting gain, deferred and named here rather than
+done quietly.
+
+`llm/client.py` gains `SDK_MAX_RETRIES = 2` as a named constant used by
+`get_client()`, so the retry budget the report discloses is the one the client
+uses rather than a number re-typed in a second file. No behaviour change.
+
+**8.36 — `_reprice` prices from the models the ITEMS recorded, and declines to
+price rather than reporting $0.00.**
+`_reprice` called `generation_model()` and `fast_model()`, so "the same run priced
+after the intro rate ends" was a function of the current shell: the audit's Opus
+resume priced run 2's tokens at $6.5718 while the report's config table said
+Sonnet at $2/$10 — one file, two models, and the sentence beside it hard-coded the
+string "$3/$15" while printing a number computed at neither rate. It now groups
+items by the model each recorded (8.30) and prices each group with its own sheet,
+falls back to the config's models only for items that recorded none (run 2's), and
+the prose derives the price pair from the sheet it actually used instead of
+spelling it out. F13.4: a `KeyError` from `price_for` returned `0.0`, which reports
+an unpriced model as free. It now returns `None` and the report says the run could
+not be repriced and names the model.
+
+**8.37 — Three sentences deleted from the report and four made checkable.**
+The report generated its own false claim: `render_report` emitted, into every
+resumed report unconditionally, "`--resume` ran only the remainder against the
+SAME stored config — same model, same gate, same pricing date." `docs/EVAL.md:13`
+carried "enforced by the code rather than by care" and `:15` "the report is a pure
+function of the data". None of the three was true, and a report that overstates
+its own rigour is worse than one that admits a gap — it spends the credibility the
+rest of the document earned.
+
+Gone or rewritten: the resume sentence now enumerates which values were RESTORED,
+which were VERIFIED against the live config, and which are per-sitting, and prints
+the drift block when there is one. "A pure function of the data" becomes the
+narrower true claim — re-finalising a complete run reproduced the identical
+verdict and exit code, which checks that the VERDICT is a pure function of the
+recorded items, and is silent about the config table, which it was never evidence
+about. The report also now prints the distinct per-item models it saw, the
+vocabulary fingerprint, the dirty-tree flag, and the denominator under every rate
+it quotes.
+
+**8.38 — `eval smoke` prints the moderation verdict.**
+Handed over from the prompt work: a smoke run failed 3 of 4 on a story measuring
+**100% decodable** and printed `FAIL 100.0%` with `violations: []` and no reason.
+Smoke does not persist, so the cause was unrecoverable — the one run that is meant
+to be a cheap CI-style tripwire produced a red with no diagnosis. `run_smoke` now
+prints the moderation class, layer, blocked words and `r.moderation.reason`
+verbatim on any failure, and its `SystemExit` message names the actual mix of
+reasons instead of asserting "below gate" for a story that cleared the gate.
+
+**8.39 — `docs/EVAL.md` is regenerated from run 2's own JSON, not hand-corrected,
+and it now marks what that run did not record.**
+Three claims in the committed §14 report are false or stale: the two provenance
+sentences above, and `EVAL.md:243`'s "checked directly against the `sight_words`
+table, **all 33 rows**" — the table holds 38 and `of` is a stage-2 sight word
+since 8.10. The generator (`scripts/eval_doc.py`) already carried the corrected
+`of` paragraph from the vocabulary work; the document was never re-emitted, which
+is the same "computed and discarded on write" shape as the grammar defect, one
+layer up.
+
+So `docs/EVAL.md` is regenerated by running `scripts/eval_doc.py` over
+`reports/eval-20260729T221359Z.json` — run 2's own output, unmodified — with the
+corrected generator. The F6 and F9 figures are recomputed from run 2's recorded
+counts; the F7 split is computed with the 30s timeout that run 2 ran under, stated
+in the document as a value supplied from 8.0's evidence rather than read from a
+record that does not have it; and every provenance field run 2 never recorded
+prints as **not recorded** with a pointer to this section. A blank where the
+record is blank is the point: it is the only way a reader can tell F1 and F2 apart
+from a run that fixed them.
+
+`make eval` also now prints the exact `scripts/eval_doc.py` line to regenerate
+`docs/EVAL.md`. It does not run it — a failed matrix must not silently rewrite the
+committed report — but "someone remembered" is what 8.39 is an entry about, so the
+command is on screen rather than in a doc.
