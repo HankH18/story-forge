@@ -31,6 +31,7 @@ job it must record the node chain — neither of which needs an API call, becaus
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import pathlib
 
@@ -140,12 +141,18 @@ async def owned_run():
 
 @pytest.fixture(autouse=True)
 def clean_registries():
-    """No test may leak a job or a launch into another test's busy check."""
+    """No test may leak a job or a launch into another test's busy check.
+
+    `_reset_launch_registry` rather than `_launches.clear()`: since DEVIATIONS
+    14.30 a pruned launch leaves its authorised dollars behind in
+    `_committed_pruned_usd`, and clearing only the dict would carry one test's
+    spend into the next test's cumulative ceiling.
+    """
     admin._jobs.clear()
-    admin._launches.clear()
+    admin._reset_launch_registry()
     yield
     admin._jobs.clear()
-    admin._launches.clear()
+    admin._reset_launch_registry()
 
 
 # --- the auth boundary (§9, §13, DEVIATIONS 9.19) -----------------------------
@@ -700,6 +707,97 @@ async def test_the_process_ceiling_blocks_a_repeated_click(client):
     )
     assert resp.status_code == 409
     assert "cumulative ceiling" in resp.json()["detail"]
+
+
+
+
+async def _launch_once(client, monkeypatch, budget: float):
+    """One real `POST .../eval-runs` launch, with the harness itself stubbed out.
+
+    Everything the defect lives in runs for real — the ceiling check, the registry
+    write, the prune — and `run_full` is the only thing replaced, so no API call is
+    made and no money is spent. Registering `_launches` entries by hand instead
+    would test `_prune_launches` in isolation and stay green if the endpoint
+    stopped calling it, which is the exact stub-blindness the sabotage run caught.
+    """
+    async def _no_api(**kwargs):
+        return 0
+
+    monkeypatch.setattr(admin, "run_full", _no_api)
+    resp = await client.post(
+        "/api/admin/eval-runs",
+        json={"stages": "3", "themes": "dragons", "n": 1,
+              "confirm": True, "budget_usd": budget},
+    )
+    # Let the stubbed launch finish, so the one-in-flight check does not 409.
+    for _ in range(200):
+        if admin._eval_launch_in_flight() is None:
+            break
+        await asyncio.sleep(0)
+    return resp
+
+
+async def test_pruning_a_launch_does_not_refund_its_budget(client, monkeypatch):
+    """DEVIATIONS 14.30 — the retention limit used to defeat the process ceiling.
+
+    `_committed_usd` summed `_launches`, and `_launches` is capped at
+    `MAX_LAUNCHES_KEPT = 10`. Ten is exactly the number 9.6's rationale names
+    ("ten sequential clicks are ten runs"), so once the registry was full the check
+    on every further launch evaluated `10b + b > 16` and only ever fired for
+    `b > $1.45`. Below that the ceiling could not be reached in any number of
+    clicks, and `process_remaining_usd` went UP after each one.
+
+    `test_the_process_ceiling_blocks_a_repeated_click` above seeds only TWO
+    launches, which never reaches the pruning regime. That is exactly why the
+    suite was green on this.
+
+    Sixteen launches at $1.00 is $16.00 — the whole `PROCESS_BUDGET_USD`, and
+    reached only if the twelve pruned ones are still counted.
+    """
+    budget = 1.0
+    n = admin.MAX_LAUNCHES_KEPT + 6
+    remaining_seen = []
+    for _ in range(n):
+        resp = await _launch_once(client, monkeypatch, budget)
+        assert resp.status_code == 202, resp.text
+        remaining_seen.append(
+            round(max(0.0, admin.PROCESS_BUDGET_USD - admin._committed_usd()), 4)
+        )
+
+    # The registry is still bounded — the DISPLAY limit is untouched.
+    assert len(admin._launches) == admin.MAX_LAUNCHES_KEPT
+    # ...and every dollar it forgot is still committed.
+    assert admin._committed_usd() == pytest.approx(n * budget) == admin.PROCESS_BUDGET_USD
+    # Headroom is monotonically non-increasing. It rose after every prune before.
+    assert remaining_seen == sorted(remaining_seen, reverse=True)
+
+    resp = await client.post(
+        "/api/admin/eval-runs",
+        json={"stages": "3", "themes": "dragons", "n": 1,
+              "confirm": True, "budget_usd": 0.5},
+    )
+    assert resp.status_code == 409
+    assert "cumulative ceiling" in resp.json()["detail"]
+
+
+async def test_the_portal_reports_the_carried_commitment_not_the_visible_rows(
+    client, monkeypatch
+):
+    """`process_committed_usd` is what an operator reads before clicking again.
+
+    Summed off the retained rows it under-reported by everything pruned, which is
+    the same lie as the ceiling's, shown to a human instead of to a branch.
+    """
+    for _ in range(admin.MAX_LAUNCHES_KEPT + 3):
+        assert (await _launch_once(client, monkeypatch, 0.25)).status_code == 202
+
+    budget = (await client.get("/api/admin/eval-runs")).json()["budget"]
+    assert budget["process_committed_usd"] == pytest.approx(13 * 0.25)
+    # The list itself still shows only what it retains — the bound is a display
+    # bound, and the response says `ephemeral: True` about exactly this.
+    assert len((await client.get("/api/admin/eval-runs")).json()["launches"]) == (
+        admin.MAX_LAUNCHES_KEPT
+    )
 
 
 # --- POST /api/admin/cold-generate (DEVIATIONS 9.13-9.18) --------------------

@@ -116,6 +116,17 @@ WORDS_MAX_LIMIT = 500
 POLL_AFTER_MS = 750
 
 #: In-process retention. Both registries are ephemeral and say so in the response.
+#:
+#: `MAX_LAUNCHES_KEPT` is a display bound and nothing more. It used to bound the
+#: BUDGET too, because `_committed_usd` summed the surviving rows: `_prune`
+#: deleted a finished launch and its authorised dollars left the cumulative
+#: ceiling with it (DEVIATIONS 14.30). Ten is exactly the number 9.6's rationale
+#: names — "ten sequential clicks are ten runs" — so the retention limit
+#: re-enabled the precise scenario the ceiling was written to stop: with the
+#: registry pinned at ten entries, the check on launch 11 and every launch after
+#: it evaluates `10b + b > 16`, which only ever fires for `b > $1.45`. Anything
+#: cheaper was unbounded. The count is now carried across the prune
+#: (`_committed_pruned_usd`), so what is forgotten is the record, never the spend.
 MAX_LAUNCHES_KEPT = 10
 MAX_JOBS_KEPT = 20
 
@@ -630,6 +641,47 @@ _EXIT_MEANING: dict[int, str] = {
 
 _launches: OrderedDict[str, EvalLaunch] = OrderedDict()
 
+#: Authorised dollars belonging to launches `_prune` has already dropped.
+#:
+#: DEVIATIONS 14.30. `_committed_usd` is documented as "committed budget across
+#: every launch in THIS process", and it summed `_launches` — a registry capped at
+#: `MAX_LAUNCHES_KEPT`. Every prune therefore *refunded* the pruned launch's
+#: budget to the ceiling it was supposed to have consumed, and
+#: `process_remaining_usd` went UP after a launch. Monotonic on purpose: this
+#: number may only ever grow within a process, exactly like the ceiling it feeds.
+_committed_pruned_usd: float = 0.0
+
+
+def _reset_launch_registry() -> None:
+    """Both halves of the launch record, cleared together. Tests only.
+
+    Kept as one function because clearing `_launches` alone would leave the carry
+    behind and make one test's spend bind the next test's ceiling — the mirror
+    image of the defect this carry exists to fix.
+    """
+    global _committed_pruned_usd
+    _launches.clear()
+    _committed_pruned_usd = 0.0
+
+
+def _prune_launches() -> None:
+    """`_prune`, plus the one thing a launch leaves behind when it is forgotten.
+
+    The dollars are added to `_committed_pruned_usd` BEFORE the entry is dropped,
+    so there is no window in which a launch is neither in the registry nor in the
+    carry — `_committed_usd` is called from a request handler and from the portal
+    poll, and a total that dips would be the same lie in miniature.
+    """
+    global _committed_pruned_usd
+    while len(_launches) > MAX_LAUNCHES_KEPT:
+        for key, value in list(_launches.items()):
+            if value.state != "running":
+                _committed_pruned_usd += value.budget_usd
+                del _launches[key]
+                break
+        else:  # pragma: no cover — every entry is live
+            return
+
 
 def _eval_launch_in_flight() -> EvalLaunch | None:
     for launch in _launches.values():
@@ -639,7 +691,13 @@ def _eval_launch_in_flight() -> EvalLaunch | None:
 
 
 def _committed_usd() -> float:
-    return round(sum(launch.budget_usd for launch in _launches.values()), 4)
+    """Every dollar this process has authorised, whether or not it still has the row.
+
+    The sum is over the retained launches PLUS the carry from pruned ones. It is
+    what was authorised, not what was spent — the conservative direction, and the
+    only one available while a run is in flight (DEVIATIONS 9.6, 14.30).
+    """
+    return round(_committed_pruned_usd + sum(launch.budget_usd for launch in _launches.values()), 4)
 
 
 _MAX_RUN_ID_SQL = text("SELECT coalesce(max(id), 0) FROM eval_runs")
@@ -1120,7 +1178,9 @@ async def create_eval_run(
         started_by=principal.clerk_id,
     )
     _launches[launch.launch_id] = launch
-    _prune(_launches, MAX_LAUNCHES_KEPT, "running")
+    # NOT `_prune`: dropping a launch row must not drop its authorised dollars
+    # out of `_committed_usd` (DEVIATIONS 14.30).
+    _prune_launches()
     log.warning(
         "ADMIN EVAL LAUNCH %s by %s — %d cells, budget $%.2f, projection $%.2f",
         launch.launch_id,
