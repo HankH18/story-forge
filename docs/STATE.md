@@ -75,10 +75,15 @@ Same trap a third time: 11.64 fixed the generator, `--mcq2-repair` was written a
 never run, and `_UNENRICHED_SQL` cannot see a leaking question because all its
 clauses ask what a story is MISSING. Its remedy is `--mcq2-repair` (a DELETE whose
 two refusals are SQL predicates: it cannot cascade a recorded answer and cannot
-leave a story with no question) followed by `--backfill`. **Two rows are pending an
-operator decision** — q22 and q706, both `complete`, both carrying 2 recorded
-answers, q706 pointing at the wrong card — and the gate prints them on every run
-without setting its exit code (11.103).
+leave a story with no question) followed by `--backfill`. The two rows that carried
+recorded answers were **resolved by operator decision** with
+`--mcq2-archive-answered` (11.116): every answer copied onto
+`stories.gen_meta.mcq2_answers_archived` first, then the question removed. Zero
+rows pending today. **That archive lives at the TOP level of `gen_meta`, never
+under `enrichment`** — `_record_enrichment` replaces that sub-object wholesale by
+design, so the first version of the archive was erased by the very next
+`--backfill`, four rows of two real children's history (11.117). A key that must
+outlive an enrichment must not live inside one.
 All four are free, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and

@@ -11088,3 +11088,182 @@ nothing in a contrast audit of the palette can see it.
   evidence about any of them.
 - **`art.test.ts`.** It is still green and still right about what it tests; 13.4
   adds the guarantee it structurally cannot make.
+## Phase 8 — the operator's decision on the two answered rows, and the archive that did not survive its own backfill (11.116-11.118)
+
+11.103 left two live rows undecided and named three resolutions. The user chose
+**(c)**: archive every answer onto the story, then remove the question. This is
+that, plus the defect it took a read-back to find — which is the more useful half.
+
+**11.116 — `--mcq2-archive-answered`: preserve, then remove. A SEPARATE command
+from `--mcq2-repair`, permanently.**
+
+The free sweep refuses an answered row and always will (11.103). Folding this into
+it would put an irreversible decision inside a routine repair, which is the shape
+of every accident this module has a comment about. So it is its own flag, and the
+DELETE is its own statement:
+
+```sql
+AND (SELECT count(*) FROM answers a WHERE a.question_id = q.id) > 0
+AND (SELECT count(*) FROM answers a WHERE a.question_id = q.id) = (
+      SELECT count(*) FROM jsonb_array_elements(
+        coalesce(s.gen_meta -> 'mcq2_answers_archived', '[]'::jsonb)) e
+      WHERE CAST(e ->> 'question_id' AS int) = q.id)
+```
+
+The equality is the whole safety property and it is SQL, not a Python `if`, for
+the reason `_DELETE_LEAKY_MCQ2_SQL` is: the statement must be structurally
+incapable of destroying evidence that was not preserved first, whatever the caller
+believes it wrote a moment ago. **An equality rather than `>= 1`** — archiving one
+of a child's three answers and deleting all three is the same data loss in a
+smaller font. The `> 0` is the boundary with the free sweep: an unanswered row is
+`--mcq2-repair`'s business and needs no decision, so an operator running this can
+never be surprised by what else it swept up. A row that is its story's LAST
+question is deliberately not touched either — that is a different refusal with a
+different remedy, and sweeping it up here would manufacture invariant 14's
+dead-end session inside the command that exists to be careful.
+
+**Run for real.** 4 answers archived onto 2 stories, then q22 and q706 removed.
+Run twice: the second printed *"nothing to archive"*. Both stories kept their
+`tap_word`, so `servable stories with no question` stayed **0**,
+`--check-coverage` stayed **33 of 33**, and `--check-promotability` was
+**byte-identical** before and after — which is not luck: `mcq2` is not in
+`MASTERY_QTYPES` (11.66), so `gpc_stats` (22 rows, 84 observations) could not move
+and did not. `--check-mcq2` now exits **0 with zero rows under DECISION
+REQUIRED**. Spend for the archive itself: **$0.00**.
+
+**11.117 — and then `--backfill` erased the archive. Found by reading it back,
+not by trusting the write that had reported success.**
+
+The archive went into `gen_meta.enrichment.mcq2_answers_archived`, beside
+`mcq2_leak_removed`, which is exactly where it must not be. `_record_enrichment`
+does `story.gen_meta = {**old, "enrichment": meta}` — it replaces that sub-object
+**wholesale**, and that is not a bug, it is the property `_UNENRICHED_SQL`'s fourth
+clause *relies* on for idempotence (one enrichment erases the key, so a stripped
+story is never selected twice). So the archive survived exactly until the next
+`--backfill`, and by then the `answers` rows it had replaced were already gone.
+**Four rows of two real children's reading history, destroyed by the command that
+had just promised to preserve them, twenty minutes after it promised it.**
+
+Nothing in the suite could have caught it: every test asserted the archive right
+after the write. The read-back did, because the standing rule on this project is
+that a repair checks its own work against the pool rather than its own bookkeeping
+(11.84) — and this time that rule was worth four rows.
+
+The rule that falls out is worth more than the fix. **`gen_meta.enrichment` holds
+what the nodes produced THIS run and is replaced every run; a permanent record of
+something a child did belongs beside `moderation` and `cost_usd`, which
+`_record_enrichment` and `run_grammar_backfill` both preserve by spreading the old
+object.** A key that must outlive an enrichment must not live inside one. The
+archive is now `gen_meta.mcq2_answers_archived`, at the top level.
+
+`test_the_archive_survives_the_next_enrichment` drives the sequence — archive,
+then `_record_enrichment` — rather than asserting the key's spelling, because the
+spelling is not the requirement and surviving is.
+
+**11.118 — restored, corroborated independently, and proved against the sequence
+that destroyed it.**
+
+The four entries were rebuilt and written through the shipped statement. They are
+**not** taken on the run log's word: `answers` cascades off `questions`, but
+`readings` does not, so readings 227, 352, 3684 and 3687 all survive — and the
+restore script asserts, before writing anything, that each entry's `kid_id`,
+`story_id` and `reading_stage_id` match its own surviving reading and that its
+`answered_at` falls between that reading's `started_at` and `completed_at`. All
+four passed. Each carries a `restore_note` so nobody later mistakes them for a
+clean write.
+
+Then the destroying sequence was **reproduced**: the `mcq2_leak_removed` receipt
+re-written, `--backfill --only 14,18` run for real (2 enrichments, $0.0034), and
+the archive read back afterwards — **2 entries on each story, intact.** One,
+reconstructed as a dashboard line from `gen_meta` alone:
+
+```
+  Priya (kid 2622), reading 3684, 2026-07-29T16:27:22.309253+00:00
+  Q: Was the dragon glad?
+    [ ] The dragon was glad.
+    [*] A man was glad.
+  answered: INCORRECT
+```
+
+That is the row the whole finding was about, still saying exactly what it said,
+with the question that produced it no longer in front of any child.
+
+**Neither story got a comprehension question back, and that is correct rather than
+a shortfall.** Both keep a `tap_word` that a child has answered, so `enrich` takes
+`_remoderate_questions` and never runs QUESTION_GEN — regenerating would cascade
+those answers, and a `tap_word` answer IS §8 evidence. `questions_source` on both
+reads `existing rows (answered; not regenerated)`.
+
+**Sabotage — four more, each restored and verified restored.**
+
+| sabotage | result |
+|---|---|
+| the archive-completeness predicate deleted from `_DELETE_ARCHIVED_MCQ2_SQL` | **1 RED** — a row deleted with none of its answers archived |
+| the same predicate relaxed from `=` to `>=` (a PARTIAL archive accepted) | **1 RED** — 1 of 2 answers archived and the row still went |
+| `n_other > 0` dropped from the command's own filter | **1 RED** — a story's last question swept up |
+| the archive written back into `gen_meta.enrichment` (the shipped bug, restaged) | **3 RED**, including `test_the_archive_survives_the_next_enrichment` |
+
+**9.86 — "read" means a `readings` row EXISTS, not that it was completed.**
+
+`POST /api/readings` writes the row when the session STARTS, and `completed_at`
+is set later by `/complete`. The tempting predicate is the completed one, because
+that is what §8 counts — and it is wrong here. Novelty ranks above
+`last_served_at`, so a story a child opened and abandoned would stay "unread"
+forever and be re-served FIRST on every subsequent request: the same loop 9.80 is
+about, in a narrower form and harder to see. With the row alone as the signal, an
+abandoned story goes to the back of the queue and the child moves on, which is the
+benign direction to be wrong in. The §8 counter is unaffected either way — it does
+its own `completed_at IS NOT NULL` arithmetic in `readings.py`.
+
+### PROVED — driven end to end through the real ASGI app, against a private copy
+
+`docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfunread'`,
+then the request → `POST /api/readings` → `/complete` loop, kid at stage 6, theme
+dragons, twelve times. The kid row is deleted afterwards; the shared database is
+never written.
+
+| | before | after |
+|---|---|---|
+| distinct stories in 12 readings | **3** | **9** |
+| `promotion.stories_completed` | 3 of 5, permanently | 9 of 5 |
+| stage of every story served | 6 | 6 |
+| stories above the reader's stage | 0 | 0 |
+
+The nine are the whole of stage 6 — three dragons, three space, three animals —
+served in that order: the requested theme first while it holds something unread,
+then the rest of the stage, then a re-read of the requested theme. The §7 DTO
+reports the rungs it descended (`fallback: other_theme`), which kid mode already
+renders.
+
+Admin preview on the same pool, six consecutive `{stage_id: 6}` requests with no
+kid: `7294, 7295, 7296, 7294, 7295, 7296` — the round-robin it has always been.
+
+**Cost.** `EXPLAIN ANALYZE` on the copy: Postgres HASHES the correlated subquery
+(`(NOT (hashed SubPlan 4))`), so the kid's readings are read **once per request**
+and probed per candidate row, not re-queried per row. Execution time 0.159 ms
+before, 0.197-0.206 ms after, on the full 119-story candidate set for a stage-11
+reader. No new index: `ix_readings_kid_started` is `(kid_id, started_at)` and its
+leading column is the lookup.
+
+### Sabotage — three, each restored and verified restored
+
+| sabotage | red |
+|---|---|
+| novelty ranked BELOW `(theme_id = :theme)` — 9.81's rejected alternative | `test_a_kid_is_served_every_unread_story_at_their_stage_before_any_repeat` (`3 == 6`, ids `[a, b, c, a, a, a]`) **and** the admin test's control assertion |
+| the endpoint sends `"kid": None` instead of the anchor's kid | the unread test |
+| `stage_id <= :stage` → `<= :stage + 1` (STATE invariant 6) | 4 tests, on a FULL pool (`test_fallback_never_serves_a_story_above_the_requested_stage`, live rows, no fixture) and on a MANUFACTURED EMPTY one (`test_a_stage_with_no_pool_falls_back_to_the_nearest_lower_stage`, `test_the_ladder_descends_past_a_rung_the_serve_gate_refuses`, and the new test's own `"the ladder climbed a stage (STATE invariant 6)"`), plus `test_story_stage_binding.py` |
+
+Driven off **exit codes**, not off grepping the output: `pyproject.toml` sets
+`addopts = "-q"`, so `pytest -q` is `-qq` and prints no summary line at all.
+
+### Gates — measured after the change, commands as run
+
+```
+cd services/api && DATABASE_URL=…/sfunread .venv/bin/python -m pytest -p no:randomly
+  1076 passed, 3 skipped in 94.35s   (exit 0; +2 tests, both new here)
+.venv/bin/ruff check storyforge/api/stories.py tests/test_stories_api.py
+  All checks passed!
+```
+
+Repo-wide `ruff` is red on another agent's in-flight `llm/moderate.py`, which is
+not this change's.

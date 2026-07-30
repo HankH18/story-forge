@@ -2247,6 +2247,270 @@ def _report_mcq2_repair(
                 f"    {len(last)} is/are their story's only question — removing it would "
                 "leave a servable story a child reads and then just stops (invariant 14)."
             )
+        print(
+            "    The answered ones are resolvable without losing anything: "
+            "`--mcq2-archive-answered` copies every answer onto the story first and only "
+            "then removes the question. It is a separate command because it is a decision."
+        )
+
+
+# --- the operator's decision on an ANSWERED leaking row (DEVIATIONS 11.116) ---
+#: Every recorded answer to these questions, with the reading and the child it
+#: belongs to — the facts a parent dashboard shows about a reading, which is what
+#: the archive has to be able to reproduce.
+_ANSWERED_MCQ2_ANSWERS_SQL = text(
+    """
+    SELECT a.id AS answer_id, a.question_id, a.reading_id, a.correct, a.answered_at,
+           r.kid_id, r.stage_id AS reading_stage_id, r.story_id,
+           q.prompt, q.payload, q.answer AS answer_key
+    FROM answers a
+    JOIN questions q ON q.id = a.question_id
+    JOIN readings r ON r.id = a.reading_id
+    WHERE a.question_id = ANY(CAST(:ids AS int[]))
+    ORDER BY a.question_id, a.id
+    """
+)
+
+#: The archive itself, written onto the STORY, which outlives the question row.
+#:
+#: **At the TOP level of `gen_meta`, deliberately, NOT under `enrichment`.** The
+#: first version put it beside `mcq2_leak_removed` and was correct for about four
+#: minutes: `_record_enrichment` does `"enrichment": meta`, replacing that
+#: sub-object wholesale — the very property `_UNENRICHED_SQL`'s fourth clause
+#: relies on for idempotence — so the next `--backfill` erased a child's archived
+#: reading history, four entries whose `answers` rows no longer existed either.
+#: Caught by reading the archive back after the backfill rather than trusting the
+#: write that had reported success.
+#:
+#: The rule that falls out is worth more than the fix: `enrichment` holds what the
+#: nodes produced THIS run and is replaced every run, so a permanent record of
+#: something a child did belongs beside `moderation` and `cost_usd`, which
+#: `_record_enrichment` and `run_grammar_backfill` both preserve by spreading the
+#: old object. A key that must outlive an enrichment must not live inside one.
+_ARCHIVE_MCQ2_ANSWERS_SQL = text(
+    """
+    UPDATE stories s
+    SET gen_meta = jsonb_set(
+        coalesce(s.gen_meta, '{}'::jsonb),
+        '{mcq2_answers_archived}',
+        archived.entries,
+        true
+    )
+    FROM (
+      SELECT CAST(kv.key AS int) AS story_id, kv.value AS entries
+      FROM jsonb_each(CAST(:archived AS jsonb)) kv
+    ) archived
+    WHERE s.id = archived.story_id
+    RETURNING s.id
+    """
+)
+
+#: The DELETE, and the third predicate is the whole safety property of this
+#: command: **a row cannot be removed until every one of its answers is already on
+#: the story in readable form.** Written in SQL rather than as a Python `if` for
+#: exactly the reason `_DELETE_LEAKY_MCQ2_SQL` is — the statement has to be
+#: structurally incapable of destroying evidence that was not preserved first,
+#: whatever the caller believes it wrote a moment ago. An equality, not a `>= 1`:
+#: archiving one of a child's three answers and deleting all three is the same
+#: data loss in a smaller font.
+#:
+#: The `> 0` is the boundary with the free sweep. A row with no answers is
+#: `--mcq2-repair`'s business and needs no decision; this command touches only
+#: rows that carry evidence, so an operator running it can never be surprised by
+#: what else it swept up.
+_DELETE_ARCHIVED_MCQ2_SQL = text(
+    """
+    DELETE FROM questions q
+    USING stories s
+    WHERE q.id = ANY(CAST(:ids AS int[]))
+      AND s.id = q.story_id
+      AND q.qtype = 'mcq2'
+      AND EXISTS (SELECT 1 FROM questions o WHERE o.story_id = q.story_id AND o.id <> q.id)
+      AND (SELECT count(*) FROM answers a WHERE a.question_id = q.id) > 0
+      AND (SELECT count(*) FROM answers a WHERE a.question_id = q.id) = (
+            SELECT count(*)
+            FROM jsonb_array_elements(
+              coalesce(s.gen_meta -> 'mcq2_answers_archived', '[]'::jsonb)
+            ) e
+            WHERE CAST(e ->> 'question_id' AS int) = q.id
+          )
+    RETURNING q.id, q.story_id
+    """
+)
+
+
+def _archive_entry(row) -> dict:
+    """One answer, flattened into something readable years from now.
+
+    Self-contained on purpose. An archived boolean whose question no longer
+    exists is not reading history, it is a `true` with no referent — so the
+    question's own text and both cards travel with every entry, and the
+    dashboard's four facts (question, reading, child, verdict, when) are all
+    top-level keys rather than nested under a shape a later refactor can move.
+    """
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    key = row.answer_key if isinstance(row.answer_key, dict) else {}
+    return {
+        "question_id": int(row.question_id),
+        "reading_id": int(row.reading_id),
+        "kid_id": int(row.kid_id),
+        "correct": bool(row.correct),
+        "answered_at": row.answered_at.isoformat() if row.answered_at else None,
+        "answer_id": int(row.answer_id),
+        "reading_stage_id": int(row.reading_stage_id) if row.reading_stage_id else None,
+        "qtype": "mcq2",
+        "prompt": row.prompt,
+        "options": list(payload.get("options") or []),
+        "correct_option": key.get("correct"),
+        "archived_because": "prompt_leaks_answer/negation_pair (DEVIATIONS 11.64)",
+        "archived_at": datetime.now(UTC).isoformat(),
+    }
+
+
+async def archive_answered_mcq2(
+    session,
+    target_status: Sequence[str] | None = SERVABLE_STATUSES,
+    only: Sequence[int] | None = None,
+) -> tuple[list[int], dict[int, list[dict]], list[LeakyMcq2]]:
+    """Preserve, then remove, a leaking two-choice question a child has answered.
+
+    `repair_leaky_mcq2` refuses these rows and says so, because `answers.
+    question_id` is `ON DELETE CASCADE` and a free sweep must never decide on its
+    own to erase a child's reading history (11.103). This is the decision, taken
+    explicitly and separately: every answer is copied onto the STORY — which
+    outlives the question row — and only then is the question removed.
+
+    It is safe to take because of a fact about this project rather than a
+    judgement about children: `MASTERY_QTYPES` is `("tap_word",)` and 11.66
+    refused to widen it, so **no `gpc_stats` counter and no promotion decision
+    has ever depended on an `mcq2` answer.** What is at stake is dashboard
+    reading history, and the archive holds every fact of it. Against that stands
+    the row itself — the live pool's q706 marked one child wrong twice for
+    reading the story, which is the defect materialised rather than described.
+
+    A SEPARATE command from `--mcq2-repair`, permanently. Folding it in would put
+    an irreversible decision inside a routine free repair, which is the shape of
+    every accident this module has a comment about.
+
+    Returns (removed question ids, {story_id: archived entries}, rows left alone).
+    Idempotent: the archive is keyed by (question, answer) so a re-run cannot
+    duplicate an entry, and a removed row cannot be found again.
+    """
+    leaking = await leaky_mcq2(session, target_status, only)
+    # Only rows blocked BY AN ANSWER. A row that is its story's last question is a
+    # different refusal with a different remedy (write another question), and
+    # silently sweeping it up here would empty a servable story — invariant 14,
+    # manufactured by the command that exists to be careful.
+    answered = [row for row in leaking if row.n_answers > 0 and row.n_other > 0]
+    untouched = [row for row in leaking if row not in answered]
+    if not answered:
+        return [], {}, untouched
+
+    ids = [row.question_id for row in answered]
+    rows = (await session.execute(_ANSWERED_MCQ2_ANSWERS_SQL, {"ids": ids})).all()
+
+    # Merge rather than append: an interrupted run that archived and did not get
+    # to the DELETE must re-archive to the same value, not to a doubled list.
+    stories = sorted({row.story_id for row in answered})
+    existing = {
+        r.id: list(r.entries or [])
+        for r in (
+            await session.execute(
+                text(
+                    "SELECT id, gen_meta -> 'mcq2_answers_archived' AS entries "
+                    "FROM stories WHERE id = ANY(CAST(:ids AS int[]))"
+                ),
+                {"ids": stories},
+            )
+        ).all()
+    }
+    archived: dict[int, list[dict]] = {}
+    for row in rows:
+        entry = _archive_entry(row)
+        identity = (entry["question_id"], entry["answer_id"])
+        kept = [
+            e
+            for e in existing.get(row.story_id, [])
+            if (e.get("question_id"), e.get("answer_id")) != identity
+        ]
+        existing[row.story_id] = kept + [entry]
+        archived.setdefault(row.story_id, []).append(entry)
+
+    await session.execute(
+        _ARCHIVE_MCQ2_ANSWERS_SQL,
+        {"archived": json.dumps({str(k): v for k, v in existing.items() if k in archived})},
+    )
+    # The write has to be visible to the DELETE's own predicate, which reads
+    # `stories.gen_meta` back rather than trusting this function.
+    await session.flush()
+
+    deleted = (await session.execute(_DELETE_ARCHIVED_MCQ2_SQL, {"ids": ids})).all()
+    gone = sorted(r.id for r in deleted)
+    if deleted:
+        by_story: dict[str, list[int]] = {}
+        for row in deleted:
+            by_story.setdefault(str(row.story_id), []).append(row.id)
+        await session.execute(
+            _RECORD_MCQ2_REMOVAL_SQL,
+            {"removed": json.dumps({k: sorted(v) for k, v in by_story.items()})},
+        )
+    stuck = [row for row in answered if row.question_id not in set(gone)]
+    return gone, archived, untouched + stuck
+
+
+async def run_mcq2_archive(only: Sequence[int] | None = None) -> None:
+    """`--mcq2-archive-answered`: the operator's decision, taken once.
+
+    Free — no API call. Refuses at the end if a row it archived is still in the
+    pool, because a repair that reports success over its own leftovers is the
+    failure `_body_verdict` shipped (11.84).
+    """
+    async with SessionLocal() as session:
+        removed, archived, left = await archive_answered_mcq2(session, SERVABLE_STATUSES, only)
+        await session.commit()
+        # The postcondition, read back from the pool rather than taken from the
+        # counters above.
+        remaining = [
+            row
+            for row in await leaky_mcq2(session, SERVABLE_STATUSES, only)
+            if row.n_answers > 0 and row.n_other > 0
+        ]
+
+    if not removed and not archived:
+        print(
+            "  no servable two-choice question that a child has answered is one the "
+            "current check_mcq2 refuses — nothing to archive"
+        )
+        return
+
+    entries = sum(len(v) for v in archived.values())
+    print(
+        f"  archived {entries} recorded answer(s) onto {len(archived)} story/stories, then "
+        f"removed {len(removed)} two-choice question(s) that named their own answer: {removed}"
+    )
+    for story_id, rows in sorted(archived.items()):
+        kids = sorted({e["kid_id"] for e in rows})
+        print(
+            f"    story {story_id}: {len(rows)} answer(s) from kid(s) {kids} now in "
+            "`gen_meta.mcq2_answers_archived` — question text, both cards, reading id "
+            "and verdict all preserved, and it survives the next enrichment"
+        )
+    print(
+        "    Nothing that moves §8 was touched: `mcq2` is not in MASTERY_QTYPES (11.66), "
+        "so no `gpc_stats` counter and no promotion decision ever depended on these rows."
+    )
+    if left:
+        print(f"  left {len(left)} row(s) alone:")
+        for line in _render_leaky_mcq2(left):
+            print(line)
+    if remaining:
+        raise SystemExit(
+            f"\n{len(remaining)} answered leaking two-choice question(s) are still in the "
+            "pool after this command's own pass:\n"
+            + "\n".join(_render_leaky_mcq2(remaining))
+            + "\nThat is a defect in the command, not in the pool. Nothing was deleted that "
+            "was not archived first — `_DELETE_ARCHIVED_MCQ2_SQL` cannot."
+        )
 
 
 async def refresh_tap_word_prompts(
@@ -3034,6 +3298,17 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--mcq2-archive-answered",
+        action="store_true",
+        help=(
+            "the operator's decision on a leaking two-choice question a child has "
+            "ANSWERED: copy every answer onto the story's gen_meta, then remove the "
+            "question. Free, no API call, and the DELETE is structurally unable to "
+            "run before the archive exists. Separate from --mcq2-repair on purpose "
+            "— it is irreversible (DEVIATIONS 11.103/11.116)"
+        ),
+    )
+    p.add_argument(
         "--only", help="restrict --backfill / --grammar-backfill to these comma-separated ids"
     )
     a = p.parse_args()
@@ -3051,6 +3326,8 @@ def main() -> None:
             asyncio.run(run_cue_repair(only=only))
         elif a.mcq2_repair:
             asyncio.run(run_mcq2_repair(only=only))
+        elif a.mcq2_archive_answered:
+            asyncio.run(run_mcq2_archive(only=only))
         elif a.grammar_backfill:
             asyncio.run(run_grammar_backfill(only=only))
         elif a.backfill:

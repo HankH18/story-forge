@@ -35,6 +35,7 @@ three green gates.
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -687,6 +688,257 @@ async def test_the_delete_itself_refuses_an_answered_row_and_a_story_s_last_ques
     finally:
         await session.rollback()
         await session.execute(text("DELETE FROM stories WHERE id = :i"), {"i": lonely_story})
+        await session.commit()
+
+
+async def _answer_it(session, story_id: int, question_id: int, *, correct: bool = True) -> int:
+    """One recorded answer by a throwaway kid. Returns the answer id."""
+    kid_id = (
+        await session.execute(
+            text("SELECT id FROM kids WHERE display_name = 'Mcqgatekid' LIMIT 1")
+        )
+    ).scalar_one_or_none()
+    if kid_id is None:
+        kid_id = (
+            await session.execute(
+                text(
+                    "INSERT INTO kids (display_name, stage_id) VALUES "
+                    "('Mcqgatekid', 1) RETURNING id"
+                )
+            )
+        ).scalar_one()
+    reading_id = (
+        await session.execute(
+            text(
+                "INSERT INTO readings (kid_id, story_id, stage_id, path) VALUES "
+                """(:k, :s, 1, CAST('{"choices": []}' AS jsonb)) RETURNING id"""
+            ),
+            {"k": kid_id, "s": story_id},
+        )
+    ).scalar_one()
+    return (
+        await session.execute(
+            text(
+                "INSERT INTO answers (reading_id, question_id, correct) "
+                "VALUES (:r, :q, :c) RETURNING id"
+            ),
+            {"r": reading_id, "q": question_id, "c": correct},
+        )
+    ).scalar_one()
+
+
+async def _archive_of(session, story_id: int) -> list[dict]:
+    return (
+        await session.execute(
+            text(
+                "SELECT coalesce(gen_meta -> 'mcq2_answers_archived', '[]'::jsonb) "
+                "FROM stories WHERE id = :i"
+            ),
+            {"i": story_id},
+        )
+    ).scalar_one()
+
+
+async def test_archiving_an_answered_row_preserves_every_answer_then_removes_it(session, planted):
+    """The operator's decision (11.103 option (c)), end to end.
+
+    `repair_leaky_mcq2` refuses these rows on purpose. This is the separate,
+    explicit command that resolves one — and its whole claim is that nothing is
+    lost, so the assertion is that every fact a dashboard shows about the reading
+    survives on the story after the question row is gone.
+    """
+    qid = await _plant_mcq2(session, planted, LEAKING_MCQ2)
+    first = await _answer_it(session, planted, qid, correct=True)
+    second = await _answer_it(session, planted, qid, correct=False)
+    await session.commit()
+
+    async with SessionLocal() as s:
+        removed, archived, left = await warm.archive_answered_mcq2(s, SERVABLE_STATUSES, [planted])
+        await s.commit()
+
+    assert removed == [qid]
+    assert left == []
+    async with SessionLocal() as s:
+        assert (
+            await s.execute(text("SELECT count(*) FROM questions WHERE id = :q"), {"q": qid})
+        ).scalar_one() == 0
+        entries = await _archive_of(s, planted)
+        receipt = (
+            await s.execute(
+                text(
+                    "SELECT gen_meta -> 'enrichment' -> 'mcq2_leak_removed' "
+                    "FROM stories WHERE id = :i"
+                ),
+                {"i": planted},
+            )
+        ).scalar_one()
+        # The story is still servable: it kept its `tap_word` (invariant 14).
+        assert (
+            await s.execute(
+                text("SELECT count(*) FROM questions WHERE story_id = :i"), {"i": planted}
+            )
+        ).scalar_one() == 1
+
+    assert receipt == [qid], "the stripped story carries no route back to a question"
+    assert [e["answer_id"] for e in entries] == [first, second]
+    assert [e["correct"] for e in entries] == [True, False], "a verdict was not preserved"
+    assert {e["question_id"] for e in entries} == {qid}
+    for entry in entries:
+        # Self-contained: an archived boolean whose question is gone and whose
+        # text was not kept is a `true` with no referent.
+        assert entry["prompt"] == LEAKING_MCQ2[0]
+        assert entry["options"] == ["It sat on top.", "It sat in a cave."]
+        assert entry["correct_option"] == "It sat on top."
+        assert entry["reading_id"] and entry["kid_id"] and entry["answered_at"]
+
+
+async def test_the_archive_survives_the_next_enrichment(session, planted):
+    """The defect that made the archive worthless, found by reading it back.
+
+    The archive first went into `gen_meta.enrichment` beside `mcq2_leak_removed`,
+    which is exactly where it must not be: `_record_enrichment` does
+    `"enrichment": meta` and replaces that sub-object wholesale — the property
+    `_UNENRICHED_SQL`'s fourth clause *relies* on for idempotence. So the archive
+    survived until the next `--backfill` and no further, and by then the `answers`
+    rows it replaced were already gone. Four rows of a real child's reading
+    history, erased by the command that had just promised to preserve them.
+
+    This drives the exact sequence — archive, then enrich — rather than asserting
+    the key's spelling, because the spelling is not the requirement. Surviving is.
+    """
+    qid = await _plant_mcq2(session, planted, LEAKING_MCQ2)
+    await _answer_it(session, planted, qid, correct=True)
+    await session.commit()
+
+    async with SessionLocal() as s:
+        await warm.archive_answered_mcq2(s, SERVABLE_STATUSES, [planted])
+        await s.commit()
+        before = await _archive_of(s, planted)
+    assert len(before) == 1, "nothing was archived, so this proves nothing"
+
+    # An enrichment lands on the story, exactly as `--backfill` would run it.
+    async with SessionLocal() as s:
+        story = await s.get(warm.Story, planted)
+        await warm._record_enrichment(
+            s, story, {"questions": 1, "segments": 3, "cost_usd": 0.001}, 0.01
+        )
+        await s.commit()
+
+    async with SessionLocal() as s:
+        after = await _archive_of(s, planted)
+    assert after == before, (
+        "an enrichment erased the archived reading history. `gen_meta.enrichment` is "
+        "REPLACED wholesale on every enrichment — a record that must outlive one "
+        "cannot live inside it."
+    )
+
+
+async def test_the_archive_delete_cannot_run_before_the_archive_exists(session, planted):
+    """The safety property, asserted against the statement rather than the caller.
+
+    `_DELETE_ARCHIVED_MCQ2_SQL`'s third predicate is what makes this command
+    different from `DELETE FROM questions`: the row cannot go until every one of
+    its answers is already on the story. Both failure modes are driven — no
+    archive at all, and a PARTIAL archive — because "some of the evidence was
+    kept" is the one that would look fine in a report.
+    """
+    qid = await _plant_mcq2(session, planted, LEAKING_MCQ2)
+    first = await _answer_it(session, planted, qid, correct=True)
+    await _answer_it(session, planted, qid, correct=False)
+    await session.commit()
+
+    try:
+        gone = (await session.execute(warm._DELETE_ARCHIVED_MCQ2_SQL, {"ids": [qid]})).all()
+        assert gone == [], "a row was deleted with none of its answers archived"
+
+        # Now archive ONE of the two — the partial-preservation case.
+        await session.execute(
+            warm._ARCHIVE_MCQ2_ANSWERS_SQL,
+            {
+                "archived": json.dumps(
+                    {str(planted): [{"question_id": qid, "answer_id": first, "correct": True}]}
+                )
+            },
+        )
+        gone = (await session.execute(warm._DELETE_ARCHIVED_MCQ2_SQL, {"ids": [qid]})).all()
+        assert gone == [], (
+            "a row was deleted with 1 of its 2 answers archived — losing half a child's "
+            "history is the same data loss in a smaller font"
+        )
+        assert (
+            await session.execute(
+                text("SELECT count(*) FROM answers WHERE question_id = :q"), {"q": qid}
+            )
+        ).scalar_one() == 2
+    finally:
+        await session.rollback()
+
+
+async def test_archiving_an_answered_row_is_idempotent(session, planted):
+    """Run twice. The second run must find nothing and must not double the archive."""
+    qid = await _plant_mcq2(session, planted, LEAKING_MCQ2)
+    await _answer_it(session, planted, qid, correct=True)
+    await session.commit()
+
+    async with SessionLocal() as s:
+        await warm.archive_answered_mcq2(s, SERVABLE_STATUSES, [planted])
+        await s.commit()
+        once = await _archive_of(s, planted)
+
+    async with SessionLocal() as s:
+        removed, archived, left = await warm.archive_answered_mcq2(s, SERVABLE_STATUSES, [planted])
+        await s.commit()
+        twice = await _archive_of(s, planted)
+
+    assert (removed, archived, left) == ([], {}, [])
+    assert twice == once, "a second run changed an archive it should not have touched"
+    assert len(once) == 1
+
+
+async def test_the_archive_leaves_a_story_s_last_question_alone(session):
+    """The other refusal, which this command must NOT sweep up.
+
+    A leaking `mcq2` that is its story's only question is answered AND
+    unremovable, and archiving-then-deleting it would leave a servable story a
+    child reads and then just stops — invariant 14, manufactured by the command
+    that exists to be careful.
+    """
+    theme_id = (
+        await session.execute(text("SELECT id FROM themes WHERE slug = 'dragons'"))
+    ).scalar_one()
+    lonely = (
+        await session.execute(
+            text(
+                "INSERT INTO stories (stage_id, theme_id, status, title, decodability, "
+                "story_words, gen_meta) VALUES (1, :t, 'warm', 'Mcq2 Lonely Fixture', 1.0, "
+                "CAST('{}' AS text[]), CAST('{}' AS jsonb)) RETURNING id"
+            ),
+            {"t": theme_id},
+        )
+    ).scalar_one()
+    try:
+        qid = await _plant_mcq2(session, lonely, LEAKING_MCQ2)
+        await _answer_it(session, lonely, qid, correct=True)
+        await session.commit()
+
+        async with SessionLocal() as s:
+            removed, archived, left = await warm.archive_answered_mcq2(
+                s, SERVABLE_STATUSES, [lonely]
+            )
+            await s.commit()
+        assert removed == [] and archived == {}
+        assert [row.question_id for row in left] == [qid]
+        async with SessionLocal() as s:
+            assert (
+                await s.execute(text("SELECT count(*) FROM questions WHERE id = :q"), {"q": qid})
+            ).scalar_one() == 1
+            assert await _archive_of(s, lonely) == []
+    finally:
+        await session.rollback()
+        await session.execute(text("DELETE FROM stories WHERE id = :i"), {"i": lonely})
+        await session.execute(
+            text("DELETE FROM kids WHERE display_name = :n"), {"n": "Mcqgatekid"}
+        )
         await session.commit()
 
 

@@ -268,6 +268,23 @@ repair is forbidden to touch are printed under `DECISION REQUIRED` on every run
 and deliberately do **not** set the exit code: their only remedy is a human
 deciding whether to erase a child's recorded answers (DEVIATIONS 11.99-11.103).
 
+**When you decide to resolve one, `--mcq2-archive-answered` is how** (11.116). It
+copies every answer — question text, both cards, reading id, child, verdict, when
+— onto `stories.gen_meta.mcq2_answers_archived`, and only then removes the
+question; the DELETE is structurally unable to run until the archive is complete,
+counted answer for answer. A separate command because it is irreversible, and it
+never touches a row that is its story's last question. Nothing that moves §8 is at
+stake: `mcq2` is not in `MASTERY_QTYPES`, so no `gpc_stats` counter and no
+promotion decision has ever depended on an `mcq2` answer.
+
+> The archive is at the **top level** of `gen_meta`, not under `enrichment`.
+> `_record_enrichment` replaces `gen_meta.enrichment` wholesale on every
+> enrichment — by design, it is what makes `--backfill` idempotent — so the first
+> version of this archive was erased by the next `--backfill` run (11.117). If you
+> add any other record that must outlive an enrichment, put it beside
+> `moderation` and `cost_usd`, and read it back after a `--backfill` before you
+> believe it.
+
 ## 5. One manual Clerk step the API cannot do for you
 
 **A fresh Clerk instance silently downgrades every user to `parent`.** Not an
