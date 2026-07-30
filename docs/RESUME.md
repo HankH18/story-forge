@@ -1,6 +1,6 @@
 # RESUME — regenerated automatically, do not hand-edit
 
-**Generated:** 2026-07-30 05:41:22 CDT by `/tmp/refresh_resume.sh`.
+**Generated:** 2026-07-30 05:54:27 CDT by `/tmp/refresh_resume.sh`.
 Every figure here was read from the thing it describes at that moment. If a number
 looks stale, the generator is the bug, not the number.
 
@@ -8,12 +8,12 @@ looks stale, the generator is the bug, not the number.
 
 | | |
 |---|---|
-| HEAD | `1bddeb2` on `k5-learning-app-gstack-setup` |
+| HEAD | `5c31c51` on `k5-learning-app-gstack-setup` |
 | uncommitted files | 0 |
 | GitHub `master` | `7d58263` |
 | stages in local db | 11 |
 | smallest allowed_words stage | 771 (§18's floor is 150) |
-| git worktrees | 3 (1 main + 1 sibling checkout = quiet; more = loop fixers in flight) |
+| git worktrees | 2 (1 main + 1 sibling checkout = quiet; more = loop fixers in flight) |
 | live app /api/health | HTTP 200 — https://storyforge-vtwne.ondigitalocean.app |
 
 ## The single thing in flight
@@ -90,24 +90,3 @@ Push with a one-off URL, never a stored PAT: `git push origin master` reaches BO
 remotes, which is what the DO spec's `deploy_on_push` relies on. The DO token was
 supplied per-command via `DIGITALOCEAN_ACCESS_TOKEN` and never written to
 `~/.config/doctl`. A new session will need the user to re-supply both.
-
-## The audit-fix loop has NOT run. Read this before assuming it did.
-
-The first attempt hit the session limit and **all 115 agents failed** — 0 findings,
-0 fixes, 0 rounds. The workflow reported `{found: 0, survived: 0, accepted: 0}`
-three times over, which is not "the codebase is clean", it is "nothing executed".
-Limit resets 5:30am America/Chicago.
-
-An OS-level watchdog now owns finishing it: `/Users/hankholcomb/story-forge-watchdog.sh`,
-log at `/Users/hankholcomb/story-forge-watchdog.log`. It re-invokes the Claude CLI
-every 15 minutes until `docs/.audit-loop-complete` appears, capped at 40 runs and a
-12-hour deadline. It runs OUTSIDE any Claude session, which is the whole point:
-CronCreate and ScheduleWakeup are session-only and die with the session that
-scheduled them, so they can never restart it.
-
-Stop it early with `touch /Users/hankholcomb/story-forge-watchdog.stop`.
-
-**Do not create `docs/.audit-loop-complete` until three rounds have genuinely
-produced findings, verifications and merges.** That marker is the only thing that
-stops the watchdog, and creating it early would end the work while claiming it
-finished — the exact failure mode this project has shipped six times.
