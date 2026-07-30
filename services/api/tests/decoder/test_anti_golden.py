@@ -28,7 +28,7 @@ import random
 
 import pytest
 
-from storyforge.decoder import MAX_STAGE, load_lexicon, mastered_ids, validate_word
+from storyforge.decoder import MAX_STAGE, load_gpcs, load_lexicon, mastered_ids, validate_word
 from storyforge.decoder.types import WordVerdict
 
 # Words whose spelling-to-sound mapping is genuinely beyond a K-5 decodable
@@ -94,7 +94,9 @@ def test_common_early_reader_words_are_decodable(word, stage):
 
 # --- the vacuity metric ------------------------------------------------------
 # Fraction of an adult dictionary the inventory can spell with EVERYTHING
-# unlocked. Currently 44.75% at 93 GPCs — was 44.62% at 92 before `wh`->/w/ was
+# unlocked — and "everything unlocked" now means the GPC inventory itself, never
+# a stage number (DEVIATIONS 21.3; see `full_inventory` below for the drift this
+# closes). Currently 44.75% at 93 GPCs — was 44.62% at 92 before `wh`->/w/ was
 # added (docs/DEVIATIONS.md 8.13 records the +0.13pt as the price of 31 words).
 # COMMENT ONLY: the SEED, SAMPLE SIZE, FLOOR and CEILING below are untouched.
 # The ratchet has now fired on a change someone actually wanted rather than on a
@@ -120,28 +122,83 @@ VACUITY_FLOOR = 0.35
 VACUITY_CEILING = 0.50
 
 
-def test_gate_has_not_dissolved():
+def full_inventory() -> frozenset[str]:
+    """Every GPC in `gpcs.csv`, with no reference to any stage number.
+
+    **This, and not `mastered_ids(MAX_STAGE)`, is what the ratchet is about
+    (DEVIATIONS 21.3).** The ratchet's question is "how permissive has the
+    INVENTORY become" — a property of a 93-row CSV. Expressed as "what does the
+    top stage decode" it became a property of a hand-maintained integer as well,
+    and the two coincide only by the convention that the top stage is cumulative
+    review. That convention is pinned by a literal `MAX_STAGE == 11` in
+    `test_inventory.py` — the exact line a re-stage edits — so the ratchet was
+    reading its own subject off the thing most likely to move.
+
+    Measured, at the seed and sample size below, over the CURRENT inventory:
+
+        stage  8  ->  44.00%     stage 10  ->  44.75%
+        stage  9  ->  44.375%    stage 11  ->  44.75%   (= full inventory)
+
+    So the recorded 44.75% survived the twelve-to-eleven renumber intact and still
+    describes the same measurement it did before it (DEVIATIONS 12.6 claimed this
+    and it re-measures true) — but only because both 12 and 11 sat at or above the
+    highest stage any GPC is taught at. Leave a GPC above `MAX_STAGE`, or retire
+    two more stages, and the same code reports 44.00% while nothing about
+    permissiveness has changed: five points of unearned headroom under the 50%
+    ceiling, arriving silently and in the safe-looking direction. A ratchet whose
+    reading moves for reasons unrelated to permissiveness is not measuring
+    permissiveness.
+    """
+    return frozenset(g.id for g in load_gpcs())
+
+
+def vacuity_ratio(mastered: frozenset[str]) -> float:
+    """Fraction of the fixed adult-dictionary sample `mastered` can spell."""
     lexicon = load_lexicon()
     words = sorted(w for w in lexicon if w.isalpha() and 2 <= len(w) <= 9)
     sample = random.Random(VACUITY_SEED).sample(words, VACUITY_SAMPLE_SIZE)
-
-    # The TOP stage — the whole cumulative inventory. The ladder renumber
-    # (DEVIATIONS 12.6) moved the top label from 12 to 11 without moving the
-    # set: the top stage's mastered set is the full 93-GPC inventory either
-    # way, so the measured ratio did not move (re-measured, not assumed).
-    top = mastered_ids(MAX_STAGE)
     decodable = sum(
-        1 for w in sample if validate_word(w, top).verdict is WordVerdict.DECODABLE
+        1 for w in sample if validate_word(w, mastered).verdict is WordVerdict.DECODABLE
     )
-    ratio = decodable / VACUITY_SAMPLE_SIZE
+    return decodable / VACUITY_SAMPLE_SIZE
+
+
+def test_gate_has_not_dissolved():
+    inventory = full_inventory()
+    ratio = vacuity_ratio(inventory)
 
     assert ratio <= VACUITY_CEILING, (
-        f"{ratio:.1%} of sampled adult-dictionary words are now decodable. The "
-        f"inventory has grown past the point where the guarantee means anything "
-        f"— §18: the strength is its smallness. Justify each new GPC against a "
-        f"real scope & sequence, or drop it."
+        f"{ratio:.1%} of sampled adult-dictionary words are decodable with the "
+        f"whole {len(inventory)}-GPC inventory unlocked. It has grown past the "
+        f"point where the guarantee means anything — §18: the strength is its "
+        f"smallness. Justify each new GPC against a real scope & sequence, or "
+        f"drop it."
     )
     assert ratio >= VACUITY_FLOOR, (
-        f"only {ratio:.1%} decodable — the inventory lost coverage and "
-        f"generation will starve for vocabulary."
+        f"only {ratio:.1%} decodable across {len(inventory)} GPCs — the inventory "
+        f"lost coverage and generation will starve for vocabulary."
     )
+
+
+def test_the_ratchet_is_invariant_under_re_staging():
+    """DEVIATIONS 21.3 — the ratchet's subject, asserted where it is measured.
+
+    Two claims, and the second is what stops the first from being decorative.
+
+    1. **Every GPC is reachable**: the top stage of the ladder teaches the whole
+       inventory. A GPC stranded above `MAX_STAGE` is a rule no child is ever
+       taught, and it would silently shrink what the ratchet measures. This is the
+       premise `test_gate_has_not_dissolved` used to assume; it now has to hold.
+    2. **The reading really does depend on the stage label**, so relying on that
+       label was a live hazard and not a theoretical one. If a smaller mastered
+       set scored the same, `mastered_ids(MAX_STAGE)` would have been a harmless
+       spelling of `full_inventory()` and none of this would matter.
+    """
+    inventory = full_inventory()
+    assert mastered_ids(MAX_STAGE) == inventory, (
+        f"stage {MAX_STAGE} does not teach the whole inventory: "
+        f"{sorted(inventory - mastered_ids(MAX_STAGE))} are taught above the top "
+        f"stage, so no child ever reaches them — and the vacuity ratchet would "
+        f"have measured a subset and reported unearned headroom."
+    )
+    assert vacuity_ratio(mastered_ids(MAX_STAGE - 3)) < vacuity_ratio(inventory)
