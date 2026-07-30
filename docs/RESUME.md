@@ -1,6 +1,6 @@
 # RESUME — regenerated automatically, do not hand-edit
 
-**Generated:** 2026-07-30 16:05:55 CDT by `/tmp/refresh_resume.sh`.
+**Generated:** 2026-07-30 17:55:55 CDT by `/tmp/refresh_resume.sh`.
 Every figure here was read from the thing it describes at that moment. If a number
 looks stale, the generator is the bug, not the number.
 
@@ -8,9 +8,9 @@ looks stale, the generator is the bug, not the number.
 
 | | |
 |---|---|
-| HEAD | `d1b552c` on `k5-learning-app-gstack-setup` |
-| uncommitted files | 2 |
-| GitHub `master` | `c54dfac` |
+| HEAD | `fffcd2f` on `k5-learning-app-gstack-setup` |
+| uncommitted files | 9 |
+| GitHub `master` | `5a7b4f2` |
 | stages in local db | 11 |
 | smallest allowed_words stage | 771 (§18's floor is 150) |
 | git worktrees | 2 (1 main + 1 sibling checkout = quiet; more = loop fixers in flight) |
@@ -48,14 +48,26 @@ provider connected. §17's demo runs end to end; its playground step is now
 
 ## What is NOT done, and the first one matters
 
-1. **Production is running the PRE-RENUMBER image.** The deployed tag is
-   `c5125be-amd64` and its database still has 12 stages; migration
-   `f3a91c6d0e24` applies at the next deploy's PRE_DEPLOY job. Prod is therefore
-   self-consistent but old, and the local tree is eleven stages. Rebuilding is
-   `docker build --platform linux/amd64` (arm64 gives `exec format error` —
-   that failure already cost one deploy), push, then update the tag in the spec.
-2. Prod was warmed with 44 stories under the OLD prompts, old word list and old
-   art. They should be replaced, not migrated.
+1. **Prod's SCHEMA is current; its CONTENT is not.** Measured read-only on
+   2026-07-30 against cluster `storyforge-pg`, db `storyforge`:
+   `alembic_version = f3a91c6d0e24`, **11 stages (1-11)** — so the renumber
+   HAS applied and the earlier "prod is pre-renumber with 12 stages" claim in
+   this file was FALSE. Prod holds 111 stories (105 warm / 3 rejected / 3
+   complete), 4 kids, 6 readings, 5 answers.
+   What is stale is the POOL, generated under the old prompts and old word
+   list: `--check-mcq2` against prod reports **13 of 52 servable two-choice
+   rows answerable with the story unread (25%), 4 of them pointing at the
+   WRONG card**, plus 2 rows with recorded answers needing an explicit
+   decision. Prod stories still contain `amid` — the exact word the user
+   reported ("no five-year-old is using the word 'amid'").
+   Rebuilding the image is `docker build --platform linux/amd64` (arm64 gives
+   `exec format error` — that already cost one deploy), push, update the tag.
+2. Prod's pool should be REPLACED, not repaired row by row. Re-warming from
+   scratch costs real money — the local warm's own recorded figure is
+   **$16.29 across 637 generated stories ($0.0256 avg)**. Copying the
+   already-gated local pool in is free and is the better route, but prod has
+   4 real kids and 6 readings whose story_id references would cascade, so it
+   needs a migration, not a truncate.
 3. Open, documented, not blockers: one grammar false positive on coordinated
    subjects (`"Sam and the rabbit spin."`); §1.6's p95<12s recorded as unmet and
    unreachable with the criterion unrelaxed; `ruff format --check` fails on ~39
