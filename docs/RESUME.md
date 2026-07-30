@@ -1,6 +1,6 @@
 # RESUME — regenerated automatically, do not hand-edit
 
-**Generated:** 2026-07-30 17:55:55 CDT by `/tmp/refresh_resume.sh`.
+**Generated:** 2026-07-30 17:57:07 CDT by `scripts/refresh_resume.sh`.
 Every figure here was read from the thing it describes at that moment. If a number
 looks stale, the generator is the bug, not the number.
 
@@ -8,7 +8,7 @@ looks stale, the generator is the bug, not the number.
 
 | | |
 |---|---|
-| HEAD | `fffcd2f` on `k5-learning-app-gstack-setup` |
+| HEAD | `2cac2c6` on `k5-learning-app-gstack-setup` |
 | uncommitted files | 9 |
 | GitHub `master` | `5a7b4f2` |
 | stages in local db | 11 |
@@ -18,18 +18,20 @@ looks stale, the generator is the bug, not the number.
 
 ## The single thing in flight
 
-A three-round audit-fix loop, run as a Workflow. Per round: 36 Fable finders (one
-per subsystem) -> adversarial verify (default refuted) -> objective triage ->
-fix in an isolated worktree -> **merge, testing after every single merge** -> gate.
-Rounds 2 and 3 are deduped against earlier findings.
+An audit-fix loop, driven by **direct `Agent` calls, NOT the `Workflow` tool.**
+Workflow was tried and abandoned: it was killed six times, and because it returns
+immediately and runs in the background it cannot be driven from a one-shot
+`claude -p` process — run 1 exited rc=0 having produced a plan, a monitor and
+zero findings for exactly that reason. Direct agents complete before the caller
+moves on, so nothing is orphaned. The two dead workflow scripts are still on disk
+under the session's `workflows/scripts/` directory; they are history, not a plan.
 
-    Run ID:     wf_f3df3f19-776
-    Script:     ~/.claude/projects/-Users-hankholcomb-conductor-workspaces-story-forge-delhi/e2581e8b-a8ea-453c-977c-55820e51f3c4/workflows/scripts/storyforge-audit-fix-loop-wf_f3df3f19-776.js
-    Resume:     Workflow({scriptPath: "<above>", resumeFromRunId: "wf_f3df3f19-776"})
-
-Resuming returns every completed agent from cache, so a dead session costs only
-the agents that were mid-flight. **Read `<transcriptDir>/journal.jsonl` before
-assuming a cached result was non-empty.**
+Per round: subsystem auditors (a few at a time, each returning defects AND
+improvements with reproductions) -> adversarial verify, DEFAULT TO REFUTED ->
+implement what survives, one at a time, running the suite after EACH change ->
+gate -> push. Findings are written to `docs/DEVIATIONS.md` as they land, under a
+band nobody else is using, because a crash between the work and the write-up
+loses the work.
 
 **If `git worktree list` shows more than 2 entries, fixes are stranded.** Each
 fixer commits inside its own worktree and a merge phase brings them in; a session
@@ -76,13 +78,39 @@ provider connected. §17's demo runs end to end; its playground step is now
 ## Traps that have each cost real time here
 
 - **A check that passes because it asks the wrong question** is this project's
-  signature defect. Six shipped: a grammar verdict computed then discarded on
-  write; a promotion counter counting readings not distinct stories, with four
-  tests pinning the bug as the contract; "0 blocklisted words" true against a list
-  holding only stems while 50 inflections were live; 839 segments tagged with art
-  against ZERO image files, every <img> 404ing into a silent placeholder;
-  `GET /api/themes` 404ing for eight phases; and a worktree-isolated fix phase
-  with no merge step, which would have discarded three rounds of work.
+  signature defect. **Thirteen shipped so far:** a grammar verdict computed then
+  discarded on write; a promotion counter counting readings not distinct stories,
+  with four tests pinning the bug as the contract; "0 blocklisted words" true
+  against a list holding only stems while 50 inflections were live; 839 segments
+  tagged with art against ZERO image files, every <img> 404ing into a silent
+  placeholder; `GET /api/themes` 404ing for eight phases; a coverage gate
+  counting servable rather than promotable stories; a worktree-isolated fix phase
+  with no merge step, which would have discarded three rounds of work;
+  `_STRIPPED_STORY_SQL` referenced with an explaining comment but never written;
+  `_RECORD_MCQ2_REMOVAL_SQL` defined, explained, and never executed; a tap-word
+  question whose sentence said SOUND while every proof said LETTERS; §8's evidence
+  guard written as a read-then-write that N callers could forge; §7's "the kid
+  hasn't read" clause never implemented at all, so a child cycled 3 stories
+  forever and sat at "3 of 5" permanently while BOTH supply gates read green; and
+  moderation rule 7, which had a stated rule and no detection behind it.
+  The lesson each time is the same: **ask what the check would have to observe to
+  fail, and go confirm it can observe that.**
+- **A test that cannot fail is the same defect wearing a lab coat.** Sabotage
+  every test you write — break the source it covers and confirm it goes red.
+  One agent here found two of its own new fixtures were incapable of failing:
+  the first reproduced a different defect than the one it was written for, the
+  rewrite reproduced nothing at all.
+- **Gate against a git CLONE of HEAD, not `git archive`.** `git archive` into
+  /tmp produces a directory that is not a repo, so eval provenance records
+  `git_dirty=None` and one test fails for a reason that has nothing to do with
+  your change. `git clone --no-hardlinks . /tmp/x` gives a real repo at HEAD
+  with the in-flight edits excluded. (The eval renderer itself is honest here —
+  it prints "dirty-tree state NOT RECORDED" rather than claiming clean.)
+- **Do not run the suite while several agents are live.** Four concurrent
+  pytest runs against the one Postgres produce `connection refused` bursts and a
+  DIFFERENT set of failures every run, while the container still reports healthy
+  at 16/100 connections. Varying failures across runs means contention, not a
+  regression — wait for the agents, then gate once.
 - **Measure against a private DB copy** when anything else is writing:
   `docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfscratch'`
   then `DATABASE_URL=.../sfscratch`. A green shared-DB run is as untrustworthy as a red one.
