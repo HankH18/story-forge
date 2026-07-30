@@ -6567,3 +6567,1049 @@ still measuring. Nothing was lost — the working tree and `cd55c97` are byte-id
 for every file I own — but a shared tree with two agents in it has no commit
 boundary, and the F9 revert in 9.53 could as easily have been committed in its
 broken state. Worth knowing before the next two-agent phase.
+
+## Phase 8 — nothing in this system checked that a story is a story
+
+Numbered 11.40-11.59. Written **before** the changes, per §0. Everything marked
+**PROVED** carries the command that measured it; everything else is labelled
+**ASSUMED** and stays that way until it is measured.
+
+The defect, in the user's words after reading the live app: *"the stories don't
+feel the need to follow any sort of storyline. Instead, it's more like 'Adam sat,
+Adam ran'."* Seen at stage 2 **and at stage 6**. §18 pre-excuses stages 1-2 and is
+right to — stage 1's vocabulary is `s a t p i n m d`. It does not excuse stage 6,
+which has vowel teams, `er`, and 5,392 allowed words. The eval never noticed
+because **every gate in the system measures decodability and none measures
+narrative**: §1 item 2 is decodability + rewrite depth, `passes_gate` is
+decodability + OOV + the story-word cap, and §13's judge rules the plain register
+in-bounds by design ("The prose will be extremely simple and repetitive… never a
+reason to reject").
+
+**11.40 — the live pool confirms the report at BOTH ends of the ladder, and the
+top-of-ladder cases are the ones §18 does not cover.** PROVED, read out of the
+shared database, `status IN ('warm','complete')`:
+
+| story | stage | text |
+|---|---|---|
+| 1670 | 2 | "A rabbit sat in the forest. A giraffe sat in the forest. The rabbit ran up. The giraffe ran up. The rabbit and the giraffe ran to the top. The rabbit and the giraffe sat on top. The end." |
+| 28 | 2 | "…Sam ran into the moon. Sam sat on the moon. Sam had fun. Sam ran into a planet. Sam had fun on the planet. Sam ran back into the rocket." |
+| 7274 | 6 | "A dragon was in a cave. It had wide wings. Every day it went up high. It went up into the sky. Then it came back to the cave…" |
+| 7324 | 9 | "…The dragon went for a town. It went on to a park. It went off past a hill. It found a place to rest… Then the dragon went back to the cave first… Then it went on again. Then it found its way out. It saw all that was there again." |
+
+Not every story is like this — 7316 (stage 9) and 7278 (stage 6) are real stories
+with a want, a setback and a resolution — so this is a DISTRIBUTION problem, which
+is exactly the shape that needs a measurement rather than an anecdote.
+
+**11.41 — the proximate cause is not an absent instruction, it is a PRESENT one:
+`SYSTEM_RULES` rule 8 tells the model to pad a finished story with unrelated
+events.** The clause is *"If the story ends before the count does, give a character
+something else to do."* That is the length fix of 8.22-8.29 working exactly as
+written, and at 120-200 words it is the difference between story 7309's arc
+(lost → sees a light → home) and the four flat sentences bolted onto the end of it
+("Now the rabbit will stay close to home. The rabbit will go out to play by the
+burrow. The rabbit can see the forest from there. The rabbit is happy to see the
+forest."). Rule 8 outranks nothing, but it is the LAST rule and 8.29's own note
+says the last thing in a block is what the model weights most. So the padding
+clause is rewritten to say that more must happen *about the same problem* — a
+second try, a setback, a helper — and never a new errand. Length compliance is
+100% today (8.20-8.29, won over three attempts) and this edit must not cost it,
+which is why the clause is REPLACED rather than deleted.
+
+**11.42 — the frozen prefix is edited in exactly one clause, and that is a
+deliberate, costed exception to invariant 10.** Invariant 10 is about per-request
+material invalidating every cached prefix; a one-clause edit to a genuinely
+global rule invalidates each stage's prefix exactly once, on the first request
+after deploy, and every later request at that stage reads the new prefix from
+cache. No digits, no theme, no stage name and no length number is added, so
+`test_system_rules_are_frozen_of_request_detail` and
+`test_the_length_rule_carries_no_per_request_detail` are unchanged and still
+assert what they always asserted. The alternative — leaving a narrative-hostile
+instruction in the prompt because moving it is inconvenient — is not available.
+
+**11.43 — everything STAGE-SCALED goes in a new cached per-stage block, not in
+`SYSTEM_RULES` and not in `messages`.** `build_narrative_block(allowed_words)`
+sits beside `build_practice_block` and for the same reason (5.17): it is
+byte-identical for every story at a stage, so it is written to the cache once and
+read back at 0.1x, where in `messages` it would be re-sent as fresh input on every
+request AND on every rewrite. It is derived from `allowlist_stage(allowed_words)`,
+the same stage-from-allowlist reader `practice_words` already uses, so no caller
+signature changes.
+There is a second, larger reason it belongs in `system`: **the rewrite block
+REPLACES `build_request_block`** (9.40), so narrative guidance in `messages` would
+vanish the moment a first draft failed the decodability gate — the exact mechanism
+that was stripping the theme out of rewritten stories.
+
+**11.44 — the ladder is §10's ladder, not one I invented.** §10: "linear spine with
+exactly 0-2 branch points (stage-scaled: 0 for stages 1-2, up to 2 for 5+)". A
+branch point is a decision, and a decision needs a situation, so §10's own
+stage-scaling is the honest shape for a stage-scaled narrative ask:
+
+| stages | §10 branch points | what the block asks for |
+|---|---|---|
+| 1-2 | 0 | one character, one want or problem, and it is settled by the end |
+| 3-4 | 1 (implied) | + something gets in the way before it is settled |
+| 5-8 | up to 2 | + the character DECIDES between two things, and picks one |
+| 9-12 | up to 2 | + up to two decisions, and the end must answer the want |
+
+The decisions are asked for **in the prose, not in the schema**. `StoryDraft` has
+`segments` and no branch fields, and §14 item 5 records that the generator
+produces a linear spine with no branch points to measure. Implementing real
+branching is a schema + DB + `apps/web` change and `apps/web/**` is another
+agent's; asking for a decision inside a linear spine buys the narrative situation
+§10's structure implies without pretending branching now exists.
+
+**11.45 — the block must never read as licence to spend more DISTINCT story words
+or more words.** 9.40's whole story is a prompt change that produced dragons
+stories with no dragon in them, and 8.22's second version overshot to a 193.5-word
+mean. So the narrative block states, in the same breath as the ask: repeating
+words is free and correct (invariant 3), a new story word is not the way to make
+something happen, and length is unchanged. **ASSUMED until measured** — the
+before/after numbers in the Gates section are what settle it.
+
+**11.46 — stages 1-2 are told LESS, not more, and §18 is quoted at the model.**
+The stage-1 tier says a want as small as wanting to nap is a want, that plain
+sentences are correct output, and that it must not reach for a word outside the
+list to make something happen. If the honest answer at stage 1 is "this cannot be
+better", the block must not push the model into breaking the gate trying.
+
+**11.47 — the measurement is a NEW instrument, and it is deliberately NOT a
+gate.** §18's register point is correct at the bottom of the ladder, so a hard
+per-story narrative gate would reject legitimately spare stage-1 stories — and it
+would also hand a fourth model-judged check the invariant-5 retest obligation on
+every future prompt edit. `run_pipeline` grows `judge_narrative: bool = False`;
+the verdict lands on `PipelineResult.narrative` and **is never read by
+`result.passed`**, which is asserted by a test that sets the worst possible
+verdict and checks the story still passes.
+
+**11.48 — two instruments, because each covers the other's blind spot.**
+- `narrative_signals(text)` — a **pure function, zero cost, cannot rot**: the
+  share of sentences opening with the same two words (1670 is 3 of 7 on "The
+  rabbit"), the share of content words in the last third that appear nowhere
+  earlier (a story that resolves brings something new; a list recycles), and
+  whether the text contains any word of intent (want/wish/need/must/try) or any
+  adversative (but/did not/could not/no). Each of the three is aimed at an
+  observed failure above, not at the abstraction "narrative".
+- `judge_narrative(text)` — a **Haiku judge**, priced by `llm/pricing.py`, which
+  is the only instrument that can answer the question a human asked ("is this a
+  story?"). Stage-BLIND on purpose: one ruler for all twelve stages, with the
+  stage-scaled expectation applied outside it in the report. A judge told the
+  stage can be talked into leniency, and then the ladder it is supposed to measure
+  is baked into it.
+The structural proxy is reported beside the judge, and their agreement is reported
+too, because a proxy nobody checked against the thing it proxies is not evidence.
+
+**11.49 — the judge writes its derivation BEFORE its conclusion, because 8.77 and
+9.50 both proved that field order is load-bearing on this model.** `what_changed`
+(quote the words that show the end differs from the start, or "nothing changes")
+is declared first; `has_want`, `has_obstacle`, `has_change` and the 1-5 `score`
+follow. The prompt also carries §18's carve-out explicitly — plain, short,
+repetitive prose and a tiny vocabulary are the format working and never lower the
+score — because without it the judge would measure prose quality, which is the one
+thing the decodable format guarantees will look bad.
+
+**11.50 — the judge gets its own live fixture in BOTH directions, per invariant
+5.** `tests/test_narrative.py::test_live_narrative_judge_separates_stories_from_
+word_lists`, gated on `STORYFORGE_LIVE_NARRATIVE=1`, over real pool texts I read
+and labelled myself: 1670, 28, 7274 and the user's own "Dan sat in a camp" as
+word-lists; 7316, 7309, 7278 and 1669 as stories. Multiple runs, and the assertion
+is on SEPARATION (every labelled story scores above every labelled list), not on
+an absolute threshold — an absolute threshold on a stochastic judge is a flaky
+test, and separation is the property the instrument actually needs.
+
+**11.51 — the before/after measurement runs the FULL pipeline, not just the
+generate node.** `scripts/measure_length.py` measures one GENERATE call by design
+(the quantity under test there was the generation prompt). Here the quantities
+under test include **rewrite depth** and **cost per accepted story**, which only
+exist downstream of the gate, so `scripts/measure_narrative.py` calls
+`run_pipeline` — the same function `warm` and `eval` call. Stages 1, 2, 6, 9 and
+12 (the two §18 excuses, the stage the user complained about, and the two 120-200
+word stages where the padding clause bites hardest), all three themes, n=2.
+Generation and judging are separate subcommands so the ruler can be re-run over
+stored text at no generation cost, exactly as `--revalidate` exists in
+`measure_length.py` for the decoder.
+
+**11.52 — what would make this change a REGRESSION, decided before the numbers
+arrive.** Any of: mean or minimum decodability down, any story finishing below the
+95% gate that would not have before, p95 rewrite depth above 1 (§1's budget is 2
+and the decodability-driven p95 is 1, so there is exactly one rewrite of
+headroom), length compliance below 100%, or cost per accepted story up by more
+than the cache-write cost of the one-off prefix invalidation. Stated here so the
+Gates section cannot grade itself.
+
+## Phase 8 — the two visual defects a live test of the app surfaced: no art at all, and marking that reads as errors
+
+Written before the changes, per §0. Two defects, reported by the user after
+driving the live app, both reproduced in a real browser before a line was
+touched (screenshots in PROVED below).
+
+**Defect 1.** There are no illustrations. `data/seed/assets.csv` seeds 33 asset
+rows, `scene_tags.py` tags every segment, and the logs say "7 with art" — which
+counts *database rows*, not pictures. Zero image files have ever existed in this
+repo, so every `<img src>` 404s and `SegmentArt`'s `onError` demotes every
+segment to `ui/Placeholder.tsx`: a beige striped rectangle taking half the
+reading screen. §12's mechanism was built completely and its content never was.
+
+**Defect 2.** The reading line marks words the way a teacher marks a worksheet.
+Measured at stage 6 on the real pool: one screen carried **five amber outlined
+boxes** — `cave`, `wings`, `dragon`, `dragon`, `dragon` — each containing a
+meaningless grey striped square, plus a thin gold rule accumulating under every
+word the child had tapped. Four visual treatments, and to a five-year-old a box
+around a word means a mistake.
+
+### 11.20 — the art is SVG, generated by a committed script, served as static files
+
+Raster art is wrong for this app on three counts: the DigitalOcean registry cap
+is 500 MB and the image already carries CMUdict; 33 PNGs at 1200x900 is
+megabytes of page weight on a tablet; and §06's art direction ("flat gouache",
+"limited palette", "simple readable silhouette at thumbnail size") is a
+description of *vector* art. So the pool ships as SVG.
+
+The 33 files are **generated by `scripts/generate-art.mjs`, and the output is
+committed**. The generator is not part of `bun run build` and is never run at
+serve time — it is a one-shot tool in the same drawer as `scripts/vendor-cmudict.py`.
+The reason it exists rather than 33 hand-written files is §06's *consistency
+gates*: "same palette across every theme, same texture, same light direction
+(upper left)". Thirty-three independently hand-written SVGs drift on exactly
+those three axes; a shared parts library cannot. A single `PALETTE` object holds
+the eight §06 colours, one `grain()` filter is applied to every canvas, and every
+rounded form takes its highlight from the same upper-left offset.
+
+### 11.21 — the asset pool is prioritised by MEASURED tag frequency, not by guess
+
+`story_segments.scene_tags` in the live database holds **839 tagged segments**
+over 38 of the 42 closed-vocabulary tags (`castle`, `snow`, `fish` and
+`swimming` have never been emitted). But the tag histogram is not the thing to
+prioritise on, because a segment renders **one** asset, chosen by
+`select_asset`'s most-overlap rule. The right question is which *asset* wins, and
+that is already recorded in `story_segments.asset_id`:
+
+| asset | segments | asset | segments |
+|---|---|---|---|
+| animals/forest-02 (rabbit hiding) | 181 | dragons/fire-01 | 33 |
+| dragons/cave-01 (dragon asleep) | 162 | space/rocket-02 | 31 |
+| space/rocket-01 | 91 | dragons/meadow-01 | 15 |
+| dragons/sky-01 | 73 | 20 more | ≤10 each |
+| space/spacewalk-01 | 64 | | |
+| space/moon-01 | 62 | | |
+| animals/forest-01 | 39 | | |
+
+**831 of the 839 tagged segments resolve to an asset, and nine assets cover 736
+of them (88.6%).** Those nine were drawn first and reviewed hardest. All 33 are
+drawn — three segment assets (`dragons/forest-01`, `animals/bird-01`,
+`animals/nest-01`) currently win zero segments and are drawn anyway, because a
+pool row with no art is the defect being fixed and the next `make warm` can
+reach them.
+
+No new tags. The vocabulary is closed by design and a tag outside it is a
+seed-time error (`seed_assets` raises); the existing 33 rows' tag sets are
+unchanged.
+
+### 11.22 — the asset's identity is the picture, not the URL, so `make seed` can revise a path in place
+
+The urls have to change: they say `.png` and the files are `.svg`. But
+`seed_assets` keys on `url`, and its own docstring says why that matters —
+"deleting and re-inserting would renumber ids and orphan
+`story_segments.asset_id`". Changing a url under a url-keyed seeder is the same
+bug by a different route: 33 new rows would be inserted, the old 33 would
+survive, and **831 live segments would keep pointing at asset ids whose files do
+not exist** — i.e. the fix would ship and change nothing a child sees.
+
+So the natural key becomes `(theme, kind, tags)` — the picture — and `url` is a
+mutable column. Seeding is still idempotent, ids are preserved, and the 831
+existing segments gain art with no data migration and no repointing script.
+Two guards come with it, because the new key is weaker than a unique index:
+
+- a duplicate `(theme, kind, tags)` in the CSV is a `SystemExit`. Under the old
+  key two rows with identical tags were merely redundant; under this one the
+  second would silently overwrite the first's url.
+- after seeding, any asset row whose url is not in the CSV is logged as an
+  orphan with its id, because that is the state this change exists to prevent
+  and it is invisible otherwise.
+
+### 11.23 — `/assets/art/v1/...`: the version is in the path because the cache header is immutable
+
+`main.py` serves everything under `/assets` with
+`Cache-Control: public, max-age=31536000, immutable`, and that is safe *only*
+because Vite content-hashes what it puts there. Files copied from `public/` are
+not hashed. A revised drawing at a stable path would be invisible for a year to
+every browser that had already loaded it. `v1` in the path is the hash, done by
+hand: a redrawn pool is `v2`, a new CSV url, and a new immutable URL. Nothing is
+ever revised in place, which is the invariant the header already assumes.
+
+### 11.24 — story-word cutouts are Vite-imported modules, not URLs assembled at runtime
+
+The 1:1 transparent cutouts (§06's third ratio) are the picture inside a
+story-word chip. They are NOT in `assets.csv`: the pool table serves
+`kind='segment'` and `kind='cover'`, `select_asset` defaults to `kind="segment"`,
+and no API surface returns a cutout, so a DB row would be dead weight. Instead
+`lib/art.ts` holds a **literal `Record<string, string>`** of `import`ed SVGs,
+keyed by the 14 story words the live pool actually uses (`rocket, moon, rabbit,
+dragon, cave, stars, forest, burrow, wings, fire, planet, astronaut, giraffe,
+treasure` — from `SELECT unnest(story_words)` over servable stories).
+
+Literal imports, not `` `/assets/cutouts/${word}.svg` ``. StoryWordChip's
+contract is "never a broken image, never an invented URL", and a template
+literal invents one for every word not in the set — 14 hits and an unbounded tail
+of 404s that only `onError` hides. A literal map answers "no picture" with
+`null`, which is a fact, and Vite hashes the emitted files so 11.23 does not
+apply to them.
+
+### 11.25 — a chip with no cutout shows no picture, not a striped square
+
+The chip used to render `Placeholder` at 1:1 when it had no art, which is how
+every chip in the live app ended up carrying a 24px grey striped square: no
+cutouts existed, and `assetFor` was never even wired up from `ReadingView`. §06's
+"never an empty box, never a broken-image icon" is about the *segment frame* — a
+4:3 hole in the layout that must not collapse or reflow when art arrives. A 24px
+square inside a word is not that hole. It is decoration that means nothing, and
+"a picture is on its way" is not information a five-year-old can use.
+
+So: cutout if there is one, and if there is not, the chip is the word with no
+picture. `SegmentArt` keeps `Placeholder` exactly as it was — that is the path
+§06 legislates and it is verified still reachable in PROVED below.
+
+### 11.26 — the story-word chip renders on FIRST APPEARANCE ONLY
+
+This is the actual bug behind the user's report, and the style guide already says
+so. §07, verbatim: "Amber ring, picture cutout on the left, auto-speaks once on
+first appearance **then behaves like any tappable word**."
+
+`StoryText` rendered a chip for *every* occurrence, so the stage-6 screen above
+carried three chips for `dragon`. The chip's whole purpose is the introduction —
+a picture and one utterance for a word the reader cannot decode. An introduction
+that repeats five times is not an introduction, it is an annotation, and the
+audience for a per-occurrence annotation is an adult marking a page.
+
+`StoryText` already computed the set it needed for the audio (`pending`: first
+occurrence in this paragraph, of a story word the *session* has not yet
+introduced). The same set now decides the chip, so the two can never disagree —
+a chip that does not speak, or an utterance with no chip, are both unreachable
+states now rather than two independent bugs waiting.
+
+The logic moves to `lib/storyWords.ts` as a pure function so it is unit-tested
+rather than verified by looking at it. Consequences, all intended:
+
+- a word introduced on screen 1 is a plain tappable word on screens 2-7;
+- comprehension prompts and branch labels pass no `shouldAnnounce`, so they
+  render no chips at all — by then the word has been introduced, and §07 says it
+  behaves like any tappable word;
+- **every word is still tappable and still speaks** (§11), which is the safety
+  net that makes this safe: a child who has forgotten `dragon` taps it.
+
+`onAnnounced` is now called by any chip that speaks, not only the one holding
+the microphone. A child who taps the second of two new chips used to consume the
+audio without the word being recorded as introduced, so the next screen
+introduced it again.
+
+### 11.27 — the amber RING goes; the picture is the marking
+
+§07 asks for an amber ring and this deviates from it deliberately. A 2px ring
+with a 10px radius around a word is, to a child, a box — and the user's words
+were "boxes around them ... boxes on a page mean mistakes". The berry violation
+colour is kept out of kid mode for exactly this reason (§02: "Do not introduce a
+red 'wrong answer' state in kid mode"); an amber box is the same mistake in a
+warmer hue.
+
+The chip keeps its amber-100 fill and loses the ring. **The marking is now the
+picture**: a word with a small drawing beside it reads as help, at any age, and
+it is the one treatment on the page that cannot be mistaken for a correction.
+Colour is not carrying any load on its own here, so §11's "never colour alone"
+is satisfied by the picture rather than by a rule.
+
+### 11.28 — the "already heard" gold rule goes
+
+§07 lists four word-token states and this removes the fourth's styling. `heard`
+put a permanent gold `border-bottom` under every word the child had tapped, and
+it accumulates: it is monotonic, it never resets inside a segment, and by the
+time a struggling reader has tapped fifteen words the whole paragraph is
+underlined and the mark distinguishes nothing. It is a *record of the child's
+difficulty, rendered on the page they are reading* — the parent dashboard is
+where that belongs, and it is already there (`gpc_stats`, per-GPC accuracy).
+
+Feedback stays, residue goes. A tap is gold-300 fill + scale 1.05 held 250ms past
+the start of speech (§05, unchanged, and still exempted from
+`prefers-reduced-motion` because it is feedback); then the fill transitions back
+to transparent over `--sf-dur-tap` and the page is clean again. The `'heard'`
+state is still tracked in `WordToken`'s type and still set — `data-state` is
+observable, and the sequencer keys off the same transition — it simply paints
+nothing.
+
+### 11.29 — the theme picker renders cover art; the emoji stays as the fallback it was declared to be
+
+`ThemePicker`'s own comment says "cover art is not shipped yet, so the card falls
+back to `themes.emoji`. §07 carves out exactly one exception to 'no emoji as
+artwork' and this is it ... If a cover ever arrives on the theme row it takes
+over and the emoji retires." Three covers now exist, so it retires — resolved
+through a literal slug→import map in `lib/art.ts` (same reasoning as 11.24), not
+through a new API field, because `GET /api/themes` returning an asset url is
+backend work this pass does not need.
+
+A theme with no cover in the map still renders its emoji, so a fourth theme
+added tomorrow degrades to the documented fallback rather than to a blank card.
+
+### 11.30 — what is NOT changed
+
+- **The admin validator playground.** `.sf-tok-*`, `.verdict-*`, `VerdictMark`,
+  `validatorView.ts` — untouched. §17's demo shows four verdict colours to a
+  grader, which is a different surface for a different audience, and STATE
+  invariant 7 lives there. It is re-verified in `dist/` in PROVED anyway,
+  because "I did not touch it" is not evidence.
+- **Word-token geometry.** `.sf-word` keeps 12px vertical padding, 5px margin,
+  `min-height: 48px`, and its measured 62px target with 10px clearance. §11's
+  floor sentence is "48px minimum everywhere, **64px for kid primary actions**,
+  8px minimum gap" — 64px governs `Read a story` and `Next`, not words in a
+  paragraph, and those buttons are `size="kid"` and unchanged. Raising word
+  tokens to a 64px *square* floor would put 16px of extra air around `a` and `I`
+  and wreck the reading rhythm to satisfy a rule that does not apply. Both floors
+  are re-measured by computed style in PROVED.
+- **`scene_tags.py`.** Read for tag names, not edited. The vocabulary stays 42.
+- **`precompute.py`, `blocklist.txt`, `frequency-en.csv`, `llm/generate.py`** —
+  another agent owns these.
+
+---
+
+## Phase 8 — the blocklist had no morphology, and §5.4 named the wrong corpus
+
+Numbered **11.1-11.16** to stay clear of the concurrent art/prompt work at 11.20+
+and 11.40+. Logged **before** the changes were made. Every claim marked **PROVED**
+was measured in this repo with the command shown; everything else is reasoning and
+is labelled as such. Owned surface: `storyforge/precompute.py`,
+`data/blocklist.txt`, `data/frequency-en.csv`, the two new word lists, and their
+tests. `apps/web/**` and `llm/generate.py` are another agent's.
+
+### 11.1 — P0: `precompute.py:72` filtered with `if word in blocked`, and the blocklist holds only BASE forms
+
+**PROVED.** `data/blocklist.txt` is 223 base forms; the filter is an exact string
+match. Against the live `allowed_words` (9,360 distinct words) the exact-match hit
+count is **0** — which is exactly why every previous check passed — while **50
+morphological variants of blocked entries were present**, among them `fucks`,
+`fuckers`, `fuckin`, `dicks`, `cocks`, `asses`, `butts`, `murders`, `murderers`,
+`murdering`, `killer`, `killers`, `killings`, `corpses`, `pisses`, `pissing`,
+`punches`, `punching`, `attacks`, `attacker`, `attackers`, `attacking`, `addicts`,
+`addicted`, `freaks`, `freaking`, `freaked`, `freaky`, `morons`, `hostages`.
+
+**PROVED not realised harm.** 0 of 554 generated stories contain any of these
+stems, because §6 offers only the top ~400 words by frequency per stage and these
+sit at rank 8,000+. This is a latent hole and is fixed as a hole. It is a hole
+worth closing anyway, because `allowed_words` is also §5.4's browsable admin
+artifact and its demo exhibit — "here is every word a stage-3 reader is permitted
+to see" is a claim about the table, not about the prompt window.
+
+### 11.2 — the fix is FORWARD inflection generation per entry, not substring matching and not candidate stemming
+
+`data/blocklist.txt`'s header and `precompute.py:48` both already say why
+substring matching is refused: it is the Scunthorpe problem and it silently
+deletes `class`, `grass`, `bass`, `assess`, `cocktail`. That reasoning stands
+unchanged. Of the two morphology-aware options, this takes the second:
+
+- **Rejected — stem the candidate.** Needs an inverse morphology that guesses a
+  base form from a surface form, and every guess is a chance to map an innocent
+  word onto a blocked stem. `butter` → `butt` is the obvious one and it is exactly
+  the false alarm the mandate's own crude sweep produced.
+- **Chosen — generate the inflection set per blocked entry.** The blocked set
+  becomes a finite, enumerable set of literal strings, and matching stays the exact
+  `in` test it is today. An innocent word can only be blocked if some blocked entry
+  *generates that exact string*. That makes the innocent direction provable by
+  construction rather than by hoping a stemmer behaves, and the whole expansion can
+  be printed and reviewed.
+
+Generated forms are **inflectional only** — plural (`-s`/`-es`, `y`→`ies`,
+`f`→`ves`), past (`-ed`), and progressive (`-ing`), with final-consonant doubling.
+Derivational suffixes (`-er` agentive, `-y`, `-in`) are **not** generated, because
+that is where the collisions live: `butt` + `er` = `butter`, and `-er` on a noun is
+not an inflection. The four derivational forms that matter are added as explicit
+LINES instead (11.5).
+
+### 11.3 — the `proper-noun fragments` section is deliberately NOT inflected, and that is what kills three of the mandate's false alarms
+
+**PROVED.** `san`, `los`, `las`, `del`, `inc`, `llc`, `ltd`, `corp` are not words
+with morphology; they are fragments of place and brand names that an adult
+frequency list surfaces. Inflecting them manufactures false positives: `los` + `es`
+= **`loses`**, `san` + `s` = **`sans`**, `corp` + `s` = `corps`. The mandate named
+`loss` and `sans` as false alarms from crude suffixing and this is the mechanism.
+The carve-out is not a special case bolted on — `data/blocklist.txt` already
+separates this section with its own header saying exactly this ("Not
+inappropriate, just wrong"), so the file's existing structure carries the rule.
+
+The section is matched by its header text, and a test asserts the header exists.
+Renaming it turns the suite red rather than silently inflecting fragments again.
+
+### 11.4 — the false-alarm audit, run in both directions, and the two judgements it forced
+
+**PROVED.** The expansion is 223 entries → **983 forms** (760 generated). Two of
+the 760 generated forms are also words on the Dale-Chall familiar-word list, and
+both are genuine inflections of deliberately-kept hazards, so both are judged
+rather than waved through:
+
+| form | from | judgement |
+|---|---|---|
+| `beating` / `beats` | `beat` | **Blocked.** DEVIATIONS 8.74 KEPT `beat` because "`beat`-as-strike is co-dominant, not recessive", and 8.73's own internal-consistency argument is that blocking one inflection of a verb while its siblings are unblocked "is not a hazard control; it is a false-positive generator". 8.73 refused to add siblings because that would extend **layer 1's short-circuit in `moderate()`**, which was measured firing 3-for-3 on non-harm. **This change does not touch that short-circuit** (11.6). Not offering `beats` costs vocabulary; it cannot kill a clean story. |
+| `dies` | `die` | **Blocked.** `die`, `died` and `dying` are all already entries; `dies` is the missing fourth. |
+
+`mocking` is NOT a false alarm — `mock` and `mocked` are both entries, so `mocking`
+is the missing third form of a blocked verb. `butter`, `loss` and `sans` are false
+alarms and all three are **PROVED absent** from the expansion. The other false
+alarms the mandate flagged behave as it predicted.
+
+Both directions are asserted: every one of the 50 variants is rejected, and
+`class`, `grass`, `bass`, `assess`, `cocktail`, `butter`, `loss`, `sans`,
+`classic`, `passes`, `glasses` are all accepted.
+
+### 11.5 — five words ADDED to `data/blocklist.txt`: 223 entries -> 228
+
+Four are the derivational forms 11.2 declines to generate, and each is the missing
+sibling of a family already on the list — 8.73's consistency test, applied in the
+direction it points here:
+
+| added | family already present | why the hazard is in the WORD (8.14's test) |
+|---|---|---|
+| `killer` | `kill`, `killed`, `kills`, `killing`, `murderer` | No sentence makes it safe. `killers` then falls out of 11.2's plural rule. |
+| `attacker` | `attack`, `attacked` | Same; `attackers` follows. |
+| `fuckin` | `fuck`, `fucking`, `fucked`, `fucker` | A clipping, not an inflection. |
+| `freaky` | `freak` | `-y` is derivational; `freaks`/`freaked`/`freaking` fall out of 11.2. |
+
+The fifth is a **new finding of this sweep, not one of the 50**:
+
+- **`pimp` was in `allowed_words` at STAGE 1** — min_stage 1, offered to
+  five-year-olds — and it is not on the blocklist in any form. It was invisible to
+  the mandate's variant sweep precisely because it is a base form, not an
+  inflection. `pimps`/`pimped`/`pimping` follow from 11.2. **PROVED** by the sweep
+  in this entry: 48 further hazard-class base forms are present in `allowed_words`
+  (`bong`, `dumbass`, `cum`, `lust`, `pervert`, `retard`, `genocide`, `revolver`,
+  `shotgun`, `grenade`, `assassin`, `prostitute`, ...). All 48 are removed by the
+  register filter (11.8) because none is child vocabulary, which is why only `pimp`
+  is added here: it is the one whose hazard is unambiguous *and* which needs to be
+  caught by layer 1 in a story BODY, not merely kept out of the word bank.
+
+All five are in the profanity/sexual/violence classes that 8.14 declared stay
+"unchanged and unexamined-for-removal". None has an innocent sense that is
+dominant in decodable children's prose.
+
+**Counted, not assumed**, because 6.15's own bug was a row count moving the wrong
+way and 8.17 made lines and entries equal so the list can be verified by counting
+it. `load_blocklist()` reads **ONE WORD PER LINE**; a space-separated rewrite once
+loaded 22 entries instead of 240 with no symptom but a row count. The loaded count
+is reported with the run.
+
+### 11.6 — `moderate.blocklist_check` keeps EXACT matching, deliberately, and this is the load-bearing distinction of the whole change
+
+`load_blocklist()` has three callers: `precompute.compute_rows` (which words are
+OFFERED), `llm/generate.py:232` (a redundant re-filter of `allowed_words`), and
+`llm/moderate.py:307` (**§13 layer 1, which short-circuits `moderate()`**).
+
+Only the first is changed. `blocklist_check` is untouched and still matches the
+223+5 literal entries.
+
+The reason is the one 8.14 and 8.73 each proved the hard way, from opposite
+directions: **a layer-1 hit returns immediately, so an entry there does not narrow
+vocabulary — it stops layer 3 from ever applying the hazard-vs-harm judgement §13
+was calibrated for.** 8.14 measured 2 of 3 layer-1 rejections in a 180-cell matrix
+being the single word `high`; 8.73 measured 3 of 9 rejections in a 60-story run
+being `hurt` in sentences whose meaning is the ABSENCE of harm. Making layer 1
+morphology-aware would newly short-circuit on `beats`, `beating`, `butts`,
+`mocking`, `teases`, `shots`, `blades`, `swords`, `punches` — which is exactly the
+move 8.73 refused, stated as a rule: *"Adding the siblings would move the wrong way
+— it would extend a short-circuit that is already measured to be firing 3-for-3 on
+non-harm."*
+
+Not offering a word and rejecting a finished story are different costs, and the
+same expansion is right for one and wrong for the other. So the expansion is
+applied where the cost is vocabulary and withheld where the cost is a clean story.
+
+**Stated as a residual, not hidden:** a story that contains `fucks` despite the
+word never being offered would pass layer 1 and be caught only by layer 3, the
+Haiku judge. Closing that would require STATE invariant 5's full both-directions
+live re-test of the 40-case fixture against the live judge over multiple runs
+(~$0.14/run), which this pass is not authorised to spend. Recommended as its own
+piece of work, with the section-aware expansion already built and available.
+
+### 11.7 — P1: §5.4 named SUBTLEX and SUBTLEX is the wrong corpus for a five-year-old. This is a REAL deviation from the spec
+
+§5.4: *"intersect with SUBTLEX top ~20k"*. `data/frequency-en.csv` is exactly
+that — adult film-subtitle frequency, by way of `wordfreq` (2.1). It proves a word
+is common **in adult speech**. It says nothing about whether a five-year-old knows
+it, and the spec never asked that question.
+
+The user found the consequence at the stage where it is fully exposed:
+**`amid`** (rank 7,528), plus `lebron`, `nixon`, `ronald`, `gibson`, `griffin`,
+`drafted`, `tablets`, `classics`, `blunt`, `sack`, `toss`, `hottest`, `stamps`,
+`mod`.
+
+**Three PROVED measurements frame the fix.**
+
+1. **The register defect is concentrated in STAGE 1, and stage 1 is the stage §7's
+   ladder can serve to any child.** `pipeline.PROMPT_WORD_LIMIT` is 400 and the
+   query is `ORDER BY freq_rank LIMIT 400`. Stage 1 holds 157 rows, so **all 157
+   are offered and the rank cutoff is 19,295** — the entire tail. Every other
+   stage's offered window cuts off at rank ≤ 3,346 (stage 2) and ≤ 702 by stage 9,
+   so `amid` at 7,528 never reaches a prompt at stages 2-12. The user reported it
+   "at stage 2"; §7's ladder answers an empty (stage,theme) pair by serving a
+   LOWER stage, and STATE invariant 6 says a lower stage is always safe *for
+   decodability* — it says nothing about register. That is the path.
+2. **The current output overshoots §5.4's own expectation by 3.7x.** §5.4 says
+   "Expect ~150-2,500 words/stage". The live table runs 157 → **9,360**. The spec's
+   expected shape is independent evidence that the corpus is wrong, written before
+   anyone measured it.
+3. **The 150 floor at stage 1 is currently met by words that should not be there.**
+   Of stage 1's 157 rows, **27 are proper nouns or non-words** (`nasa`, `sam`,
+   `tampa`, `adam`, `santa`, `napa`, `nixon`-class fragments, `im`, `ip`, `aca`,
+   `sas`, `das`, `nic`, `mina`, `nana`, `mit`, `nan`, `nat`, `pac`, `dat`, `ana`,
+   `nam`, `amidst`, `dan`, `pam`, `sid`, `stan`) and a further **61 are absent
+   from the Dale-Chall familiar-word list** (`amid`, `admin`, `stat`, `sic`, `dis`,
+   `mis`, `pimp`, `scam`, `spam`, `tactic`, `static`, `stint`, ...). See 11.11.
+
+### 11.8 — the register filter is a POSITIVE child-vocabulary list (Dale-Chall), morphology-expanded by the same generator as the blocklist
+
+`data/child-vocabulary.txt` — the **Dale-Chall 3,000 familiar words**, 2,941 lines
+/ 2,883 alphabetic entries, vendored and SHA-pinned via
+`scripts/vendor-word-lists.py` from `textstat`'s `easy_words.txt`, which is the
+standard machine-readable form of the list. Definition: words familiar to at least
+80% of fourth-graders. That is a direct measurement of the question §5.4 failed to
+ask.
+
+**Why Dale-Chall over the alternatives, stated with the trade-off.**
+
+- **vs. a tighter frequency cutoff at low stages** (the mandate's second option) —
+  measured and rejected on the numbers. The cutoff that removes `amid` (7,528)
+  also removes so much that stage 1 lands at 83-95; the cutoff that keeps stage 1
+  at 108 is 8,000, which **readmits `amid`**. `amid` sits on exactly the boundary,
+  so frequency cannot separate it from the words around it. That is the corpus
+  error restated, not solved: a rank cutoff still asks "how common is this in adult
+  speech".
+- **vs. AoA (Kuperman) norms** — the better instrument in principle: 30k words with
+  a mean age of acquisition, which would let each stage carry its own age bound
+  instead of one global list. Its canonical hosts were not reachable
+  (`crr.ugent.be/papers/AoA_51715_words.csv` → 404), and a dataset that cannot be
+  re-fetched cannot be pinned as proof surface. Recorded as the recommended
+  successor, not as work done.
+- **vs. Fry's instant words** — 1,000 words, a sight-word ordering rather than a
+  familiarity claim; strictly weaker for this purpose.
+
+**The cost, named.** Dale-Chall is from 1948, so it omits real child words:
+`panda`, `nip`, `mimic`, `antics`, `disc`, `cast`, `mist`, `tablet`-as-device. `nip`
+is not hypothetical — 8.73 quotes a live story, *"The dragon did nip a cat."* Four
+of the words the user flagged are KEPT because they are genuinely on the list and
+genuinely child vocabulary: `stamps` (a stamp), `sack`, `toss`, `tablets` (a
+writing tablet). At stages 9-12 a 4th-grade list is a conservative bound for a
+10-11-year-old; §6 only ever offers 400 words and the offered window is unaffected,
+but the browsable artifact is narrower than those readers.
+
+Membership is tested against the **same forward inflection generator** as the
+blocklist (11.2), so Dale-Chall's own convention — a listed word's regular
+inflections are familiar too — is honoured: `cats`, `maps`, `sits`, `taps`,
+`stamps`, `admits`, `camps` are admitted from `cat`, `map`, `sit`, `tap`, `stamp`,
+`admit`, `camp`. One generator, used in both directions: expand-to-reject for the
+blocklist, expand-to-accept for the register list. `-er`/`-est` are deliberately
+NOT generated, which is what keeps `hottest` out.
+
+### 11.9 — proper nouns get their own filter, kept as a second layer
+
+`data/common-words-en.txt` — the **38,417 lowercase headwords of the Hunspell
+en_US dictionary**, vendored and SHA-pinned by the same script from the LibreOffice
+dictionaries repository.
+
+The signal is **capitalisation in the source `.dic`**, which is the thing
+`frequency-en.csv` threw away: `wordfreq` is lowercased, so `Nixon` and `nixon` are
+indistinguishable in it. Hunspell keeps the case, so an entry that appears **only**
+capitalised is a proper noun. **PROVED** on the words the user named: `nixon`,
+`gibson`, `ronald`, `adam`, `sam`, `santa`, `tampa`, `nasa`, `dan`, `pam`, `tim`,
+`stan`, `sid`, `napa`, `pac`, `ana`, `nam`, `nat`, `nan`, `dat`, `mit`, `ip` are
+capitalised-only; `lebron`, `im`, `aca`, `cas`, `das`, `sas`, `nic`, `mina`, `nana`
+are absent from the dictionary entirely; `amid`, `cat`, `class`, `grass`,
+`cocktail`, `assess`, `panda`, `nip` are present lowercase.
+
+Rejected alternatives: `/usr/share/dict/propernames` (1,308 first names — misses
+`nixon`, `gibson`, `lebron`) and `/usr/share/dict/web2` (has `Gibson` and `Ronald`
+but not `Nixon`, `Griffin` or `LeBron`), and both are macOS system files, not
+reproducible artifacts. `nltk`'s names corpus would be a new dependency for a
+weaker list.
+
+`griffin` is **PROVED lowercase** in Hunspell and stays under this filter — a
+griffin is a mythical beast and an entirely on-theme word for this product. It is
+removed by the register filter instead, at every stage that filter reaches.
+
+The filter is applied at **every** stage even though 11.8's list already excludes
+proper nouns by construction. It is redundant while `REGISTER_FILTER_FROM_STAGE`
+is 1 and that is the point: 11.11 documents raising it as the escape hatch if the
+stage-ladder work is deferred, and this layer means taking that hatch cannot bring
+`nasa`, `sam` and `tampa` back with it.
+
+### 11.10 — the candidate POOL becomes (frequency top-20k ∪ child vocabulary), which is the inclusive half of correcting the corpus error
+
+§5.4's "intersect with SUBTLEX top ~20k" is wrong in both directions, not just one.
+**PROVED: 316 Dale-Chall words are absent from `frequency-en.csv` entirely** —
+`acorn`, `beehive`, `blackbird`, `bandage`, `banjo`, `bumblebee`, `buttercup`,
+`blindfold`, `boxcar` — words a children's reading app wants and adult film
+subtitles rank outside the top 20k. 139 of them align at some stage; the union
+admits **1,249 words** (with inflections) that the intersection refused, and takes
+stage 1 from 69 to 78.
+
+Words admitted this way have no `freq_rank`, and the column is load-bearing —
+`ORDER BY freq_rank LIMIT 400` decides the prompt window. They are given an
+**explicitly out-of-band synthetic rank** (`_UNRANKED_RANK_BASE = 100_000` plus
+alphabetical position) so they sort to the tail of the offered window rather than
+displacing genuinely frequent words, and so the synthetic value is obvious in the
+admin artifact rather than passing as a measurement.
+
+### 11.11 — the register filter applies at EVERY stage, and stage 1 falls to 78. The remedy is the ladder, not the filter
+
+`REGISTER_FILTER_FROM_STAGE = 1`. The filter is chosen on word quality and is not
+tuned to protect a row count.
+
+**PROVED: no filter gives stage 1 both a child vocabulary and 150 rows — or even
+100.** Five independent designs were measured:
+
+| stage-1 policy | rows | `amid` gone? |
+|---|---:|---|
+| before this change (exact blocklist only) | 157 | no |
+| + morphology-aware blocklist (11.2) | 157 | no |
+| + proper-noun/non-word filter (11.9) | 136 | no |
+| + child-vocabulary filter (11.8) — **SHIPPED** | **78** | **yes** |
+| child vocabulary, adult frequency list ignored entirely | **78** | yes |
+| child vocabulary + Hunspell-common with a rank cap, cap tuned 2,000 -> 8,000 | 83, 85, 88, 90, 95, **108 (readmits `amid`)** | only below 108 |
+
+**78 is a ceiling, not a setting.** It is the number of child-vocabulary words the
+stage-1 GPC inventory can spell with the frequency list removed from the question
+altogether. Hand-curating the genuinely-child non-Dale-Chall stage-1 words on top
+of it (`nip`, `panda`, `panic`, `pip`, `tad`, `sac`, `mist`, `cast`, `casts`,
+`scan`, `span`, `spat`, `din`, `mid`, `madam`, `mimic`, `antics`, `disc`, `discs`,
+`admit`, `admits` — 21 words) reaches **99**. One short of 100, which is close
+enough to be worth stating and far too close to be worth engineering: a supplement
+curated until a threshold goes green is the corpus error repeating with me as the
+corpus.
+
+**PROVED: stage 1 is the ONLY stage the filter takes below 150.** Every other stage
+lands between 771 and 4,397, so **renumbering the ladder by one is sufficient** and
+the filter does not need rethinking. That is the load-bearing measurement behind
+the decision, and it is the question the ladder work depends on.
+
+**The remedy, and whose decision it is.** The USER authorised retiring stage 1
+rather than compromising word quality: *"let's go and reposition everything so that
+the current stage two is the new stage one and we have 11 total stages."* This
+works because stage inventories are **cumulative** — today's stage 2 already
+contains stage 1's `s a t p i n m d` plus `g o c k e u r h b f l`, `ck ss ll ff`
+and `x` — so "new stage 1 = old stage 2" is a larger starting inventory, not a
+deletion of content, and it starts at **771** words. The accepted cost is that a
+true beginner who knows only `s a t p i n` loses a rung of their own.
+
+**The renumbering is NOT done here** and is deliberately out of this change's
+scope: it touches 12 stage rows, every GPC and sight-word stage assignment,
+`MAX_STAGE` constants, the §5.7 goldens (which name stages by number — `cat`@1,
+`fox`@2, `city`@9), the vacuity ratchet measured at stage 12, the eval matrix,
+§17's demo at stage 3, the build doc's Appendix A, and live production rows where
+kids and stories carry `stage_id`. It is sequenced as its own migration.
+
+**`tests/test_phase2.py::test_no_stage_is_starved` is the one existing assertion
+this change touches, and the authority for touching it is the user's decision, not
+my measurement.** It asserted `HAVING count(*) < 100` returns nothing at every
+stage (from `36ca8e0`, docstring *"§18: a stage with almost no vocabulary starves
+generation"*). Run through `justify-test-edit`, the honest verdict on my own
+evidence was **FROZEN — ESCALATE**: the discriminating question, *would this test
+still be wrong if I reverted my change?*, answers **no**, and "the filter I just
+wrote makes the gate fail" is not evidence that the gate is wrong. What licenses
+the edit is the citable ground the skill names — *the contract it tested was
+replaced by a decision you can cite, and the decision is the user's*.
+
+The edit is narrowed accordingly and is **stronger** in three ways, not weaker:
+
+- the ≥ 100 floor is asserted **unchanged for every stage above 1**;
+- stage 1 is **pinned to its measured ceiling** (`counts[1] >= 78`) rather than
+  exempted, so it still fails if stage 1 degrades further;
+- the exception is asserted to be a set of **at most `{1}`**, so if a SECOND stage
+  ever falls short the test goes red — which is exactly the case where renumbering
+  by one would NOT save us;
+- and a tripwire asserts `counts[1] < 100`, so once stage 1 is retired the
+  exception fails as dead code instead of quietly permitting a starved stage
+  forever.
+
+**Sabotage-checked, not assumed.** With `blocked_forms()` reverted to
+`load_blocklist()`, the proper-noun filter disabled and the register filter turned
+off, the table rebuilt to 74,001 rows and three guards went red:
+`test_no_blocklisted_variant_reaches_the_allowlist`,
+`test_no_proper_noun_reaches_the_allowlist_at_any_stage`, and
+`test_no_stage_is_starved`'s dead-code tripwire. That sabotage also exposed a real
+weakness and it was fixed rather than noted: two register tests had taken their
+threshold from `REGISTER_FILTER_FROM_STAGE` itself, so switching the filter off
+left them green. `REGISTER_FILTER_FROM_STAGE == 1` is now pinned in the test with
+the reason, so raising it — the documented escape hatch if the ladder work is
+deferred — turns the suite red instead of passing quietly.
+
+### 11.12 — what is NOT changed
+
+- **The decodability gate (§0).** No GPC row, no sight word, no alignment rule, no
+  syllable cap, no tokenizer change. Every word admitted still has to align
+  against the unchanged inventory, and `test_every_allowed_word_revalidates_as_decodable`
+  is the proof. **PROVED**: 0 rows in the new output classify as anything other
+  than DECODABLE, so nothing has been smuggled past `validate_word`, and the
+  vacuity ratchet is untouched because the inventory is untouched. This entry is
+  about which words are OFFERED.
+- **`data/frequency-en.csv`.** Not regenerated, not re-pinned, not re-sorted. It is
+  demoted from "the filter" to "one of two pools and the source of `freq_rank`",
+  which is a change in how it is USED, in `precompute.py`.
+- **`moderate.blocklist_check` and `llm/generate.py`.** See 11.6.
+- **`load_blocklist()`'s contract.** Still one word per line, still returns the flat
+  frozenset of literal entries, still what `moderate.py`, `generate.py`,
+  `test_grammar.py` and `test_stage_coverage.py` import. The expansion is a NEW
+  function beside it; nothing that reads the old one changes behaviour.
+- **No existing assertion is modified or deleted.** Every test in this change is
+  added.
+
+## Phase 8 — question CONTENT and mastery accounting (11.60-11.69)
+
+Numbered 11.60-11.79 to stay clear of the concurrent 11.0-11.52 block. Logged
+**before** the changes. The trigger is a live user report: *"The questions aren't
+very clearly given. They begin out of nowhere and then aren't really written
+well."* Screen layout is another agent's; these entries are the TEXT and the
+counters. Every number below is measured against the live `questions` table
+(125 `tap_word` rows, 74 `mcq2` rows) or the live decoder, and PROVED/assumed is
+marked per claim.
+
+**11.60 — §11.3 does not require the tap-a-word INSTRUCTION to be decodable by
+the child. That was our inference, and it is dropped. Bounded by a committed
+instruction lexicon, not removed.**
+
+The claim being retired is `llm/questions.py`'s own docstring: *"both render as
+text a child has to read. So the same rule as the story applies: the decoder is
+the gate, and it is never lowered for a question (§0)."* Its citation is §0,
+which is about the validator. It is not a citation for what text §11.3 puts
+inside the validator's scope.
+
+What §11.3 actually says, verbatim: *"Comprehension: 2 question types only —
+`tap_word` ("tap the word that says /sh/ip") and `mcq2` (2-choice story
+question, **options validated decodable**)."*
+
+- **PROVED — the spec attaches validation to OPTIONS, and to nothing else.** And
+  it is not silent by oversight: §10 separately and explicitly says *"Choice
+  labels must themselves pass validation (they're rendered text)."* So the doc
+  states this requirement in both places it wants it — mcq2 options, §10 choice
+  labels — and states it for **no prompt of either type**.
+- **PROVED — §11.3's own example instruction fails the gate at every stage
+  1-12.** `"Tap the word that says ship."` → `word` and `says` are undecodable at
+  all twelve stages (plus `that`, `the`, `ship` below stage 3). A requirement its
+  own normative example cannot satisfy is not the requirement.
+- **PROVED — the constraint has no beneficiary that can be named.**
+  `api/readings.py` builds §8 evidence from `answer["correct"]` alone
+  (`word = single_word(key.get("correct"))`). Not one grapheme of any prompt has
+  ever been counted toward `gpc_stats` or promotion. The prompt's decodability is
+  rewarded by nothing and measured by nothing.
+- **PROVED — what it cost, on the live pool.** Of 125 `tap_word` rows: 14 (11%)
+  say `Tap it: X.` and 24 (19%) say `Tap it. Hint: X.` — 38 rows whose
+  instruction never names what to compare, on a screen showing three options, so
+  "it" identifies nothing. A further 33 (26%) say `Tap it if it begins like X.`,
+  a conditional whose subject is equally unidentified. **71 of 125 (57%) of live
+  phonics instructions do not tell the child what the task is.** That is the
+  user's report, reproduced from the database.
+- The instruction is **spoken aloud on mount** (`Comprehension.tsx`
+  `return speak(prompt)`, DEVIATIONS 6.27) and rendered through `StoryText`, so
+  every word is individually tappable → per-word TTS. A child who cannot decode
+  it hears it, word by word, and an adult is present in the intended setting.
+
+The argument, stated once: **an instruction is not reading practice; it is the
+scaffolding that tells the child what the practice IS.** Gating it trades the
+child's comprehension of the task against their decoding of the task
+description, and the decoding earns them nothing. §8 credits the option they
+tap.
+
+**Bounded, and the gate still runs.** `INSTRUCTION_WORDS` is a committed, closed,
+human-reviewed set, passed to `readable()` through the SAME parameter
+`sight_words` already uses — the mechanism §4 has for irregular high-frequency
+function words, applied to a fixed instruction instead of to story text. So:
+
+- the CUE WORD is still proved decodable at the child's stage, because the cue is
+  not in the lexicon. **PROVED**: with the exemption, `cue="beautiful"` and
+  `cue="thought"` still yield no prompt at stage 1, and 60/60 real per-stage cues
+  pass at all 12 stages at decodability 1.000, oov 0;
+- a frame containing a typo or an invented word still returns `None`, so
+  `sound_targets`' answerability promise and `check_tap_word`'s refusal path are
+  unchanged;
+- the exemption is auditable in one place and cannot grow silently — a new test
+  pins its contents and asserts every member is a function/instruction word, not
+  content vocabulary.
+
+**11.61 — what 11.60 does NOT relax.** Each of these was checked, not assumed.
+
+- **`mcq2`'s prompt keeps the gate, unchanged.** The distinction is not
+  convenience, it is what the text is FOR: an mcq2 prompt is the comprehension
+  content — the child must read and understand it to choose an answer, so
+  decodability there is the task itself, not scaffolding. A `tap_word` frame
+  carries no story information at all; it is the same 1 of 2 human-authored
+  strings for every story forever.
+- **`tap_word` options keep the gate, unchanged.** They are what the child reads
+  and what §8 credits.
+- **`target_grapheme` still never appears in the prompt.** The cue-word design is
+  kept for 7.14/4.9's reason and not for decodability: exactly one option starts
+  with the grapheme, so printing it in the instruction is the same answer-key
+  leak as shipping it in `payload` was, and it would now be *more* exposed, not
+  less.
+- **§13 is untouched.** Layer 1 reads every question string in
+  `_moderate_questions`. `PROMPT_FRAMES` is human-authored, so
+  `LAYER3_EXEMPT_QTYPES` is unaffected — no new model-authored prose reaches a
+  child, and no path skips moderation.
+- **The 125 existing rows are not rewritten by this change.** They keep their old
+  prompts until a `warm` backfill re-cues them. Recorded as a known
+  inconsistency rather than a silent one.
+
+**11.62 — the ladder collapses to one instruction plus the floor, because the
+gate is what made it a ladder.** Under 11.60 a frame's readability no longer
+depends on the stage, so six per-stage rungs are dead code by the same standard
+that condemned the previous version ("a frame no stage can read is dead code,
+which is exactly how this shipped last time"). `PROMPT_FRAMES` becomes
+`("Tap the word that starts with the same sound as {cue}.", "Tap: {cue}.")` —
+§11.3's own shape, with the cue word where the spec writes the grapheme. The
+floor is retained for the cue that breaks the rung above it, which is the slot
+the existing reachability test already documents as legitimately unreachable.
+
+**11.63 — two existing assertions in `test_questions.py` encode the retired
+contract and are replaced, narrowly, with the propositions that survive.**
+Neither would fail if this change were reverted — they are the "contract
+deliberately replaced" case (cf. 8.59), and the decision is the user's: *"does
+§11.3 actually require the instruction to be decodable by the CHILD, or was that
+my inference? ... If you conclude the constraint should be relaxed, that is a
+DEVIATION with a real argument."* The condition was tested and is PROVED above.
+
+- **`test_early_stages_fall_back_to_the_terse_frame`** asserted
+  `tap_word_prompt("sat", 1, stage_one) == "Tap it: sat."` **and** that every
+  richer rung FAILS the gate at stage 1. That second half is the retired
+  constraint stated as an assertion. Both halves are replaced by the two things
+  that are now true and are worth more: the stage-1 instruction NAMES the
+  comparison, and the cue is still gated at stage 1 (an undecodable cue still
+  yields `None`). The new form fails against the old behaviour — `Tap it: sat.`
+  names no comparison — so the contract change is visible rather than implied.
+- **`test_every_frame_in_the_ladder_is_reachable_at_some_stage`** asserted
+  `len(reached) >= 4`. That was a PROXY for its own docstring's requirement ("a
+  frame no stage can read is dead code") and it over-approximated: it
+  additionally required the instruction to VARY by stage, which is only true
+  while the gate makes readability stage-dependent. The requirement's real
+  assertion — `unreachable in ([], [PROMPT_FRAMES[-1]])` — is **kept unchanged**
+  and still catches what it caught. `len(reached) >= 4` is replaced by
+  `len(reached) == 1` plus a content assertion: the instruction is now the same
+  at every stage and must name the comparison. Strictly stronger about the thing
+  that matters, and it forbids a silent regression to a degrading ladder.
+
+**11.64 — `mcq2`'s real defect is not prose quality, it is that 58% of live
+questions are answerable without reading the story. A pure function refuses
+them; the prompt is not asked to be trusted.**
+
+Read the rows, not the prompt. Live examples, verbatim:
+
+| stage | question | true | false |
+|---|---|---|---|
+| 3 | *Was the dragon glad?* | A man was glad. | The dragon was glad. |
+| 3 | *Did the rabbit run into the burrow?* | It ran fast into the burrow. | It ran fast past the burrow. |
+| 6 | *Did Sam feel happy?* | Sam felt happy. | Sam felt sad. |
+| 6 | *Was the moon white and high?* | The moon was white and high. | The moon was white and not high. |
+| 10 | *What did he take from the moon?* | He took a rock from the moon. | He took a star from the moon. |
+
+The first four are the defect and the fifth is the fix. In rows 2-4 the question
+itself contains the word that distinguishes the two answers (`into`, `happy`,
+`high`), so a child who matches the question's letters against the two cards is
+right without reading the story — the comprehension analogue of the cue leak
+7.14 closed for `tap_word`, and the same medicine applies: a property proved by
+a pure function, not a rule stated in a prompt. Row 1 is the same defect with
+the opposite sign and is worse: the question names the dragon and the true
+answer is about a man, so letter-matching points at the WRONG card. Row 5 puts
+the shared premise in the question (`took`, `from the moon`) and the difference
+only on the cards, which is what a two-choice question is supposed to be.
+
+**PROVED, over all 74 live `mcq2` rows:**
+
+| | rows | share |
+|---|---|---|
+| question contains a discriminating word | 40 | 54% |
+| false answer built by adding/removing `not` | 3 | 4% |
+| **either** | **43** | **58%** |
+
+and the gradient is the diagnosis: stages 1-9 are 32 of 58 defective; **stage 10
+is 0 of 7.** Stage 10 is clean because `readable_openers` first offers it enough
+wh-words that the model stopped writing yes/no questions. A yes/no prompt has to
+assert a proposition, and one of the two cards then agrees with it — the leak is
+near-structural for `Did`/`Was`, which are the only openers stages 1-2 have.
+
+Two new checks in `check_mcq2`, both pure, both refusing rather than steering:
+
+- **`prompt_leaks_answer`** — reject when the question contains a content word
+  that appears in exactly ONE of the two answers. Minimal and precise: a word in
+  BOTH answers is the shared premise and is exactly what a good question should
+  restate (row 5 keeps `moon`), and sight words are excluded for the reason
+  `check_mcq2` already excludes them from its grounding test — they are shared by
+  every English sentence and prove nothing.
+- **`negation_pair`** — reject when stripping `not`/`no`/`never` makes the two
+  answers identical. `QUESTION_RULES` has told the model not to do this since
+  8.55 and **3 live rows do it anyway**, because the rule had no judge: it was
+  enforced only as a side effect of `story_supports`, which catches a negated
+  distractor only when the negation happens to break the subsequence. A guarantee
+  that lives only in the prompt is a suggestion (the module's own words).
+
+**11.65 — the `mcq2` half of `QUESTION_RULES` is rewritten to teach the shape
+stage 10 found by accident, and the existing correctness machinery is not
+weakened anywhere.** The new instruction is the positive form of 11.64's check —
+put what the two answers SHARE in the question, keep what makes them different
+on the cards only, and prefer a wh-opener when one is readable — with the reason
+attached, which is how §6's rewrite node and the 8.55 pass both got traction.
+Unchanged and load-bearing: `story_supports` in both directions (a distractor
+that is also true in the story is unanswerable and is correctly refused), the
+shared-word grounding test, the length-ratio rule, and the ban on `Yes`/`No`
+answers. Per invariant 5 this is measured in BOTH directions over multiple runs —
+the drop rate must not rise to buy the leak rate down, because a question the
+child never sees is not an improvement. Numbers in 11.68.
+
+**11.66 — `mcq2` stays OUT of `MASTERY_QTYPES`. Refused deliberately, with the
+reason recorded, because this is the project's most serious failure class.**
+A two-option comprehension question is 50% guessable. Letting it move
+`gpc_stats` would put an unearned signal behind a child's stage advance, which is
+DEVIATIONS 6.7 exactly. §8's own docstring already says an 80% threshold would be
+trivially reachable without decoding anything, and crediting every grapheme in a
+sentence-length option would swamp the honest signal with dozens of free correct
+marks per reading. Not changed, not widened, not made configurable. A third
+question type was also rejected: §11.3 fixes the inventory at exactly two.
+
+**11.67 — but the asymmetry hides a real defect, and it is arithmetic: §8 says
+five stories and the pool needs nine.**
+
+`MIN_GPC_OBSERVATIONS = 10` is a sound addition (5.5 — a ratio over two
+observations is a coin flip, not an accuracy). What was never checked is whether
+it is reachable in the five stories §8 asks for. **PROVED**, over the 120
+servable stories in the live pool, counting only the GPCs `evaluate_promotion`
+actually aggregates (those INTRODUCED at the child's stage, which is the
+promotion denominator):
+
+| | obs / story | stories to reach 10 |
+|---|---|---|
+| one `tap_word` (today) | **1.08** | **9.2** |
+| two `tap_word` | **1.95** | **5.1** |
+
+One phonics question per story credits ~1 current-stage GPC instance, so
+`MIN_GPC_OBSERVATIONS` silently **doubles §8's own story requirement** — a child
+who has read five stories at 100% accuracy is not promotable and the dashboard
+cannot say why in §8's terms. A second `tap_word` lands the evidence base on
+5.1 stories, i.e. it makes the floor CONSISTENT with §8's five rather than
+raising or lowering either number.
+
+So: **up to two `tap_word` questions per story, on different sounds, the second
+composed by pure function.** This adds evidence without touching guessability —
+still 1-of-3, still §8's named type, still judged by the UNCHANGED
+`check_tap_word` — and it costs zero tokens and zero new prompt surface, because
+`sound_targets` already returns up to `MAX_SOUND_TARGETS` ranked, provably
+answerable targets and today discards all but one. `tap_word_options` composes
+the second from the closed list exactly as 8.54's fallback composes the first.
+Guards: the second question must use a DIFFERENT grapheme and a different
+credited word, or a single word's GPCs would be counted twice; `readings.py`
+needs no change because its evidence loop already iterates every answer whose
+qtype is in `MASTERY_QTYPES`; and §11.3 is not violated — it fixes the number of
+question TYPES at two, not the number of questions.
+
+Honest limits, stated rather than discovered later. **PROVED** per stage: a
+second answerable sound exists in 95 of 120 stories (79%), and the stories it
+cannot help are the ones where the story contains no current-stage sound at all —
+stage 11 goes 0.22 → 0.33 obs/story and **stage 12 is 0.00 → 0.00**, because 9 of
+9 stage-12 stories credit no stage-12 GPC. Stage 12 is the top of the ladder so
+promotion is moot there, but **stage 11 remains effectively unpromotable** and
+this change does not fix it. That is `older_stage_fallback` firing, which the
+module docstring already names as a finding about the ALLOWLIST rather than about
+this node, and generation/precompute are another agent's. Recorded as open.
+
+**11.68 — the measurement, both directions, per invariant 5.** Filled in after
+the runs: live model, stages 2/3/6/10, before and after, reporting question text
+verbatim plus leak rate, drop rate, derived rate and cost. A leak-rate
+improvement bought with a higher drop rate is a regression and is reported as
+one.

@@ -1,6 +1,6 @@
 /**
  * Kid mode — `/read/:kidId` (§11 routes), the §11.2 session end to end:
- * theme picker → reading view → branch → comprehension → celebration.
+ * theme picker → reading view → branch → story end → comprehension → celebration.
  *
  * One component owns the phase, because the phases share three things a child
  * would notice if they reset: the reading size (the Aa toggle must survive a
@@ -110,6 +110,7 @@ import BranchChoice from './BranchChoice'
 import Celebration from './Celebration'
 import Comprehension from './Comprehension'
 import ReadingView from './ReadingView'
+import StoryEnd from './StoryEnd'
 import ThemePicker from './ThemePicker'
 
 const REQUEST_ATTEMPTS = 3
@@ -122,7 +123,15 @@ const SIZE_KEY = 'sf.readingSize'
  */
 const MAX_STALLS = 2
 
-type Phase = 'picker' | 'loading' | 'reading' | 'questions' | 'celebration'
+/**
+ * `story-end` is the beat between the last page and the first question
+ * (DEVIATIONS 11.31). Before it, `next()` on the final segment swapped the
+ * reading view for the question screen in one frame — the questions "began out
+ * of nowhere", which is exactly how the user described it. It is a phase rather
+ * than something inside `Comprehension` because it is a transition between two
+ * phases, and because the reading view has to be gone before it paints.
+ */
+type Phase = 'picker' | 'loading' | 'reading' | 'story-end' | 'questions' | 'celebration'
 
 function loadSize(): ReadingSize {
   try {
@@ -307,7 +316,7 @@ export default function KidSession() {
       return
     }
     if (story && story.questions.length > 0) {
-      setPhase('questions')
+      setPhase('story-end')
       return
     }
     finish()
@@ -388,6 +397,24 @@ export default function KidSession() {
     return (
       <div className="min-h-screen bg-paper-page">
         <ThemePicker themes={themes} onPick={(theme) => void pickTheme(theme)} />
+      </div>
+    )
+  }
+
+  if (phase === 'story-end') {
+    return (
+      <div className="min-h-screen bg-paper-page">
+        <StoryEnd
+          questions={story.questions}
+          readerName={kid?.display_name}
+          onStart={() => {
+            // The story's last utterance must not overlap the question's first
+            // (§11: one utterance at a time) — every other phase change here
+            // cancels for the same reason.
+            cancelSpeech()
+            setPhase('questions')
+          }}
+        />
       </div>
     )
   }

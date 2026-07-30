@@ -94,8 +94,10 @@ Rules, in priority order:
    sentences read. Get to a longer count by telling MORE of the story — more
    happens, in more small steps — and never by writing longer or more elaborate
    sentences, which is the one way length can cost a child their story. If the
-   story ends before the count does, give a character something else to do.
-   Count the words you have written before you answer.
+   story ends before the count does, do not send the character off to do
+   something else: go back and give them more trouble with the SAME problem — a
+   second try, a setback, someone who helps — so the extra words are still the
+   story you started. Count the words you have written before you answer.
 
 Read every sentence back before you finish. Write the story and nothing else."""
 
@@ -276,6 +278,229 @@ def build_practice_block(allowed_words: list[str], sight_words: list[str]) -> st
     )
 
 
+#: The narrative section's header. Named for the same reason `PRACTICE_HEADER` is:
+#: the request block does not know the stage and so cannot reference this section,
+#: and the tests need one string to assert on.
+NARRATIVE_HEADER = "STORY SHAPE"
+
+#: Stage bands for the narrative ask, taken from §10 rather than invented
+#: (DEVIATIONS 11.44). §10: "linear spine with exactly 0-2 branch points
+#: (stage-scaled: 0 for stages 1-2, up to 2 for 5+)". A branch point is a decision
+#: and a decision needs a situation, so §10's own scaling is the shape of the ask:
+#: 0 decisions at stages 1-2, one at 3-4, up to two from 5 up.
+NARRATIVE_BAND_EDGES = (2, 4, 8)
+
+#: What every band says, whatever else it says. Three separate hazards, each one a
+#: thing a previous prompt change actually did:
+#:
+#: * 9.40 — a prompt change that made the model resolve a conflict by deleting the
+#:   theme, so 6 of 15 dragons stories shipped with no dragon in them. Nothing here
+#:   may read as a reason to reach for a fourth story word.
+#: * 8.22 v2 — a permissive paragraph read as an instruction and took the 120-200
+#:   band to a 193.5-word mean. Nothing here may read as a licence to write more.
+#: * §0 / invariant 1 — the gate is decodability and is never weakened for this.
+#:   The last sentence of every band subordinates the whole section to rule 1.
+_NARRATIVE_FLOOR = (
+    "\n\nNone of this needs a new story word or any word that is not on your "
+    "lists: a want can be about a nap, a cave or getting home, and the characters "
+    "you already have are enough. Do not add sentences that EXPLAIN the shape — "
+    "the shape is what happens. And none of this outranks rule 1: if you cannot "
+    "say the next thing with the words you have, change what happens next. A plain "
+    "story a child can read beats an interesting one they cannot."
+)
+
+#: The failure this whole section exists to prevent, quoted so the model can
+#: recognise it. Both halves matter: the first is the observed defect, the second
+#: keeps it from being read as an attack on repetition, which is CORRECT
+#: decodable-reader behaviour (§5.5, STATE invariant 3) and which 9.41 already had
+#: to defend once.
+_NARRATIVE_ANTIPATTERN = (
+    "\n\nThis is what to avoid, and it is the most common way these stories go "
+    'wrong: "Dan sat. Dan ran. Dan can nap." Every sentence is correct and '
+    "nothing happens — the sentences could be put in any order and nothing would "
+    "be lost. Repeating the same WORDS is right and expected here. Repeating the "
+    "same sentence shape while nothing changes is the thing to avoid."
+)
+
+_NARRATIVE_BANDS = {
+    # Stages 1-2. §18: stage-1 vocabulary is `s a t p i n m d` and "Sam sat. A cat
+    # sat." is authentic register, not a defect. So this band asks for LESS, and
+    # says out loud how small a want is allowed to be — the failure mode to avoid
+    # here is a prompt that pushes a 30-word story into breaking the gate reaching
+    # for something it cannot say (DEVIATIONS 11.46).
+    0: (
+        "One character, and ONE thing: something they want, or something that is "
+        "wrong. The last sentence tells us they got it, or that it is fixed. "
+        "Nothing else has to happen.\n\n"
+        "Keep the want as small as your words are. Wanting to nap is a want. A cat "
+        "in the way is a problem. A cat that sits on Sam's map until Sam taps it is "
+        "a whole story at this stage, and six short sentences is enough to tell it."
+    ),
+    # Stages 3-4. §10's implied middle: one branch point.
+    1: (
+        "One character, one thing they want or one thing that is wrong, and ONE "
+        "thing that gets in the way before it is settled.\n\n"
+        "Say the want early — in the first two or three sentences — so the rest of "
+        "the story is about getting it. The thing in the way is what a list of "
+        "actions never has, and it is the difference between a story and a list. "
+        "The last sentences tell us how it came out."
+    ),
+    # Stages 5-8. §10: up to 2 branch points from stage 5.
+    2: (
+        "A story is one situation that CHANGES. Settle these before you write a "
+        "word:\n"
+        "  WHO — one main character.\n"
+        "  WANT — what they want, or what is wrong. Put it in the story in the "
+        "first two or three sentences, not just in your head.\n"
+        "  IN THE WAY — one thing that stops them getting it.\n"
+        "  A CHOICE — somewhere in the middle the character has two things they "
+        "could do and picks one. Write the moment of deciding, not just the "
+        "result.\n"
+        "  THE END — the last sentences answer the want, and the situation is not "
+        "the same as it was at the start.\n\n"
+        "You have enough words now to do all five, so do all five."
+    ),
+    # Stages 9-12. Same shape, twice the words — and the extra words are where the
+    # padding failure lives (DEVIATIONS 11.41): story 7309's arc was finished at
+    # sentence 14 and four flat sentences were bolted on after it to reach 120.
+    3: (
+        "A story is one situation that CHANGES. Settle these before you write a "
+        "word:\n"
+        "  WHO — one main character.\n"
+        "  WANT — what they want, or what is wrong. Put it in the story in the "
+        "first two or three sentences, not just in your head.\n"
+        "  IN THE WAY — one thing that stops them getting it, and a second thing "
+        "if the story needs it.\n"
+        "  A CHOICE — up to two places where the character has two things they "
+        "could do and picks one. Write the moment of deciding.\n"
+        "  THE END — the last sentences answer the want, and the situation is not "
+        "the same as it was at the start.\n\n"
+        "This story is long, and a long story is the hard case: the words have to "
+        "come from ONE story and not from two. When you reach the middle and still "
+        "have half the words left, the answer is more trouble with the SAME "
+        "problem — a first try that fails, a setback, someone who helps — and never "
+        "a new errand once the first one is finished. A story that ends and then "
+        "keeps going is the exact failure this section is here to stop."
+    ),
+}
+
+
+#: Stage 1 ONLY, and it is a fact about the GPC inventory rather than a style note.
+#: PROVED with `validate_word(w, mastered_ids(1))`, not assumed: at stage 1 `not`,
+#: `no`, `cannot`, `never` and `nope` are ALL violations, and the stage-1 allowlist
+#: contains no word with the letter `o` in it at all. **A stage-1 story cannot say
+#: that something did not happen.**
+#:
+#: This clause exists because the first version of this block asked stage 1 for
+#: "something that is wrong", and the model complied by writing "Rabbit cant nap."
+#: `cant` is a real English word, it WAS in the stage-1 allowlist, and it is
+#: decodable (c-a-n-t) — so §5's gate passed it at 100% and §13's grammar half
+#: rejected it as a mis-spelled "can't". Two of six stage-1 stories died that way
+#: against zero before the change (DEVIATIONS 11.57). `cant` has since left the
+#: allowlist under another agent's vocabulary work, so that exact word can no longer
+#: be offered; the INVENTORY fact that caused it is unchanged, which is why the fix
+#: is stated as the inventory fact and does not name the word. Naming a word raises
+#: its salience in both directions (STATE invariant 5's lesson), and a word that is
+#: no longer on the list is one the model has no reason to reach for.
+_STAGE1_NEGATION = (
+    "\n\nAt this stage you have no way to write \"not\", \"no\", \"cannot\" or "
+    "\"never\" — every one of those words needs a letter this child has not been "
+    "taught yet. So say what IS happening and never what is not, and never spell a "
+    "word you do not have in order to say it. A problem still works said forwards: "
+    "\"A cat sat on the map. Sam did tap the cat. The cat ran.\" If a problem cannot "
+    "be said forwards with your words, use a different problem, or just a want that "
+    "is met."
+)
+
+#: The stage this clause is about. Named so the test can assert the pairing rather
+#: than re-deriving it.
+STAGE1_NEGATION_STAGE = 1
+
+
+def narrative_band(stage: int | None) -> int:
+    """Which §10 band a stage falls in. `None` (unknown stage) gets the gentlest.
+
+    Unknown-stage defaults DOWN rather than up, because the cost of asking a
+    stage-1 story for a decision it has no words for is a story the child cannot
+    read, and the cost of under-asking at stage 9 is a duller story they can.
+    """
+    if stage is None:
+        return 0
+    for band, edge in enumerate(NARRATIVE_BAND_EDGES):
+        if stage <= edge:
+            return band
+    return len(NARRATIVE_BAND_EDGES)
+
+
+def build_narrative_block(allowed_words: list[str]) -> str:
+    """The stage-scaled narrative ask. Cached, per stage (DEVIATIONS 11.43).
+
+    **Why this is in `system` and not in `messages`.** Two reasons, and the second
+    is the one that decides it:
+
+    1. It is byte-identical for every story at a stage, so in `system` it is
+       written to the prompt cache once and read back at 0.1x. In `messages` it
+       would be re-sent as fresh input on every request — 5.17's argument for
+       putting the practice block here.
+    2. **The rewrite block REPLACES `build_request_block`** in a single-message
+       conversation (9.40). Narrative guidance in `messages` would therefore vanish
+       the moment a first draft missed the decodability gate, which is precisely
+       the mechanism that was deleting the theme from rewritten stories. In
+       `system` it survives every rewrite.
+
+    It is NOT in `SYSTEM_RULES`, because it is per-stage and that prefix is frozen
+    against exactly that (STATE invariant 10).
+    """
+    stage = allowlist_stage(allowed_words)
+    band = _NARRATIVE_BANDS[narrative_band(stage)]
+    # Stage 1 only. See `_STAGE1_NEGATION`: the ask for "something that is wrong" is
+    # unsatisfiable at stage 1 without a word the inventory cannot spell, and the
+    # measured consequence was two grammar rejections out of six.
+    negation = _STAGE1_NEGATION if stage == STAGE1_NEGATION_STAGE else ""
+    return (
+        f"{NARRATIVE_HEADER}\n\n{band}{negation}"
+        f"{_NARRATIVE_ANTIPATTERN}{_NARRATIVE_FLOOR}"
+    )
+
+
+def generation_system_blocks(
+    stage_name: str,
+    allowed_words: list[str],
+    sight_words: list[str],
+) -> list[dict]:
+    """The whole `system` half of a generation request, assembled in ONE place.
+
+    Two callers assemble a generation request — `generate_story` here and
+    `pipeline._call`, which is the one that actually runs in `warm` and `eval`.
+    They have drifted before: `_call` held `max_tokens=8000` while this module had
+    moved to 16000, and because `_call` is the live node the production path kept
+    the old ceiling and lost whole cells to `stop_reason="max_tokens"`
+    (DEVIATIONS 8.7/8.25). A second prompt block is a second chance to drift the
+    same way, so the assembly is shared rather than copied.
+
+    The cache breakpoint goes at the END of the last stable block, so the whole
+    prefix — rules, vocabulary, practice, narrative — is one cached prefix keyed
+    per stage. That is the same economics as before this block existed: one
+    breakpoint, one cache entry per stage, everything per-request still in
+    `messages`.
+    """
+    narrative = build_narrative_block(allowed_words)
+    blocks: list[dict] = [
+        {"type": "text", "text": SYSTEM_RULES},
+        {
+            "type": "text",
+            "text": build_vocabulary_block(stage_name, allowed_words, sight_words),
+        },
+    ]
+    if narrative:
+        blocks.append({"type": "text", "text": narrative})
+    # On the last block whatever that turns out to be: an empty text block is an
+    # API error, so the breakpoint travels with the content rather than assuming a
+    # fixed index.
+    blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    return blocks
+
+
 def build_vocabulary_block(
     stage_name: str,
     allowed_words: list[str],
@@ -423,16 +648,10 @@ async def generate_story(
         # bad parameter. Observed live at stage 9 — see MAX_OUTPUT_TOKENS.
         max_tokens=MAX_OUTPUT_TOKENS,
         output_config={"effort": effort},
-        system=[
-            {"type": "text", "text": SYSTEM_RULES},
-            {
-                "type": "text",
-                "text": build_vocabulary_block(stage_name, allowed_words, sight_words),
-                # Breakpoint at the end of the stable prefix: every story for
-                # this stage reads the vocabulary from cache.
-                "cache_control": {"type": "ephemeral"},
-            },
-        ],
+        # Breakpoint at the end of the stable prefix: every story for this stage
+        # reads rules, vocabulary and story shape from cache. Assembled by the
+        # shared helper so this and `pipeline._call` cannot drift (8.25).
+        system=generation_system_blocks(stage_name, allowed_words, sight_words),
         messages=[
             {
                 "role": "user",

@@ -28,12 +28,12 @@ from storyforge.decoder import TextReport, WordVerdict, mastered_ids, validate_t
 from storyforge.llm.client import generation_model, generation_timeout, get_client
 from storyforge.llm.generate import (
     MAX_OUTPUT_TOKENS,
-    SYSTEM_RULES,
     StoryDraft,
     build_request_block,
-    build_vocabulary_block,
+    generation_system_blocks,
 )
 from storyforge.llm.moderate import ModerationResult, moderate
+from storyforge.llm.narrative import NarrativeResult, judge_narrative
 from storyforge.llm.pricing import Usage, usage_from_response
 
 # §6: the prompt gets the top-N allowed words by frequency, not the whole table.
@@ -80,6 +80,12 @@ class PipelineResult(BaseModel):
     title: str = ""
     story_words: list[str] = Field(default_factory=list)
     moderation: ModerationResult | None = None
+    # DEVIATIONS 11.47. A MEASUREMENT, never a gate: `passed` is computed above
+    # without reading this field, and `tests/test_narrative.py` sets the worst
+    # possible verdict and asserts the story still passes. None means the judge was
+    # not asked, which is the default and is a different fact from "scored badly"
+    # (a failed judge records `score = 0`, below `SCORE_MIN`).
+    narrative: NarrativeResult | None = None
     # §15: persisted on `stories.langfuse_trace_id`. None whenever tracing is off
     # or failed — the run itself is unaffected either way.
     langfuse_trace_id: str | None = None
@@ -110,6 +116,20 @@ class PipelineResult(BaseModel):
         if self.moderation is None or self.moderation.usage is None:
             return 0.0
         return self.moderation.usage.cost_usd(on)
+
+    def narrative_cost_usd(self, on) -> float:
+        """The narrative judge only, and deliberately OUTSIDE `total_cost_usd`.
+
+        `total_cost_usd` is what it costs to PRODUCE a story, and that is the figure
+        `docs/EVAL.md` reports as cost per accepted story. The narrative judge is
+        instrumentation: it is off by default, it never runs in `make warm`, and
+        folding it in would make a before/after comparison of production cost read
+        as a cost regression when the only thing that changed is that the after run
+        was measured. Reported on its own line instead.
+        """
+        if self.narrative is None or self.narrative.usage is None:
+            return 0.0
+        return self.narrative.usage.cost_usd(on)
 
 
 async def load_vocabulary(session, stage_id: int, theme_slug: str) -> Vocabulary:
@@ -363,16 +383,13 @@ async def _call(vocab: Vocabulary, theme: str, user_block: str, effort: str):
         model=model,
         max_tokens=MAX_OUTPUT_TOKENS,
         output_config={"effort": effort},
-        system=[
-            {"type": "text", "text": SYSTEM_RULES},
-            {
-                "type": "text",
-                "text": build_vocabulary_block(
-                    vocab.stage_name, vocab.allowed_words, vocab.sight_words
-                ),
-                "cache_control": {"type": "ephemeral"},
-            },
-        ],
+        # Shared with `llm.generate.generate_story` rather than copied: the two
+        # assembled the same prompt by hand until `max_tokens` drifted between them
+        # and the LIVE node — this one — kept the old ceiling (DEVIATIONS 8.7/8.25).
+        # A second stage-scaled block is a second chance to drift the same way.
+        system=generation_system_blocks(
+            vocab.stage_name, vocab.allowed_words, vocab.sight_words
+        ),
         messages=[{"role": "user", "content": user_block}],
         output_format=StoryDraft,
     )
@@ -401,6 +418,11 @@ def _trace_summary(result: PipelineResult) -> dict:
             if result.moderation
             else None
         ),
+        "narrative": (
+            {"score": result.narrative.score, "spine": result.narrative.spine}
+            if result.narrative
+            else None
+        ),
     }
 
 
@@ -410,6 +432,7 @@ async def run_pipeline(
     theme_slug: str,
     effort: str = "medium",
     moderate_output: bool = True,
+    judge_narrative_output: bool = False,
 ) -> PipelineResult:
     t_run = time.perf_counter()
     t_vocab = time.perf_counter()
@@ -527,6 +550,23 @@ async def run_pipeline(
                         )
                 else:
                     result.passed = True
+
+                # DEVIATIONS 11.47: measurement, AFTER `passed` is already decided
+                # and physically unable to change it. Off by default, so `make warm`
+                # spends nothing on it; the §14 harness and
+                # `scripts/measure_narrative.py` turn it on. `judge_narrative` never
+                # raises (it returns `error` set), so this cannot cost a story.
+                if judge_narrative_output:
+                    with obs.generation(
+                        "NARRATIVE",
+                        input=body,
+                        metadata={"attempt": n, "stage_id": stage_id},
+                    ) as nar_span:
+                        result.narrative = await judge_narrative(body)
+                        nar_span.update(
+                            output=result.narrative.model_dump(exclude={"usage"}),
+                            usage=result.narrative.usage,
+                        )
                 result.total_ms = (time.perf_counter() - t_run) * 1000
                 trace.update(output=_trace_summary(result))
                 return result

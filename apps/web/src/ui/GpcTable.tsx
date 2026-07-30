@@ -84,6 +84,22 @@ export default function GpcTable({ rows, kidName, currentStage }: GpcTableProps)
           appeared in a story. A letter-and-sound pair is one row: <i>th</i> in “thin” and <i>th</i>{' '}
           in “this” are two different sounds and are counted separately.
         </p>
+        {/* Each story ends with TWO questions and only one of them reaches this
+            table: `mastery.MASTERY_QTYPES` is `("tap_word",)`, because a
+            two-option comprehension question is 50% guessable and must not move
+            a mastery counter (§8). That is a good decision and it was invisible
+            — "3/3 correct" in Recent readings counts both, so a parent reading
+            these two panels together had no way to know they were counting
+            different things (DEVIATIONS 11.34). Said here, in words, and never
+            to the child: §01 and §07 keep kid mode free of anything that reads
+            like grading, and "this question is the one that counts" is grading. */}
+        <p className="mt-[6px] max-w-[68ch] text-[15px] leading-[1.5] text-ink-500">
+          Only the <i>sounds</i> question at the end of a story reaches this table — the tap-a-word
+          one. The story question beside it checks whether {kidName} followed what happened, which
+          is worth knowing but is not evidence about a letter-sound: with two options to choose
+          from, a guess is right half the time. Both are counted in{' '}
+          <i>Recent readings</i> below.
+        </p>
       </div>
 
       <table role="table" className="w-full border-collapse text-left">

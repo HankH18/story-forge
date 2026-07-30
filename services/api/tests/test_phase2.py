@@ -111,11 +111,45 @@ async def test_allowlist_grows_monotonically_with_stage(session):
 
 
 async def test_no_stage_is_starved(session):
-    """§18: a stage with almost no vocabulary starves generation."""
-    rows = await session.execute(
-        text("SELECT stage_id, count(*) FROM allowed_words GROUP BY 1 HAVING count(*) < 100")
+    """§18: a stage with almost no vocabulary starves generation.
+
+    STAGE 1 IS AN AUTHORISED EXCEPTION, and it is the only one (DEVIATIONS 11.11).
+    Its nine-GPC inventory can spell **78** child-vocabulary words — measured with
+    the adult frequency list removed from the question entirely, so that is a
+    ceiling and not a setting. The 157 rows this test used to pass on cleared 100
+    only because 27 of them were proper nouns or non-words (`nasa`, `sam`, `tampa`,
+    `im`, `ip`) and 61 more were adult register (`amid`, `admin`, `stat`, `impact`).
+    A row count cannot tell those apart from vocabulary, which is what made this
+    test green for the wrong reason.
+
+    The remedy is the ladder, not the filter, and it is the USER's decision, not
+    this suite's: stage inventories are cumulative, so retiring stage 1 makes the
+    new stage 1 today's stage 2 at 771 words. That renumbering is sequenced
+    separately (stage rows, GPC and sight-word assignments, `MAX_STAGE`, the §5.7
+    goldens, the vacuity ratchet, §17's demo, live `stage_id` data).
+
+    So the floor is asserted unchanged for every stage above 1, and stage 1 is
+    pinned to its measured ceiling rather than exempted — it still fails if stage 1
+    degrades further, and the exception list still fails if a SECOND stage ever
+    falls short, which is the case where renumbering by one would not save us.
+    """
+    counts = dict(
+        (await session.execute(text("SELECT stage_id, count(*) FROM allowed_words GROUP BY 1")))
+        .tuples()
+        .all()
     )
-    assert not rows.all(), "a stage has under 100 allowed words"
+    starved = {stage: n for stage, n in counts.items() if n < 100}
+    assert set(starved) <= {1}, f"a stage other than 1 has under 100 allowed words: {starved}"
+    assert counts[1] >= 78, (
+        f"stage 1 holds {counts[1]} words, below its measured child-vocabulary "
+        f"ceiling of 78 — something narrowed the allowlist beyond 11.8's filter"
+    )
+    # Once stage 1 is retired the exception is dead code, and this says so out loud
+    # rather than quietly permitting a starved stage forever.
+    assert counts.get(1, 0) < 100, (
+        "stage 1 now clears the floor — delete the exception above and restore the "
+        "plain assertion, because the authorised exception no longer applies"
+    )
 
 
 # --- syllable counting -------------------------------------------------------

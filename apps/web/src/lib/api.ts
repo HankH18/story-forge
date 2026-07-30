@@ -50,8 +50,15 @@ export interface Question {
   qtype: string
   prompt: string
   options: string[]
-  /** tap_word carries `target_grapheme` and `cue_word`; mcq2 only `options`. */
+  /** tap_word carries `cue_word`; `target_grapheme` is redacted by the DTO. */
   payload: Record<string, unknown>
+  /**
+   * The parent story's distinct story words (§4), mirrored from `QuestionDTO`.
+   * `mcq2` options and prompts are validated with the story-word exemption, so
+   * one can legitimately contain "rocket" — and without this list the question
+   * screen hands a stage-1 reader a word nobody has taught them.
+   */
+  story_words?: string[]
 }
 
 export interface Fallback {

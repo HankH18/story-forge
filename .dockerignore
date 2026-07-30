@@ -64,7 +64,25 @@ services/api/tests/
 reports/
 
 # --- everything the API image has no use for ---------------------------------
+# `apps/` is excluded WHOLESALE and then re-admitted narrowly, because the web
+# tier is now built inside this image and served by FastAPI (DEVIATIONS 10.1).
+# Un-ignoring a directory whose parent is ignored requires naming the parent, so
+# the order below is load-bearing: exclude `apps/`, re-admit only the four things
+# a Vite build needs, and rely on the `**/node_modules`, `**/dist` and `**/.env*`
+# rules ABOVE to keep the heavy and the secret out even inside the re-admitted
+# tree. Verified by exporting the real build context, not by reading this file.
 apps/
+!apps/web/
+apps/web/*
+!apps/web/src/
+!apps/web/public/
+!apps/web/index.html
+!apps/web/package.json
+!apps/web/bun.lock
+!apps/web/tsconfig*.json
+!apps/web/vite.config.ts
+!apps/web/tailwind.config.ts
+!apps/web/postcss.config.js
 packages/
 docs/
 scripts/

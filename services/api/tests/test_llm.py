@@ -725,3 +725,213 @@ def test_the_fast_nodes_keep_sec_7s_fifteen_seconds():
     from storyforge.llm.client import FAST_TIMEOUT_S
 
     assert FAST_TIMEOUT_S == 15.0
+
+
+# --- the narrative block (DEVIATIONS 11.40-11.59) -----------------------------
+# The defect: "the stories don't feel the need to follow any sort of storyline.
+# Instead, it's more like 'Adam sat, Adam ran'." Seen at stage 2 AND stage 6, and
+# invisible to every gate — §1 item 2 measures decodability and rewrite depth,
+# `passes_gate` measures decodability, OOV and the story-word cap, and §13's judge
+# is told that plain repetitive prose is the format working.
+def test_the_padding_clause_no_longer_sends_the_character_off_to_do_something_else():
+    """DEVIATIONS 11.41 — the PROXIMATE CAUSE, and it was a present instruction
+    rather than an absent one.
+
+    Rule 8 used to end "If the story ends before the count does, give a character
+    something else to do." That is 8.22's length fix working exactly as written, and
+    at 120-200 words it is the difference between story 7309's arc (lost -> sees a
+    light -> home) and the four flat sentences bolted on after it to reach the word
+    count. Length compliance is 100% and must stay there, so the clause is REPLACED
+    and not deleted: the extra words still have to come from somewhere, and now they
+    come from the same problem.
+    """
+    assert "give a character something else to do" not in SYSTEM_RULES
+    flat = " ".join(SYSTEM_RULES.split())
+    assert "do not send the character off to do something else" in flat
+    assert "more trouble with the SAME problem" in flat
+    # The length ask itself is untouched — this is a change to WHERE the extra words
+    # come from, never to whether they are required.
+    assert "Meet the length the request gives you" in SYSTEM_RULES
+    assert "finishing under it is a failed answer" in SYSTEM_RULES
+
+
+def test_the_edited_clause_adds_no_per_request_material():
+    """STATE invariant 10 at the point of risk. A one-clause edit to a global rule
+    invalidates each stage's cached prefix exactly once; a per-request leak would
+    invalidate it on every call, forever. Both existing frozen-prefix assertions
+    still hold, and the length rule still carries no digit."""
+    length_rule = SYSTEM_RULES.split("Meet the length", 1)[1]
+    assert not any(ch.isdigit() for ch in length_rule)
+    for leak in ("dragon", "Stage 3", "30-60", "{", "}"):
+        assert leak not in SYSTEM_RULES
+
+
+def test_the_narrative_block_scales_with_ten_s_own_ladder():
+    """DEVIATIONS 11.44. §10: "linear spine with exactly 0-2 branch points
+    (stage-scaled: 0 for stages 1-2, up to 2 for 5+)". A branch point is a decision
+    and a decision needs a situation, so §10's scaling IS the stage-scaled ask. The
+    bands are asserted through `narrative_band` rather than through a live allowlist
+    so this test needs no database."""
+    from storyforge.llm.generate import narrative_band
+
+    assert [narrative_band(s) for s in range(1, 13)] == [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]
+    # An unknown stage defaults DOWN, not up: over-asking a 30-word stage-1 story
+    # costs a child a story they cannot read, under-asking at stage 9 costs a duller
+    # one they can.
+    assert narrative_band(None) == 0
+
+
+def test_stage_one_and_two_are_asked_for_less_not_more():
+    """§18 is correct at the bottom of the ladder: stage-1 vocabulary is
+    `s a t p i n m d` and "Sam sat. A cat sat." is authentic register. The stage-1
+    band must not push a 30-word story into breaking the gate reaching for something
+    it has no words for (DEVIATIONS 11.46)."""
+    from storyforge.llm.generate import build_narrative_block
+
+    early = build_narrative_block(["cat", "sat", "pin", "man"])  # stage 1 allowlist
+    assert "A CHOICE" not in early
+    assert "IN THE WAY" not in early
+    # It says how SMALL a want is allowed to be, which is the whole point.
+    assert "Wanting to nap is a want" in early
+    assert "six short sentences is enough" in early
+
+
+def test_the_upper_bands_ask_for_a_want_an_obstacle_and_a_decision():
+    """Stage 5+ has §10's two branch points and, at stage 6, 5,392 allowed words.
+    §18's register excuse does not reach here, so the ask is the full shape."""
+    from storyforge.llm.generate import build_narrative_block
+
+    mid = build_narrative_block(["shade", "green", "her", "shine"])  # vowel-team era
+    for part in ("WHO", "WANT", "IN THE WAY", "A CHOICE", "THE END"):
+        assert part in mid, part
+    assert "moment of deciding" in mid
+
+
+def test_every_band_forbids_the_three_things_a_prompt_change_has_already_broken():
+    """Each clause is a previous failure, not a precaution.
+
+    * 9.40 — a prompt change that made the model resolve a conflict by deleting the
+      theme: 6 of 15 dragons stories shipped with no dragon in them. So nothing here
+      may read as a reason to reach for a fourth story word.
+    * 8.22 v2 — a permissive paragraph read as an instruction and took the 120-200
+      band to a 193.5-word mean with 7 of 11 drafts over the ceiling.
+    * §0 / invariant 1 — the gate is decodability and is never weakened for this.
+    """
+    from storyforge.llm.generate import build_narrative_block
+
+    for allowed in (["cat", "sat"], ["shade", "her"], ["gentle", "carrot", "her"]):
+        block = build_narrative_block(allowed)
+        assert "None of this needs a new story word" in block
+        assert "none of this outranks rule 1" in block
+        assert "change what happens next" in block
+        # And the antipattern is quoted in the user's own words, so the model can
+        # recognise the thing it is being asked not to write.
+        assert "Dan sat. Dan ran. Dan can nap." in block
+        # Never at the cost of repetition, which is CORRECT here (invariant 3) and
+        # which 9.41 already had to defend once.
+        assert "Repeating the same WORDS is right" in block
+
+
+def test_the_long_band_names_the_padding_failure_it_exists_to_stop():
+    """Stages 9-12 are 120-200 words and that is where the padding clause bit: story
+    7309's arc finished at sentence 14 and four flat sentences were appended to reach
+    the count."""
+    from storyforge.llm.generate import build_narrative_block
+
+    long_band = build_narrative_block(["gentle", "carrot", "her", "circle"])
+    assert "never a new errand once the first one is finished" in long_band
+    assert "ends and then keeps going" in long_band
+
+
+def test_the_narrative_block_is_in_the_cached_system_half_and_not_in_messages():
+    """DEVIATIONS 11.43, and the second reason is the one that decides it.
+
+    1. The block is byte-identical for every story at a stage, so in `system` it is
+       written to the cache once and read at 0.1x — 5.17's argument for the practice
+       block.
+    2. **The rewrite block REPLACES `build_request_block`** in a single-message
+       conversation (9.40), so narrative guidance in `messages` would vanish the
+       moment a first draft missed the gate. That is the exact mechanism that was
+       deleting the theme from rewritten stories, and it is why this cannot live in
+       the request block.
+    """
+    from storyforge.llm.generate import NARRATIVE_HEADER, generation_system_blocks
+
+    blocks = generation_system_blocks("Stage 6", ["shade", "her"], ["the", "was"])
+    assert NARRATIVE_HEADER in "".join(b["text"] for b in blocks)
+    assert NARRATIVE_HEADER not in build_request_block("dragons", {}, 60, 120)
+    # It is not in the frozen prefix either — that is per-stage material and
+    # SYSTEM_RULES is frozen against exactly that.
+    assert NARRATIVE_HEADER not in SYSTEM_RULES
+
+
+def test_the_system_prefix_has_exactly_one_cache_breakpoint_and_it_is_last():
+    """The cache economics must be unchanged by adding a block: one breakpoint, one
+    cache entry per stage, everything per-request still in `messages`. An empty text
+    block is an API error, so the breakpoint travels with the content rather than
+    sitting at a fixed index."""
+    from storyforge.llm.generate import generation_system_blocks
+
+    blocks = generation_system_blocks("Stage 6", ["shade", "her"], ["the"])
+    marked = [i for i, b in enumerate(blocks) if "cache_control" in b]
+    assert marked == [len(blocks) - 1]
+    assert all(b["text"].strip() for b in blocks), "an empty text block is a 400"
+
+
+def test_both_generation_callers_assemble_the_system_half_from_one_place():
+    """DEVIATIONS 8.7/8.25: `pipeline._call` and `llm.generate.generate_story`
+    assembled the same prompt by hand until `max_tokens` drifted between them — and
+    because `_call` is the node that actually runs in `warm` and `eval`, the live
+    path kept the old ceiling and lost whole cells to `stop_reason="max_tokens"`. A
+    second stage-scaled block is a second chance to drift the same way, so the
+    assembly is shared. Asserted by source inspection because the alternative is a
+    live API call."""
+    import inspect
+
+    from storyforge import pipeline as pl
+    from storyforge.llm import generate as gen
+
+    for fn in (pl._call, gen.generate_story):
+        src = inspect.getsource(fn)
+        assert "generation_system_blocks(" in src
+        # Neither may hand-roll a `system` list any more.
+        assert '"type": "text"' not in src
+
+
+def test_stage_one_is_told_it_cannot_write_a_negation_and_why():
+    """DEVIATIONS 11.57 — a regression this change CAUSED, its measured cause, and
+    the fix.
+
+    The first version of the stage-1 band asked for "something that is wrong". At
+    stage 1 that is unsatisfiable: `not`, `no`, `cannot`, `never` and `nope` are ALL
+    violations against `mastered_ids(1)`, and the stage-1 allowlist contains no word
+    with the letter `o` in it. The model complied anyway, by writing "Rabbit cant
+    nap." — `cant` is a real word, it was in the stage-1 allowlist, and it IS
+    decodable (c-a-n-t), so the gate passed it at 100% and §13's grammar half
+    rejected it as a mis-spelled "can't". **Two of six stage-1 stories died that way
+    against zero before the change.**
+
+    The clause states the inventory fact and does NOT name `cant`: the word has since
+    left the allowlist, and naming a construction raises its salience in both
+    directions, which is the lesson STATE invariant 5 is built out of.
+    """
+    from storyforge.decoder import WordVerdict, mastered_ids, validate_word
+    from storyforge.llm.generate import build_narrative_block
+
+    # The premise is verified here rather than asserted in a comment: if a future
+    # inventory change makes stage 1 able to say "not", this test goes red and the
+    # clause should be reconsidered rather than silently kept.
+    for word in ("not", "no", "cannot", "never"):
+        assert validate_word(word, mastered_ids(1)).verdict is not WordVerdict.DECODABLE, word
+
+    stage1 = build_narrative_block(["cat", "sat", "pin", "man", "nap"])
+    assert 'no way to write "not"' in stage1
+    assert "say what IS happening and never what is not" in stage1
+    assert "said forwards" in stage1
+    assert "cant" not in stage1
+
+    # Stage 2 onward must NOT carry it: stage 2 has `o`, so "not" is available and
+    # telling it otherwise would remove the cheapest way it has to state an obstacle.
+    assert validate_word("not", mastered_ids(2)).verdict is WordVerdict.DECODABLE
+    stage2 = build_narrative_block(["got", "on", "top", "hot", "lost", "fox"])
+    assert 'no way to write "not"' not in stage2

@@ -17,3 +17,5 @@ silent change to the proof surface fails the suite.
 | `cmudict.symbols` | 281 | `408ccaae803641c6d7b626b6299949320c2dbca96b2220fd3fb17887b023b027` |
 | `LICENSE` | 1,754 | `bd4ce8e44170a5f9f481310ca85c51de3c4f851a65e679b40e603b143bd3542a` |
 | `data/frequency-en.csv` | 398,644 | `da0f3d22b268ac78dec64063dae40f75b965e4dfc512e3414d24e03d90d0469e` |
+| `data/child-vocabulary.txt` | 19,091 | `24af3c60f0ddb9b941f6c434c32b585eac21f4a4da5ad223564639814af361ae` |
+| `data/common-words-en.txt` | 350,603 | `7c843064f35352642d2d7be8b576e335f503fbdd77ec645e0a471568b186602e` |

@@ -7,16 +7,24 @@
  * picture and a name — no search, no free text, no "other" (§13: kid mode
  * renders no text input, ever).
  *
- * Cover art is not shipped yet, so the card falls back to `themes.emoji`. §07
- * carves out exactly one exception to "no emoji as artwork" and this is it:
- * "the `themes.emoji` column, as a fallback before a theme cover exists". If a
- * cover ever arrives on the theme row it takes over and the emoji retires.
+ * The card renders the theme's §06 COVER — 1:1, one bold subject centred,
+ * legible at 180px, drawn to survive a circular crop. This comment used to say
+ * "cover art is not shipped yet, so the card falls back to `themes.emoji`. §07
+ * carves out exactly one exception to 'no emoji as artwork' and this is it ...
+ * If a cover ever arrives on the theme row it takes over and the emoji retires."
+ * It has arrived and the emoji has retired (DEVIATIONS 11.29).
+ *
+ * The emoji is still the fallback, and still the documented one: a theme slug
+ * with no cover in `lib/art.ts` renders it rather than a blank card, and a cover
+ * whose file fails to load demotes to it too. §01 — nothing here can look broken.
  *
  * The theme name is set in Andika: it is a word a child reads, and §03 makes
  * Andika non-negotiable for choice labels.
  */
 
+import { useState } from 'react'
 import type { Theme } from '../lib/api'
+import { coverFor } from '../lib/art'
 
 export interface ThemePickerProps {
   themes: Theme[]
@@ -27,6 +35,8 @@ export interface ThemePickerProps {
 export default function ThemePicker({ themes, readerName, onPick }: ThemePickerProps) {
   // §07: 3–6 cards. More than six is a wall, fewer than three is not a choice.
   const shown = themes.slice(0, 6)
+  /** Slugs whose cover file did not load. Falls back to the emoji, never a gap. */
+  const [failed, setFailed] = useState<Set<string>>(() => new Set())
 
   return (
     <main
@@ -43,7 +53,9 @@ export default function ThemePicker({ themes, readerName, onPick }: ThemePickerP
       </header>
 
       <ul className="grid grid-cols-1 gap-6 sm:grid-cols-3">
-        {shown.map((theme) => (
+        {shown.map((theme) => {
+          const cover = coverFor(theme.slug)
+          return (
           <li key={theme.id}>
             {/* The whole card is the button: one card, one job, one target —
                 and the focus ring then lands on the thing a finger hits. */}
@@ -57,15 +69,32 @@ export default function ThemePicker({ themes, readerName, onPick }: ThemePickerP
             >
               <span
                 aria-hidden="true"
-                className="flex aspect-square w-full items-center justify-center rounded-chip
-                           border-2 border-paper-rule bg-paper-warm text-[72px] leading-none"
+                className="flex aspect-square w-full items-center justify-center overflow-hidden
+                           rounded-chip border-2 border-paper-rule bg-paper-warm text-[72px]
+                           leading-none"
               >
-                {theme.emoji || '📖'}
+                {cover && !failed.has(theme.slug) ? (
+                  <img
+                    src={cover}
+                    alt=""
+                    onError={() =>
+                      setFailed((prev) => {
+                        const next = new Set(prev)
+                        next.add(theme.slug)
+                        return next
+                      })
+                    }
+                    className="h-full w-full object-contain"
+                  />
+                ) : (
+                  (theme.emoji || '📖')
+                )}
               </span>
               <span className="font-read text-[28px] text-ink-900">{theme.display_name}</span>
             </button>
           </li>
-        ))}
+          )
+        })}
       </ul>
     </main>
   )

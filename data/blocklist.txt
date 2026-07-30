@@ -50,16 +50,45 @@
 # `hurting` were never on this list, so blocking the bare form alone was never the
 # hazard control it looked like.
 #
+# MORPHOLOGY (11.1-11.5). Every entry here is a BASE form, and until 11.2 the
+# precompute filter was `if word in blocked` — an exact string match. So `fuck` was
+# blocked and `fucks` was not, and 50 variants of entries on this list were in the
+# live `allowed_words`: `fucks`, `dicks`, `asses`, `murders`, `killings`, `corpses`,
+# `pissing`, `punching`, `attacking`, `addicts`, `freaking`, `morons`, `hostages`.
+# The exact-match hit count was 0, which is why every previous check passed.
+# `precompute.blocked_forms()` now expands each entry with its regular inflections
+# (-s/-es, y->ies, f->ves, -ed, -ing, with consonant doubling) and matches the
+# expansion. So DO NOT add inflections of an entry by hand; they are generated.
+# Substring matching is still refused, for the Scunthorpe reason above.
+#
+# Two carve-outs, both deliberate:
+#   * The `proper-noun fragments` section below is NOT inflected. Those are not
+#     words with morphology, and inflecting them manufactures false positives:
+#     `los`+es = `loses`, `san`+s = `sans`, `corp`+s = `corps` (11.3). The section
+#     HEADER is what the code matches on, and a test asserts it exists — renaming
+#     it turns the suite red rather than silently inflecting fragments again.
+#   * DERIVATIONAL suffixes are not generated, because that is where collisions
+#     live: `butt`+er = `butter`. The four that matter are explicit lines below
+#     (`killer`, `attacker`, `fuckin`, `freaky`) and their plurals are generated.
+#
+# `moderate.blocklist_check` (§13 layer 1) deliberately still matches the LITERAL
+# entries, not the expansion. A layer-1 hit short-circuits `moderate()`, so an entry
+# there does not narrow vocabulary — it stops layer 3 from ever applying the
+# hazard-vs-harm judgement. 8.14 measured that costing 2 of 3 rejections in a
+# 180-cell matrix (`high`) and 8.73 measured 3 of 9 in a 60-story run (`hurt`).
+# Not offering a word and killing a finished story are different costs (11.6).
+#
 # INVARIANT: `load_blocklist()` reads ONE WORD PER LINE. A space-separated
 # rewrite once loaded 22 words instead of 240 and the only symptom was a row count
 # moving the wrong way (6.15). Lines and entries are kept equal so the list can be
-# verified by counting it: 223 non-comment lines, 223 entries.
+# verified by counting it: 228 non-comment lines, 228 entries.
 
 # --- profanity ---
 fuck
 fucking
 fucked
 fucker
+fuckin
 shit
 shitty
 crap
@@ -122,6 +151,7 @@ rapist
 molest
 incest
 pedophile
+pimp
 
 # --- bodily ---
 poo
@@ -183,6 +213,7 @@ kill
 killed
 kills
 killing
+killer
 murder
 murdered
 murderer
@@ -230,6 +261,7 @@ weapon
 weapons
 attack
 attacked
+attacker
 violent
 violence
 fight
@@ -255,6 +287,7 @@ moron
 dummy
 loser
 freak
+freaky
 ugly
 obese
 skinny

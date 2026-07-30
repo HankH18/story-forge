@@ -668,7 +668,13 @@ def test_the_blocklist_can_still_be_verified_by_counting_it():
         if ln.strip() and not ln.lstrip().startswith("#")
     ]
     blocked = load_blocklist()
-    assert len(blocked) == len(lines) == 223, (len(blocked), len(lines))
+    # The literal is a CENSUS of the file, and every blocklist deviation updates it
+    # deliberately: 8.14 took it 239 -> 224, 8.17 224 (deduped), 8.73 224 -> 223, and
+    # 11.5 223 -> 228 (`pimp`, plus the four derivational forms `precompute.inflect`
+    # declines to generate: `killer`, `attacker`, `fuckin`, `freaky`). The invariant
+    # being guarded is `len(blocked) == len(lines)`; the number is what makes an
+    # accidental change loud.
+    assert len(blocked) == len(lines) == 228, (len(blocked), len(lines))
     # One word per line: a space-separated line would load as a single unmatched
     # "entry" and the count above would still be self-consistent.
     assert not [ln for ln in lines if " " in ln]

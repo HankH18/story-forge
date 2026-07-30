@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import logging
 from pathlib import Path
 
 from sqlalchemy import select
@@ -20,6 +21,8 @@ from sqlalchemy.dialects.postgresql import insert
 from storyforge.db import SessionLocal
 from storyforge.decoder import load_gpcs
 from storyforge.models import AllowedWord, Asset, Gpc, SightWord, Stage, StoryWord, Theme
+
+log = logging.getLogger(__name__)
 
 SEED_DIR = Path(__file__).resolve().parents[3] / "data/seed"
 
@@ -151,10 +154,30 @@ async def seed_assets(session) -> int:
     - **`alt_text` is present** (style guide §06: mandatory on every asset). A
       blank one passes every test and fails exactly one user.
 
-    `assets` has no unique constraint on `url` (the Phase 4 migration mirrors
-    §8's schema, which has none), so idempotency is done by reading the existing
-    urls and splitting into update/insert rather than with ON CONFLICT. Deleting
-    and re-inserting would renumber ids and orphan `story_segments.asset_id`.
+    `assets` has no unique constraint (the Phase 4 migration mirrors §8's schema,
+    which has none), so idempotency is done by reading the existing rows and
+    splitting into update/insert rather than with ON CONFLICT. Deleting and
+    re-inserting would renumber ids and orphan `story_segments.asset_id`.
+
+    **The natural key is `(theme, kind, tags)` — the PICTURE — not `url`**
+    (DEVIATIONS 11.22). It was `url`, and under that key this file's move from
+    `.png` to `/assets/art/v1/....svg` would have inserted 33 new rows, left the
+    old 33 alive, and stranded **831 live `story_segments.asset_id`s on files that
+    do not exist** — every one of them silently rendering the striped placeholder,
+    which is the defect the art was drawn to fix. Keying on the picture makes
+    `url` a mutable column, so a re-versioned path (11.23) is a one-line CSV edit
+    and a `make seed`, with ids preserved and no data migration.
+
+    The new key is weaker than a unique index, so two guards come with it:
+
+    - a duplicate `(theme, kind, tags)` in the CSV is a hard error. Under the old
+      key two rows with identical tags were merely redundant — `select_asset`
+      would deterministically prefer the lower id and the other would never be
+      chosen. Under this one the second row silently overwrites the first's url.
+    - an asset row in the database whose url is not in the CSV is logged as an
+      orphan, with its id. That is exactly the state this change exists to
+      prevent, and it is invisible otherwise: nothing raises, nothing 500s, a
+      child just gets stripes.
     """
     from storyforge.llm.scene_tags import TAG_VOCABULARY
 
@@ -190,17 +213,53 @@ async def seed_assets(session) -> int:
             }
         )
 
-    existing = {
-        url: aid for aid, url in (await session.execute(select(Asset.id, Asset.url))).all()
-    }
+    def identity(theme_id: int, kind: str, tags: list[str]) -> tuple[int, str, str]:
+        # Tag ORDER is meaningful in the CSV (most important first) but not to
+        # identity: the same picture with its tags re-ordered is the same row.
+        return (theme_id, kind, "|".join(sorted(tags)))
+
+    seen: dict[tuple[int, str, str], str] = {}
     for row in rows:
-        asset_id = existing.get(row["url"])
+        key = identity(row["theme_id"], row["kind"], row["tags"])
+        if key in seen:
+            raise SystemExit(
+                f"assets.csv rows {seen[key]!r} and {row['url']!r} have the same "
+                f"(theme, kind, tags) — that is the natural key, so the second "
+                "would silently overwrite the first's url."
+            )
+        seen[key] = row["url"]
+
+    existing: dict[tuple[int, str, str], int] = {}
+    # The orphan check compares IDENTITIES, not urls. Comparing urls read before
+    # the updates reported all 33 rows as orphans on the very run that migrated
+    # them correctly — the pre-update url is of course absent from the new CSV.
+    unmatched: dict[int, str] = {}
+    for aid, theme_id, kind, tags, url in (
+        await session.execute(
+            select(Asset.id, Asset.theme_id, Asset.kind, Asset.tags, Asset.url)
+        )
+    ).all():
+        existing.setdefault(identity(theme_id, str(kind), list(tags or [])), aid)
+        unmatched[aid] = str(url)
+
+    for row in rows:
+        asset_id = existing.get(identity(row["theme_id"], row["kind"], row["tags"]))
         if asset_id is None:
             session.add(Asset(**row))
         else:
+            unmatched.pop(asset_id, None)
             await session.execute(
                 Asset.__table__.update().where(Asset.id == asset_id).values(**row)
             )
+
+    if unmatched:
+        log.warning(
+            "seed_assets: %d asset row(s) match no row in assets.csv: %s. Any "
+            "story_segments still pointing at them render the striped placeholder "
+            "(style guide §06) rather than art.",
+            len(unmatched),
+            ", ".join(f"id={aid} {url}" for aid, url in sorted(unmatched.items())),
+        )
     return len(rows)
 
 

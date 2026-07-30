@@ -2701,13 +2701,19 @@ def _console_summary(agg: dict, run: dict) -> str:
 def _fmt(results: list[PipelineResult], today: date) -> str:
     lines = [
         "",
-        f"{'stage':>5} {'theme':<9} {'pass':>5} {'decodability':>13} {'rewrites':>9} {'cost':>9}",
-        "-" * 56,
+        f"{'stage':>5} {'theme':<9} {'pass':>5} {'decodability':>13} {'rewrites':>9} "
+        f"{'narr':>5} {'cost':>9}",
+        "-" * 62,
     ]
     for r in results:
+        # DEVIATIONS 11.55: narrative is REPORTED here and gates nothing. It is in
+        # the smoke output because "nothing measured it" is why the defect the user
+        # found could regress unnoticed, and a metric that lives only in a
+        # measurement script nobody runs is the same as no metric.
+        narr = "-" if r.narrative is None else str(r.narrative.score)
         lines.append(
             f"{r.stage_id:>5} {r.theme:<9} {'YES' if r.passed else 'no':>5} "
-            f"{r.final_report.decodability:>12.1%} {r.rewrite_depth:>9} "
+            f"{r.final_report.decodability:>12.1%} {r.rewrite_depth:>9} {narr:>5} "
             f"${r.total_cost_usd(today):>8.4f}"
         )
 
@@ -2716,14 +2722,28 @@ def _fmt(results: list[PipelineResult], today: date) -> str:
     passed = sum(1 for r in results if r.passed)
     p95 = depths[min(len(depths) - 1, int(len(depths) * 0.95))]
 
+    narrs = [r.narrative.score for r in results if r.narrative and r.narrative.score > 0]
     lines += [
-        "-" * 56,
+        "-" * 62,
         f"  passed          {passed}/{len(results)}",
         f"  mean decodability {statistics.mean(decs):.1%}  (gate {DECODABILITY_GATE:.0%})",
         f"  p95 rewrite depth {p95}  (§1 target <= 2)",
-        f"  total cost      ${sum(r.total_cost_usd(today) for r in results):.4f}",
-        "",
+        f"  total cost      ${sum(r.total_cost_usd(today) for r in results):.4f}"
+        + (
+            f" (+ ${sum(r.narrative_cost_usd(today) for r in results):.4f} narrative judging)"
+            if narrs
+            else ""
+        ),
     ]
+    if narrs:
+        # No threshold and no exit code. §18's register point is correct at the
+        # bottom of the ladder, so a narrative floor that could refuse a legitimately
+        # spare stage-1 story is exactly the gate DEVIATIONS 11.47 declines to build.
+        lines.append(
+            f"  narrative       mean {statistics.mean(narrs):.2f} of 5, scores "
+            f"{sorted(narrs)}  (REPORTED, not a gate — DEVIATIONS 11.47)"
+        )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -2769,12 +2789,23 @@ async def run_smoke(stages: list[int], themes: list[str], n: int, effort: str):
             for theme in themes:
                 for i in range(n):
                     print(f"  stage {stage} / {theme} / story {i + 1}...", flush=True)
-                    r = await run_pipeline(session, stage, theme, effort=effort)
+                    # DEVIATIONS 11.55. The narrative judge costs ~$0.002 a story, so
+                    # four of them is under a cent on a $0.06-$0.12 run, and it makes
+                    # the smoke gate the place a narrative regression becomes visible
+                    # instead of a thing a person has to notice in the live app.
+                    r = await run_pipeline(
+                        session, stage, theme, effort=effort, judge_narrative_output=True
+                    )
                     results.append(r)
                     mark = "PASS" if r.passed else "FAIL"
                     print(
                         f"    {mark} {r.final_report.decodability:.1%} "
-                        f"after {r.rewrite_depth} rewrite(s)",
+                        f"after {r.rewrite_depth} rewrite(s)"
+                        + (
+                            f" · narrative {r.narrative.score}/5 — {r.narrative.spine}"
+                            if r.narrative and r.narrative.score
+                            else ""
+                        ),
                         flush=True,
                     )
                     if not r.passed:

@@ -2,11 +2,33 @@
 
 §7 fans QUESTION_GEN out in parallel with SCENE_TAGGING once the validator has
 passed. §11.3 fixes the inventory at exactly two types — `tap_word` ("tap the
-word that says /sh/ip") and `mcq2` (a two-choice story question) — and both
-render as text a child has to read. So the same rule as the story applies: the
-decoder is the gate, and it is never lowered for a question (§0). A question
-whose prompt or options contain an undecodable word is a bug, not a stylistic
+word that says /sh/ip") and `mcq2` (a two-choice story question). Everything a
+child has to READ to answer is gated by the decoder exactly as the story is, and
+that gate is never lowered (§0): an OPTION of either type, and the whole of an
+`mcq2` prompt, containing an undecodable word is a bug and not a stylistic
 wobble.
+
+**The one exception is the tap-a-word INSTRUCTION, and it is the spec's
+exception, not a convenience** (DEVIATIONS 11.60). §11.3 attaches "validated
+decodable" to `mcq2`'s *options* and to nothing else, and §10 separately spells
+the same requirement out for choice labels — so the doc states it in both places
+it wants it and states it for no prompt. Its own example instruction, "tap the
+word that says /sh/ip", fails the gate at every stage 1-12 (`word` and `says`
+are undecodable throughout), so prompt-decodability cannot be what it meant. And
+the constraint bought nothing measurable: §8 credits the option the child TAPS
+(`api/readings.py` reads `answer["correct"]` alone), so not one grapheme of any
+prompt has ever moved `gpc_stats`. What it cost was 71 of 125 live rows whose
+instruction never named the task. An instruction is not reading practice; it is
+the scaffolding that says what the practice IS, it is spoken aloud on mount
+(DEVIATIONS 6.27) and every word of it is individually tappable for TTS.
+
+So the frame is validated against `INSTRUCTION_WORDS` as well as the stage's
+sight words — the same parameter, the same mechanism §4 already has for
+irregular function words. The gate still runs, and it still proves the one thing
+that matters: **the CUE WORD is decodable at the child's stage**, because the cue
+is not in the lexicon. `mcq2`'s prompt is NOT exempt — it is the comprehension
+content, which the child must read to answer, so there decodability is the task
+rather than the scaffolding.
 
 The architecture mirrors `llm/generate.py`: the model is an untrusted generator
 and a pure function is the judge (STATE invariant 2). Nothing the model claims
@@ -47,43 +69,44 @@ fired so §14 can measure it:
 Nothing about the gate or the "exactly one correct option" proof is relaxed to
 achieve this: the tiers only NARROW the closed list the model may choose from.
 
-**Prompt frames are a ladder, not a sentence.** A phonics prompt normally names
-the sound ("/sh/"), but a bare grapheme is not a word: 61 of the inventory's 78
-graphemes are OOV or a violation when tokenised, so a literal "/sh/" fails the
-gate at every stage. The target is therefore carried as a decodable CUE WORD in
-the payload — kid mode renders the sound chip from `cue_word`. `PROMPT_FRAMES`
-is tried richest-first and the first frame that PASSES the gate wins.
+**The instruction is one sentence, and it is the same one at every stage.** A
+phonics prompt normally names the sound ("/sh/"), but a bare grapheme is not a
+word: 61 of the inventory's 78 graphemes are OOV or a violation when tokenised.
+More importantly the grapheme is the ANSWER KEY — exactly one option starts with
+it — so printing it would leak worse than shipping it in `payload` did (4.9,
+7.14). The target is therefore carried as a decodable CUE WORD, and §11.3's own
+shape is kept with the cue where the spec writes the grapheme:
 
-*The ladder has to be built out of words the decoder actually passes, or it is
-not a ladder.* The first version was written from English rather than from the
-inventory, and every rung above the floor contained "word" or "one" — "word" is
-undecodable at every stage 1-12 and "one" is not a sight word until stage 12,
-so three of the four rungs were unreachable code and all 28 live prompts were
-the bare cue, `Tap: get.` That is worse than terse: `get` is chosen by
-`_cue_index` *specifically so it cannot be one of the options*, so the only
-sentence the child could read told them to tap a word that is not on the
-screen. Nothing else on the question screen says what to do (§11.3 wants "tap
-the word that says /sh/ip"; the sound chip is suppressed, DEVIATIONS 5.23).
+    "Tap the word that starts with the same sound as {cue}."
 
-The rungs below are each the richest sentence writable from the CUMULATIVE
-inventory at the stage named beside them — every one measured against the gate,
-not guessed:
+`PROMPT_FRAMES` is still tried richest-first and the first frame that passes the
+gate still wins, because the mechanism is what makes `None` — "this cue cannot be
+asked about at this stage" — a real answer that `sound_targets` and
+`check_tap_word` both rely on. But there are now two rungs rather than six, and
+the reason is DEVIATIONS 11.60/11.62: the ladder had six rungs because the gate
+made a frame's readability depend on the stage, and it no longer does. Six
+per-stage rungs would be dead code, which is precisely how this shipped broken
+the first time.
 
-    8-12  "Tap the one that starts with the same sound as {cue}."  ("sound" @8)
-    7     "Tap the one that starts like {cue}."                    ("one"/"starts" @7)
-    5-6   "Tap it if it begins like {cue}."                        ("like" @5)
-    4     "Tap it if it begins as {cue}."                          ("begins"/"as" @4)
-    2-3   "Tap it. Hint: {cue}."                                   ("hint" @2)
-    1     "Tap it: {cue}."
+*The history is worth keeping, because it is what proves the constraint was the
+problem rather than the wording.* The first version was written from English
+rather than from the inventory: every rung above the floor contained "word" or
+"one" — "word" is undecodable at every stage 1-12 and "one" is not a sight word
+until stage 12 — so three of four rungs were unreachable and all 28 live prompts
+were the bare cue, `Tap: get.` The second version derived each rung from the
+stage's own cumulative inventory and did pass the gate at 18/18. It was still
+unusable, and the live pool is the evidence: 38 of 125 rows said `Tap it: X.` or
+`Tap it. Hint: X.`, which name nothing to compare on a screen holding three
+options, and 33 more said `Tap it if it begins like X.`, a conditional with no
+identified subject. 57% of live instructions did not say what the task was, and
+that is what the user reported. Every similarity word a stage-2 child can read —
+`as`, `like`, `same`, `alike` — is stage 4 or later; the only stage-3 candidate,
+`twin`, claims the options are IDENTICAL to the cue, which is a false
+instruction. So the sentence could not get clearer while the constraint held.
+The constraint was the wrong one, and 11.60 retires it.
 
-Stages 2-3 get no comparison at all, and that is a fact about the inventory,
-not a choice: every similarity word in English that a child could read here —
-`as`, `like`, `same`, `alike` — is stage 4 or later, and the one stage-3
-candidate (`twin`) claims the options are IDENTICAL to the cue, which is a
-false instruction. `Hint:` at least labels the cue as a hint rather than as the
-target. Stage 1's inventory is nine consonants and one vowel; `Tap it:` is the
-whole of what it can say. Honest consequence, logged in DEVIATIONS: the gate
-stays where it is and the sentence gets shorter, never the reverse.
+The floor `"Tap: {cue}."` is retained for the cue that breaks the rung above it —
+not for a stage — which is the one slot a rung is allowed to be unreachable in.
 
 **`target_grapheme` is answer-key material and lives in `answer`, never in
 `payload`.** `check_tap_word` guarantees that exactly one option starts with the
@@ -223,18 +246,29 @@ QUESTION_OPENERS = (
     "Did", "Was", "Is", "Can", "Will", "Who", "What", "Where", "When", "Why", "How",
 )
 
-# Tried in order; the first one that clears the gate at this stage is used. Each
-# rung is the richest sentence the stage's own inventory can spell — see the
-# module docstring for which word gates which rung, and `test_questions.py`
-# for the assertion that every rung is reachable at some stage (a frame no
-# stage can read is dead code, which is exactly how this shipped last time).
+# The tap-a-word instruction's own vocabulary, exempt from the decodability gate
+# (DEVIATIONS 11.60). Deliberately a CLOSED, committed list rather than a rule:
+# it is auditable in one place, it is human-authored and human-reviewed, and it
+# cannot grow silently — `test_questions.py` pins its contents and asserts every
+# member is a function or instruction word.
+#
+# What must never enter it: any word that could be a CUE or an OPTION. The cue is
+# the phonics content and stays gated at the child's stage; the options are what
+# §8 credits. Every word here is either a determiner, a preposition, a pronoun or
+# part of the fixed verb phrase "tap ... starts with the same sound as".
+INSTRUCTION_WORDS = frozenset(
+    {"tap", "the", "word", "that", "starts", "with", "same", "sound", "as"}
+)
+
+# Tried in order; the first one that clears the gate at this stage is used. Two
+# rungs, not six: under 11.60 a frame's readability no longer depends on the
+# stage, so per-stage rungs would be dead code (11.62) — and `test_questions.py`
+# still asserts no rung is dead, which is exactly how this shipped broken once.
+# The mechanism is kept because `None` ("this cue cannot be asked about here") is
+# load-bearing for `sound_targets` and `check_tap_word`.
 PROMPT_FRAMES = (
-    "Tap the one that starts with the same sound as {cue}.",
-    "Tap the one that starts like {cue}.",
-    "Tap it if it begins like {cue}.",
-    "Tap it if it begins as {cue}.",
-    "Tap it. Hint: {cue}.",
-    "Tap it: {cue}.",
+    # §11.3's own shape, with the decodable cue where the spec writes /sh/.
+    "Tap the word that starts with the same sound as {cue}.",
     # Last resort. Kept because a cue word is chosen per story and a frame that
     # fails for one cue must not cost the child the whole phonics screen.
     "Tap: {cue}.",
@@ -261,8 +295,9 @@ not invent words and do not reuse a word from another sound.
      the child never has to sound anything out. Choose the three lengths first, \
      then the words.
 
-2. TWO-CHOICE QUESTION. Ask one short question about what happens in the story, \
-and write a true answer and a false answer.
+2. TWO-CHOICE QUESTION. Write the two answers FIRST, then the question. Doing it \
+in that order is what makes the question askable, because the question has to be \
+about the part the two answers agree on.
    - Build the true answer by copying a sentence from the story, or by \
      shortening one. Keep the story's words in the story's own order, and add \
      nothing the story does not say.
@@ -274,10 +309,25 @@ and write a true answer and a false answer.
    - Do NOT make the false answer by adding or removing the word "not". Every \
      other word stays in the story's own order, so the story still reads as \
      saying it, and it does not count as a wrong answer.
-   - Never begin an answer with Yes or No.
    - The two answers must have the same number of words and be within about \
      three letters of the same length. A longer or shorter answer tells the \
      child which one to pick without reading it.
+   - Now find the words that are in ONE answer and not the other. Those words \
+     are the whole question, so they must NOT appear in the question you write. \
+     Ask about what the two answers SHARE.
+     Good — "What did he take from the moon?" for "He took a rock from the \
+     moon." and "He took a star from the moon.": both answers say he took \
+     something from the moon, so the question may say that, and only "rock" \
+     and "star" are held back.
+     Bad — "Did the rabbit run into the burrow?" for "It ran into the burrow." \
+     and "It ran past the burrow.": the question already says "into", so the \
+     child picks the answer with the matching word and never reads the story.
+     Bad the other way — "Was the dragon glad?" for "A man was glad." and "The \
+     dragon was glad.": the question says "dragon", which points at the FALSE \
+     answer.
+   - Never begin an answer with Yes or No. Prefer a question that asks WHICH \
+     or WHERE or WHAT happened over one answered by yes or no, using only the \
+     opening words you are given.
 
 Short sentences. No markdown."""
 
@@ -376,6 +426,10 @@ def _norm(word: str) -> str:
     return " ".join(word.strip().split())
 
 
+def _quoted_words(words: Iterable[str]) -> str:
+    return ", ".join(f'"{w}"' for w in words)
+
+
 def _sets(sight_words: Iterable[str], story_words: Iterable[str]):
     return (
         frozenset(w.strip().lower() for w in sight_words if w and w.strip()),
@@ -454,6 +508,62 @@ def story_supports(option: str, story_text: str) -> bool:
             return False
         i += 1
     return True
+
+
+#: Words that turn an answer into its own negation. `check_mcq2` refuses a pair
+#: that differs only by one of these (DEVIATIONS 11.64).
+NEGATION_WORDS = frozenset({"not", "no", "never"})
+
+
+def discriminating_words(correct: str, incorrect: str, sight: frozenset[str]) -> set[str]:
+    """The content words that appear in exactly ONE of the two answers.
+
+    These are what the child has to read the story to choose between. A word in
+    BOTH answers is the shared premise and carries no information about which
+    card is right — which is why the question SHOULD restate it ("What did he
+    take from the moon?" over "a rock" / "a star").
+
+    Sight words are excluded for the same reason `check_mcq2` already excludes
+    them from its grounding test: they are shared by every English sentence, so
+    treating "a" or "the" as discriminating would refuse almost every question.
+    """
+    a = {w for w in story_word_tokens(correct) if w not in sight}
+    b = {w for w in story_word_tokens(incorrect) if w not in sight}
+    return (a - b) | (b - a)
+
+
+def prompt_leaks_answer(
+    prompt: str, correct: str, incorrect: str, sight: frozenset[str]
+) -> list[str]:
+    """Every word by which the QUESTION gives one of the two answers away.
+
+    DEVIATIONS 11.64, and the same defect class as `cue_leaks`: a question that
+    contains the word distinguishing the two cards can be answered by matching
+    letters against the cards, with the story unread. 40 of 74 live `mcq2` rows
+    did exactly that — "Did the rabbit run into the burrow?" over "ran fast into
+    the burrow" / "ran fast past the burrow" needs no comprehension at all.
+
+    It is symmetric on purpose. A question that echoes the FALSE answer is the
+    same defect with a worse sign, because letter-matching then points at the
+    wrong card: live row "Was the dragon glad?" has the true answer "A man was
+    glad."
+    """
+    leaked = discriminating_words(correct, incorrect, sight) & set(story_word_tokens(prompt))
+    return sorted(leaked)
+
+
+def negation_pair(correct: str, incorrect: str) -> bool:
+    """Is one answer just the other with `not` added or removed?
+
+    `QUESTION_RULES` has forbidden this since 8.55 and 3 live rows do it anyway,
+    because until now the only thing enforcing it was `story_supports` — which
+    catches a negated distractor only when the negation happens to break the
+    subsequence. "The moon was white and high." / "The moon was white and not
+    high." slipped through on exactly that accident.
+    """
+    a = [w for w in story_word_tokens(correct) if w not in NEGATION_WORDS]
+    b = [w for w in story_word_tokens(incorrect) if w not in NEGATION_WORDS]
+    return a == b and story_word_tokens(correct) != story_word_tokens(incorrect)
 
 
 def cue_conflict(cue: str, option: str) -> str | None:
@@ -804,10 +914,17 @@ def tap_word_prompt(
     """The richest frame that clears the gate at this stage — or None.
 
     Deterministic: the same (cue, stage) always yields the same sentence.
+
+    The frame is validated against `INSTRUCTION_WORDS` alongside the stage's own
+    sight words (DEVIATIONS 11.60). That is a narrowing of what the gate JUDGES,
+    not a lowering of the gate: the cue is not in the lexicon, so this still
+    returns `None` for a cue the child cannot decode at this stage — which is the
+    answer `sound_targets` filters its menu on and `check_tap_word` refuses on.
     """
+    exempt = [*sight_words, *INSTRUCTION_WORDS]
     for frame in PROMPT_FRAMES:
         text = frame.format(cue=cue)
-        if passes_gate(readable(text, stage_id, sight_words, story_words)):
+        if passes_gate(readable(text, stage_id, exempt, story_words)):
             return text
     return None
 
@@ -1077,6 +1194,25 @@ def check_mcq2(
     ):
         problems.append(
             f'"{incorrect}" shares no words with the story — build it from the story\'s words'
+        )
+
+    # DEVIATIONS 11.64. The question must not contain the word that tells the
+    # child which card is right — 40 of 74 live rows did, which made a
+    # comprehension question answerable by letter-matching with the story unread.
+    # Same shape as `cue_leaks` for `tap_word`: the actionable instruction names
+    # the offending word, because "rewrite it" tells the model nothing.
+    leaked = prompt_leaks_answer(prompt, correct, incorrect, sight)
+    if leaked:
+        problems.append(
+            f"the question already contains {_quoted_words(leaked)}, which is what makes the "
+            "two answers different — so the child can pick the matching answer without "
+            "reading the story. Ask about what the two answers SHARE and leave the "
+            "difference to the answers"
+        )
+    if negation_pair(correct, incorrect):
+        problems.append(
+            'the false answer is only the true answer with "not" added or removed, so the '
+            "story still reads as saying it — change WHAT happened, not whether it happened"
         )
 
     if not _length_balanced([correct, incorrect], single_word=False):

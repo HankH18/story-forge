@@ -21,7 +21,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { cancelSpeech, speak, HOLD_AFTER_START_MS } from '../lib/speech'
-import { splitText, type TextPart } from '../lib/text'
+import { introductionIndices, storyWordSet } from '../lib/storyWords'
+import { splitText } from '../lib/text'
 import StoryWordChip from './StoryWordChip'
 import WordToken from './WordToken'
 
@@ -61,7 +62,7 @@ export default function StoryText({
   const [heard, setHeard] = useState<Set<number>>(() => new Set())
   const tail = useRef<number | null>(null)
 
-  const chipWords = useMemo(() => new Set(storyWords.map((w) => w.toLowerCase())), [storyWords])
+  const chipWords = useMemo(() => storyWordSet(storyWords), [storyWords])
   const parts = useMemo(() => splitText(text), [text])
 
   /**
@@ -74,20 +75,18 @@ export default function StoryText({
    * "dragon" was introduced silently and only "cave" was ever heard. Sequencing
    * keeps the rule — never two voices — while still honouring §07's "auto-speaks
    * once on first appearance" for every chip.
+   *
+   * **This is also the chip list** (DEVIATIONS 11.26). §07 ends the chip's
+   * sentence with "then behaves like any tappable word", and driving the picture
+   * and the utterance off one array is what makes that true by construction: a
+   * chip that never speaks, and a word that speaks with no chip, are no longer
+   * reachable states.
    */
   const pending = useRef<number[] | null>(null)
   if (pending.current === null) {
-    const seen = new Set<string>()
-    pending.current = parts
-      .filter((p): p is Extract<TextPart, { kind: 'word' }> => p.kind === 'word')
-      .filter((p) => {
-        const lower = p.text.toLowerCase()
-        if (!chipWords.has(lower) || seen.has(lower)) return false
-        seen.add(lower)
-        return shouldAnnounce ? shouldAnnounce(lower) : false
-      })
-      .map((p) => p.index)
+    pending.current = introductionIndices(text, { storyWords, shouldAnnounce })
   }
+  const introducing = useMemo(() => new Set(pending.current ?? []), [])
   const [announceAt, setAnnounceAt] = useState(0)
   const announcing = pending.current[announceAt] ?? null
 
@@ -137,7 +136,10 @@ export default function StoryText({
         }
         const lower = part.text.toLowerCase()
         const state = speaking === part.index ? 'speaking' : heard.has(part.index) ? 'heard' : 'rest'
-        if (chipWords.has(lower)) {
+        // §07: the chip is the FIRST appearance only. `chipWords.has(lower)` is
+        // still the test for "is this a story word", but it no longer decides
+        // how the word is drawn (DEVIATIONS 11.26).
+        if (chipWords.has(lower) && introducing.has(part.index)) {
           const announce = announcing === part.index
           return (
             <StoryWordChip
@@ -148,7 +150,12 @@ export default function StoryText({
               gloss={glossFor?.(lower) ?? null}
               autoSpeakOnFirstView={announce}
               onSpeak={(w) => {
-                if (announce) onAnnounced?.(lower)
+                // Any chip that speaks HAS been introduced. This used to fire
+                // only for the chip holding the microphone, so a child who
+                // tapped the second of two new words consumed the audio without
+                // the word being recorded — and the next screen introduced it
+                // all over again.
+                onAnnounced?.(lower)
                 say(part.index, w)
               }}
             />

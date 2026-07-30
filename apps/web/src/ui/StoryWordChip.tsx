@@ -5,10 +5,25 @@
  * A story word is the ≤3 theme words per story a reader at this stage cannot
  * decode (§5.5) — "dragon" at stage 1. It is excluded from the decodability
  * denominator precisely because it is *given* to the child rather than sounded
- * out, and the chip is how it is given: a picture, an amber ring, and audio the
- * first time it appears.
+ * out, and the chip is how it is given: a picture, a warm amber ground, and
+ * audio, once, the first time the word appears.
  *
- * Three constraints, all from §07:
+ * **Rendered on the FIRST APPEARANCE ONLY** — that decision lives in
+ * `lib/storyWords.ts` and `StoryText`, because it is a fact about the paragraph
+ * and the session, not about this component. §07's sentence ends "...then
+ * behaves like any tappable word", and every later occurrence is a plain
+ * `WordToken` (DEVIATIONS 11.26).
+ *
+ * **There is no ring.** §07 asks for an amber ring and this deliberately
+ * deviates (11.27). A 2px outline with a 10px radius around a word is, to a
+ * five-year-old, a box — and the user's report was literally "boxes around
+ * them ... boxes on a page mean mistakes". §02 keeps the berry violation colour
+ * out of kid mode for exactly that reason; an amber box is the same mistake in a
+ * warmer hue. What marks the word is the PICTURE. A word with a small drawing
+ * beside it reads as help at any age, and it is the one treatment on a reading
+ * line that cannot be mistaken for a correction.
+ *
+ * The rest is §07 unchanged:
  *
  * - **It sits inline, in the sentence.** Not a footnote, not a margin note. It
  *   shares `.sf-word`'s geometry with every other tappable word so it cannot
@@ -17,14 +32,18 @@
  *   Interruptible by construction: `speak()` cancels whatever is talking, so a
  *   tap during the auto-speak wins. Whether a word has already been announced
  *   is session state and belongs to the caller — this component only obeys the
- *   flag, so a word repeated three times in a story announces itself once.
- * - **The picture is real art or the §06 placeholder.** Never a broken image,
- *   never an invented URL. `onError` demotes to the placeholder, so an asset row
- *   pointing at a file that is not deployed yet degrades quietly.
+ *   flag.
+ * - **The picture is real art, or there is no picture.** Never a broken image,
+ *   never an invented URL. It used to fall back to the 1:1 `Placeholder`, which
+ *   is how every chip in the live app came to carry a 24px grey striped square:
+ *   no cutouts existed and `assetFor` was never wired up. §06's "never an empty
+ *   box" governs the 4:3 SEGMENT frame — a hole in the layout that must not
+ *   collapse — and a 24px square inside a word is not that hole; it is
+ *   decoration that means nothing (11.25). `onError` drops the picture the same
+ *   way, so an asset that is not deployed yet degrades to a plain amber word.
  */
 
 import { useEffect, useRef, useState } from 'react'
-import Placeholder from './Placeholder'
 import type { WordState } from './WordToken'
 
 export interface StoryWordChipProps {
@@ -79,18 +98,16 @@ export default function StoryWordChip({
         onClick={() => onSpeak(word)}
         className="sf-word sf-chip"
       >
-        <span className="sf-chip-art" aria-hidden="true">
-          {showArt ? (
+        {showArt ? (
+          <span className="sf-chip-art" aria-hidden="true">
             <img
               src={assetUrl ?? undefined}
               alt=""
               onError={() => setArtFailed(true)}
               className="h-full w-full object-contain"
             />
-          ) : (
-            <Placeholder ratio="1:1" showLabel={false} label="" className="h-full w-full" />
-          )}
-        </span>
+          </span>
+        ) : null}
         <span>{word}</span>
       </button>
       {/* §11: the gloss is for assistive tech; the picture is the child's gloss. */}

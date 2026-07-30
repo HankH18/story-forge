@@ -26,6 +26,7 @@
 
 import { useEffect } from 'react'
 import type { Segment, Story } from '../lib/api'
+import { cutoutFor } from '../lib/art'
 import Button from '../ui/Button'
 import ProgressDots from '../ui/ProgressDots'
 import SegmentArt from '../ui/SegmentArt'
@@ -145,10 +146,15 @@ export default function ReadingView({
         {/* `shrink-0`: the 4:3 frame is §06's contract and must not be squashed
             to make a long segment fit — that is what the scroll is for. */}
         <SegmentArt asset={segment.asset} className="w-full shrink-0" />
+        {/* `assetFor` was never passed, which is why every story-word chip in
+            the live app showed a grey striped square instead of a picture —
+            §07's "picture cutout on the left" had no picture to render
+            (DEVIATIONS 11.24, 11.25). */}
         <StoryText
           text={segment.body}
           size={size}
           storyWords={story.story_words}
+          assetFor={cutoutFor}
           shouldAnnounce={shouldAnnounce}
           onAnnounced={onAnnounced}
         />

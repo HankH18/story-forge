@@ -307,33 +307,55 @@
   background: var(--sf-gold-300);
   transform: scale(1.05);
 }
-/* §07 "already heard" — a gold rule under the word. Not a colour change on the
-   word itself: ink-900 on paper is the 13.4:1 contrast §11 asks for and there
-   is nothing to spend. */
-.sf-word[data-state='heard'] {
-  border-bottom-color: var(--sf-gold-500);
-}
+/* §07's fourth word-token state, "already heard", DELIBERATELY PAINTS NOTHING.
+   DEVIATIONS 11.28.
+
+   It was `border-bottom-color: gold-500` — a permanent gold rule under every
+   word the child had tapped. The mark is monotonic: it never clears inside a
+   segment, so a struggling reader who taps fifteen words ends up with fifteen
+   underlines and a mark that distinguishes nothing. It is a record of the
+   child's difficulty rendered on the page they are reading, and the surface for
+   that is the parent dashboard, where it already exists (`gpc_stats`).
+
+   Feedback stays; residue goes. The tap is still gold-300 fill + scale 1.05 held
+   250ms past the start of speech, and `data-state` still transitions
+   speaking -> heard, so `transition: background-color var(--sf-dur-tap)` above
+   fades the fill back out over 160ms and the page is clean again. The state is
+   still set and still observable in the DOM — it simply has no paint.
+
+   No rule here on purpose. Adding one back re-creates the defect. */
 
 /* §07 story-word chip. `inline-block` (not inline-flex) so the chip's baseline
    is its word's baseline — an inline-flex box takes its baseline from its first
-   item, which would drop the picture onto the reading line and break it. */
+   item, which would drop the picture onto the reading line and break it.
+
+   NO BORDER (DEVIATIONS 11.27). §07 asks for an amber ring; a child reads a ring
+   as a box and a box as a mistake. `border-color` is left at `.sf-word`'s
+   transparent, so the chip keeps the same box model and the same geometry — it
+   just does not draw an outline. The amber ground stays, and the PICTURE is what
+   marks the word.
+
+   The chip is now rendered on a story word's first appearance only, so there is
+   at most one per new word per screen rather than one per occurrence — which is
+   also what makes the height below safe. */
 .sf-chip {
-  padding-left: 8px;
+  padding-left: 6px;
   background: var(--sf-v-story-bg);
-  border-color: var(--sf-v-story);
 }
 .sf-chip:hover {
   background: var(--sf-amber-100);
 }
 .sf-chip-art {
   display: inline-block;
-  /* Sized so the chip's box matches a plain word token's. A taller cutout grows
-     the line box, and the chip then eats the clearance between its own line and
-     the line below — measured at 6.4px before this was tuned down, under §11's
-     8px floor. */
-  width: 24px;
-  height: 24px;
-  margin-right: 8px;
+  /* 28px, and the chip's total box stays SHORTER than a plain word token's 62px:
+     max(34px glyph box, 28px art) + 24px padding + 4px border = 62px. So the
+     line box is sized by the plain tokens, the measured 10px clearance between
+     stacked targets is untouched, and §11's 8px floor cannot be eaten by a chip
+     — which is what happened the last time this number moved (it was tuned down
+     to 24px after a taller cutout left 6.4px). */
+  width: 28px;
+  height: 28px;
+  margin-right: 7px;
   vertical-align: middle;
   border-radius: 8px;
   overflow: hidden;

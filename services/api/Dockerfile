@@ -24,6 +24,44 @@
 
 ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.11.8
+ARG BUN_VERSION=1.3.13
+
+
+# --- web: build the SPA that this same image will serve ----------------------
+# DEVIATIONS 10.1: the frontend used to be a separate App Platform static site,
+# which required a git source and therefore a git-provider connection. Building
+# it here removes that requirement entirely, and collapses two origins into one:
+# no CORS, no API base URL baked into the bundle, one instance, one thing to patch.
+#
+# Bun is pinned for the same reason uv is (DEVIATIONS 0.2): the lockfile is inside
+# the reproducibility claim, and a resolver that drifts under a pinned lock is the
+# same hole in a different tier.
+FROM oven/bun:${BUN_VERSION}-slim AS web
+
+WORKDIR /app/apps/web
+
+# Manifest first so a source-only change does not re-resolve dependencies.
+COPY apps/web/package.json apps/web/bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY apps/web/ ./
+
+# Clerk's PUBLISHABLE key. Public by construction — it ships in the bundle to
+# every browser either way — but passed as an ARG rather than hardcoded so a new
+# Clerk instance does not need a Dockerfile edit. The SECRET key never appears
+# here; §2 keeps every secret behind the API, and `main.py` refuses to boot
+# without a real one.
+ARG VITE_CLERK_PUBLISHABLE_KEY
+ENV VITE_CLERK_PUBLISHABLE_KEY=${VITE_CLERK_PUBLISHABLE_KEY}
+
+# Fails the build if the key is missing rather than shipping a bundle whose
+# ClerkProvider throws at runtime — DEVIATIONS 6.19 is exactly that: a malformed
+# key produced a totally white page in the production bundle, and the missing-key
+# guard never saw it because ClerkProvider threw first.
+RUN test -n "$VITE_CLERK_PUBLISHABLE_KEY" \
+      || { echo "VITE_CLERK_PUBLISHABLE_KEY build arg is required" >&2; exit 1; } \
+ && bun run build \
+ && test -f dist/index.html
 
 # uv is pinned to a version, not `:latest`. DEVIATIONS 0.2 puts the interpreter
 # and the lockfile inside the reproducibility claim the validator's proof rests
@@ -92,6 +130,12 @@ COPY --chown=storyforge:storyforge data /app/data
 
 COPY --chown=storyforge:storyforge services/api/alembic.ini services/api/pyproject.toml ./
 COPY --chown=storyforge:storyforge services/api/storyforge ./storyforge
+
+# The built SPA. `main.py` mounts it if and only if index.html is present, so a
+# build without this stage still yields a working API (DEVIATIONS 10.2). The path
+# matches `SPA_DIR`'s default, which is why nothing has to be configured at run
+# time; `STORYFORGE_SPA_DIR` exists to point local dev at `apps/web/dist`.
+COPY --from=web --chown=storyforge:storyforge /app/apps/web/dist /app/web
 
 ENV VIRTUAL_ENV=/app/services/api/.venv \
     PATH=/app/services/api/.venv/bin:$PATH \
