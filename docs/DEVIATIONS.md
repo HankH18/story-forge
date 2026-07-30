@@ -8765,3 +8765,188 @@ pool. And this changes nothing a child sees today: the six terminal stages are
 still terminal, and the dashboard still tells a stuck reader how many GPC
 instances they need. What has changed is that the product can no longer report
 itself healthy while they are stuck.
+
+## Phase 8 — §7's serve budget was a formula, not a fact about the pool (9.71-9.74)
+
+Numbered in the 9.60-9.70 block because this is **AUDIT-PHASE7 F4 revisited**:
+the same finding, the same sentence in 9.66's docstring, measured a second way
+and found not to hold. Logged **before** the change. Every number below was
+measured in this tree, through the real ASGI app, against the real Postgres —
+no model call, nothing committed.
+
+**9.71 — 9.66's budget is still a FIXED number, so F4 recurs one order of
+magnitude further out. The budget becomes a fact about the pool: how many
+stories the ladder can actually reach.**
+
+9.66 replaced `range(SERVE_ATTEMPTS)` with `range(_serve_attempt_budget(stage))`
+= `3 * 2 * stage` and claimed the property *"`SERVE_ATTEMPTS` on every rung the
+ladder can actually reach, not three in total"*. **The loop has no per-rung
+reset** — it is one counter over the whole descent — so one rung can still spend
+all of it, which is F4's own sentence verbatim. The audit measured the boundary
+and it lands exactly on the formula: a stage-1 reader (budget 6) with 24 good
+servable, answerable, decodable rows in the pool answered **0/30 requests with a
+503 at five planted bad rows and 4/30 at six**; a stage-2 reader (budget 12)
+descended on every request with 11 unservable rows at the rung and on **none of
+12** with twelve, with 24 good stage-1 rows one rung down.
+
+Reproduced here as two tests rather than as a script, both **RED against the
+shipped code**:
+
+```
+test_a_wall_of_bad_rows_does_not_hide_the_good_ones_on_the_same_rung
+  7 rows the serve-time gate refuses (7.7% decodable) buried a story that
+  measures 100.0% on the SAME rung: 503 {"detail":"no story at or below stage 1
+  passes §1's 95% gate for this reader; rejected 15028 (7.7%), … 15033 (7.7%)"}
+
+test_the_ladder_descends_past_a_rung_the_serve_gate_refuses   (43 rows, stage 7)
+  the ladder did not descend past 43 rows the serve-time gate refuses (16.7%
+  decodable): 503 … rejected 15036 … 15077   (42 ids — the budget, exactly)
+```
+
+The 503 detail is the proof it is the budget and not the gate: it names 6
+rejected ids at stage 1 and 42 at stage 7, i.e. `3 * 2 * stage` of them, and then
+stops with the good story never picked.
+
+**The fix is to stop deriving the budget from the ladder's SHAPE and derive it
+from the ladder's CONTENTS.** The number of picks a request may make is now the
+number of servable, answerable stories at or below the reader's stage — the size
+of the candidate set `_SERVE_SQL` walks:
+
+```
+SELECT count(*) FROM stories
+WHERE status = ANY(:statuses) AND stage_id <= :stage AND {ANSWERABLE_SQL}
+```
+
+That is not a bigger magic number, it is the exact point at which the walk can
+have nothing left to look at. Every rejection appends the picked id to
+`:excluded` and `_SERVE_SQL` refuses excluded ids, so after N picks the N-row
+candidate set is empty and the next pick returns nothing regardless. **The loop
+therefore stops when the pool at or below this reader is genuinely exhausted, and
+at no other time** — which is what makes the 503 mean what its text says. §0 is
+untouched: no story that fails §1's gate is served, ever; the change is only how
+long the endpoint keeps looking for one that passes.
+
+The ladder itself is still untouched, for 9.66's reason: `_SERVE_SQL`'s `ORDER
+BY` already descends in exact §7 order and `stage_id <= :stage` is STATE
+invariant 6. Only the budget moves.
+
+`SERVE_ATTEMPTS` is **deleted**, not raised. Its docstring said "three is enough
+to step over an isolated bad row", and that sentence was the defect: the pool
+does not promise that bad rows come one at a time, and neither §7 nor §1 says a
+child gets a fixed number of attempts at being served something readable.
+
+**9.72 — REJECTED, with the reason each fails.**
+- **The per-tier counter this finding proposed** — `SERVE_ATTEMPTS` failures per
+  (stage, theme-match) tier, moving on by excluding the whole tier. It fails the
+  case the same finding asks to be tested, and stage 1 is where it is impossible
+  to hide: a stage-1 reader has ONE rung, so the good stories are IN the bad rung
+  and abandoning the tier after three failures answers that child a 503 with a
+  correct story behind the fourth row. **PROVED rather than argued** — the
+  proposal was staged in the working tree (a `dict[(stage, theme_match), int]`
+  counter; at 3 failures, every remaining id of that tier is read out of `stories`
+  and appended to `:excluded`) and the two guards were run against it:
+
+  ```
+  test_the_ladder_descends_past_a_rung_…    PASSED   (it does descend)
+  test_a_wall_of_bad_rows_…_same_rung       FAILED
+    503 … rejected 15294 (7.7%), 15295 (7.7%), 15296 (7.7%)
+  ```
+
+  Three ids, not six: the tier is abandoned after exactly `SERVE_ATTEMPTS`, so
+  the proposal is **worse than the code it replaces** for the reader who has no
+  rung below them. At higher stages it is the same defect in a quieter form — it
+  would push a reader down to a lower stage while good same-stage stories sat
+  behind the third bad row, inverting §7's rungs for the sake of a bound. Any
+  *per-rung* budget is still a fixed number of attempts at a rung whose bad-row
+  count is unknown, which is 9.66's mistake at a smaller scale.
+- **A bigger constant** (`SERVE_ATTEMPTS = 30`, or `budget * 10`). It moves the
+  boundary and keeps it. F4 has now been filed twice against two different fixed
+  numbers; a third would be the same entry a third time.
+- **A wall-clock budget** ("keep walking for 250ms"). It makes the answer a child
+  gets depend on how busy the box is, and makes the guard below unwritable —
+  the test would assert a timing, not a property.
+- **Filtering `_SERVE_SQL` on `stories.decodability >= :gate`** — 9.67's first
+  rejection, unchanged and now doubly true: every bad row in both tests claims
+  `1.0` in that column, which is exactly the shape of the four live stories whose
+  stored verdict was a fiction.
+- **Dropping the bound entirely** and looping until `_SERVE_SQL` returns nothing.
+  Correct today — every branch that continues excludes the row it picked — but it
+  makes an infinite loop in a request handler one forgotten `excluded.append`
+  away. The count is one query and turns that into a 503 plus a log line.
+
+**9.73 — What this costs, measured rather than asserted.**
+- One extra `count(*)` per request, on every request including healthy ones:
+  **0.582 ms** on the live pool (`EXPLAIN ANALYZE`, 590 stories, 120 candidates,
+  `ix_stories_pool` bitmap scan — no new index).
+- The healthy path is **one pick**, unchanged; the count only decides when to
+  give up.
+- The pathological path — 9.68's pool, where every servable story is undecodable
+  — walks the whole reachable candidate set instead of `3 * 2 * stage` of it:
+  **120 picks instead of 66** for a stage-11 reader on today's live pool, at
+  **5.4 ms per pick** (measured from the serve-gate log timestamps in the
+  stage-1 test: 15028 at 17.658s → 15033 at 17.685s), i.e. ~0.65 s instead of
+  ~0.36 s. That is the cost of the walk being linear in the reachable pool, and
+  it is stated rather than hidden: it is paid only when the pool is systematically
+  broken, and the thing it buys is that a child is served instead of shown an
+  error.
+- Each refused pick still stamps `last_served_at`, which is why the audit's
+  stage-1 reproduction failed 4 times in 30 rather than every time: the bad rows
+  sort to the back of §7's rotation after they are refused. That is unchanged and
+  it is the reason a partially-broken pool self-heals between requests.
+
+**9.74 — What this does NOT fix.**
+- **9.68's residual is still open and is still not claimed as fixed.** On a pool
+  where nothing at or below the reader passes §1, `make warm-check` is still
+  green and the child still gets a 503 — the endpoint now proves it looked at
+  every reachable story first, which makes the 503 honest, not absent. Serving a
+  story the gate refused would be the weakening §0 forbids. The wrong number
+  there is the coverage gate's, and it needs `warm.py`.
+- **The walk is linear in the reachable pool** (9.73). If the pool ever grows by
+  an order of magnitude AND is systematically broken at the same time, the
+  request gets slow before it gets wrong. The fix for that is a decodability
+  verdict that can be trusted in SQL, which is 9.67's first rejection and a
+  data-integrity problem, not a serving one.
+
+**The guards, and what each one is red against.** Two tests in
+`tests/test_stories_api.py`, both written and run RED before the change:
+
+- `test_a_wall_of_bad_rows_does_not_hide_the_good_ones_on_the_same_rung` — NEW,
+  and it is the one no per-rung budget can pass. Stage 1, so the reader has one
+  rung and no rung below: 7 undecodable-but-answerable rows written first (so
+  `last_served_at ASC NULLS FIRST, id ASC` puts every one of them ahead of the
+  good story — it cannot be reached by luck), then one story the decoder measures
+  at 100.0% for that reader. Both premises are measured in the test rather than
+  asserted from a constant, so a 503 can never be the correct answer to it.
+- `test_the_ladder_descends_past_a_rung_the_serve_gate_refuses` — RE-ARMED. It
+  planted `SERVE_ATTEMPTS + 1` = 4 bad rows at stage 7, where 9.66's budget is
+  42; that 10x margin is why 9.70's sabotage sweep could only turn it red against
+  the ORIGINAL `range(SERVE_ATTEMPTS)`. It now plants 43. Every assertion is
+  unchanged; the justify-test-edit verdict is recorded in its docstring.
+
+Both derive the count from `3 * 2 * stage + 1`, spelled out in the test file
+rather than imported, because the property is *"no fixed budget"* — the number
+has to be past every constant the module has held, including one a future edit
+reintroduces.
+
+**Sabotage sweep — three, each restored and verified restored.**
+
+| sabotage | the defect it stages | result |
+|---|---|---|
+| `old_budget` | `_serve_attempt_budget` → `return 3 * 2 * stage_id` (9.66's) | **both RED**: 503 naming exactly 6 rejected ids at stage 1 and 42 at stage 7 |
+| `no_serve_gate` | `if decodability < DECODABILITY_GATE:` → `if False:` | **3 RED**, including `test_story_stage_binding.py::test_an_undecodable_story_in_the_pool_is_never_served` — the new test is measuring the §1 gate, not merely counting rows |
+| `per_tier` | 9.72's proposal, implemented | descent test **PASSED**, same-rung test **RED** at 3 ids — the measurement in 9.72 |
+
+**Gates.**
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **1021 passed,
+  3 skipped**. The same command on `8786d21` with these three files reverted:
+  **1020 passed, 3 skipped**, so this adds exactly the one test it claims and
+  moves nothing else. (A stale note put the baseline at 1008; it is 1020.)
+- `.venv/bin/ruff check storyforge tests scripts` — all checks passed.
+- `cd apps/web && bunx tsc --noEmit && bun test src` — clean, **232 pass, 0
+  fail**. No web file is touched; kid mode is only the reason this is
+  child-facing (`KidSession.tsx` retries three times and then navigates a tablet
+  away from the story it was asked for).
+- **No `make warm`, no `make eval`, no model call, nothing written to any
+  database that outlives its transaction, nothing touched on DigitalOcean. Live
+  spend $0.00.** Every measurement above is from the owned-pool fixture, whose
+  transaction is rolled back, or from a read-only `EXPLAIN ANALYZE`.

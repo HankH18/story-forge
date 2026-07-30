@@ -41,7 +41,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from storyforge.api.stories import (
     RATE_LIMIT_PER_MINUTE,
     SERVABLE_STATUSES,
-    SERVE_ATTEMPTS,
     limiter,
 )
 from storyforge.db import SessionLocal
@@ -84,6 +83,24 @@ UNSERVABLE_SEGMENT = (
     "The knight thought the enormous creature might be dangerous, "
     "although its enthusiasm suggested otherwise entirely."
 )
+
+#: The largest FIXED per-request serve budget this endpoint has ever held, as a
+#: function of the requested stage: `SERVE_ATTEMPTS = 3` picks on each of the two
+#: theme tiers at each of the `stage` stages at or below the reader (DEVIATIONS
+#: 9.66). Spelled out here rather than imported, and that is the point: the two
+#: tests below plant one bad row MORE than this, so they are red against every
+#: fixed budget the module has shipped — `SERVE_ATTEMPTS` alone (F4 as filed),
+#: `SERVE_ATTEMPTS * 2 * stage` (F4 as first fixed, DEVIATIONS 9.71) and any
+#: constant a future edit reintroduces. A budget that is derived from the DATA —
+#: how many servable, answerable stories the ladder can actually reach — is the
+#: only thing that passes them, which is what 9.71 argues is the requirement.
+_LARGEST_FIXED_BUDGET_PER_STAGE = 3 * 2
+
+
+def _rows_beyond_any_fixed_budget(stage: int) -> int:
+    """How many unservable rows to plant so no fixed budget can walk past them."""
+    return _LARGEST_FIXED_BUDGET_PER_STAGE * stage + 1
+
 
 #: Material for `tap_word` rows written by the NODE'S OWN writer rather than by
 #: hand — `check_tap_word` composes the payload and the answer key, so what this
@@ -844,19 +861,34 @@ async def test_the_ladder_descends_past_a_rung_the_serve_gate_refuses(client, po
     §01 says a child never sees an error and §7 makes the warm pool the answer to
     *every* failure path, so a 503 with a correct story one stage down is the worst
     version of one. `SERVE_ATTEMPTS` was the budget for the whole request, so
-    `SERVE_ATTEMPTS` bad rows at the top rung spent it before the ladder descended;
-    it is now the budget PER RUNG (`_serve_attempt_budget`, DEVIATIONS 9.66).
+    `SERVE_ATTEMPTS` bad rows at the top rung spent it before the ladder descended
+    (DEVIATIONS 9.66); it is now the size of the candidate set the ladder can
+    reach, so nothing but an exhausted pool can stop the descent (9.71).
 
     The bad rows are answerable and claim `decodability 1.0` in their own column —
     exactly what a mis-persisted story looks like, and the reason a SQL filter on
-    that column cannot replace the serve-time decoder pass (9.67). `SERVE_ATTEMPTS +
-    1` of them, derived rather than a literal, so this cannot rot if the constant
-    moves.
+    that column cannot replace the serve-time decoder pass (9.67).
+
+    justify-test-edit — VERDICT: TEST IS WRONG, and it is the FIXTURE PRECONDITION
+    that is wrong, not one assertion below it. It planted `SERVE_ATTEMPTS + 1` = 4
+    bad rows at `pool.base + 1` = stage 7, where 9.66's budget is `3 * 2 * 7` = 42
+    — a 10x margin, so the test could not fail for the reason its own name gives
+    and 9.70's sabotage sweep only turned it red against the ORIGINAL
+    `range(SERVE_ATTEMPTS)`. REVERT CHECK: no — it passes against the shipped code
+    and against the fix; it is vacuous, not red. ORIGIN: commit `cd55c97`,
+    DEVIATIONS 9.66. EVIDENCE the count is what was wrong: 43 rows here (and 7 in
+    the same-rung test below) turn it red against the shipped per-stage budget,
+    measured in DEVIATIONS 9.71. ACTION: the row count is raised past every fixed
+    budget the module has held; every assertion is byte-for-byte what it was,
+    except the failure message, which now quotes the number actually planted.
+    BLAST RADIUS: `SERVE_ATTEMPTS` had one other reader, this file's import, and
+    the constant no longer exists (9.71).
     """
     from storyforge.decoder import mastered_ids, validate_text
 
     asked = pool.base + 1
-    for i in range(SERVE_ATTEMPTS + 1):
+    planted = _rows_beyond_any_fixed_budget(asked)
+    for i in range(planted):
         await pool.story(
             stage=asked,
             theme="alpha",
@@ -888,7 +920,7 @@ async def test_the_ladder_descends_past_a_rung_the_serve_gate_refuses(client, po
         json={"stage_id": asked, "theme_id_or_slug": pool.slug("alpha")},
     )
     assert resp.status_code == 200, (
-        f"the ladder did not descend past {SERVE_ATTEMPTS + 1} rows the serve-time "
+        f"the ladder did not descend past {planted} rows the serve-time "
         f"gate refuses ({measured:.1%} decodable): {resp.status_code} {resp.text}. §01 "
         "says a child never sees an error and §7 makes the warm pool the answer to "
         "every failure path, and a correct story was sitting one stage down"
@@ -902,6 +934,85 @@ async def test_the_ladder_descends_past_a_rung_the_serve_gate_refuses(client, po
     assert body["id"] == good, f"expected the story one rung down, got {body['id']}"
     assert body["fallback"]["kind"] == "lower_stage"
     assert body["fallback"]["requested_stage_id"] == asked
+
+
+async def test_a_wall_of_bad_rows_does_not_hide_the_good_ones_on_the_same_rung(
+    client, pool, session
+):
+    """AUDIT-PHASE7 F4 at stage 1, where there is no rung below to descend to.
+
+    The test above proves the ladder DESCENDS past a bad rung. This proves the
+    other half, and it is the half no per-rung budget can satisfy: a stage-1
+    reader has exactly one rung, so the good stories are IN the bad rung and the
+    only way to reach them is to keep walking inside it. `SERVE_ATTEMPTS`
+    failures per (stage, theme-match) tier — the shape DEVIATIONS 9.66 claims and
+    9.71's proposal restated — would abandon the tier after three bad rows and
+    answer this child a 503 with a correct story sitting behind the fourth.
+
+    Measured against the shipped code, which walked `3 * 2 * 1` = 6 rows: five
+    bad rows served the good story, six answered **503 no story at or below stage
+    1 passes §1's 95% gate for this reader** (DEVIATIONS 9.71). The boundary was
+    the budget, and nothing else in the pool changed.
+
+    Every row here is `warm`, answerable and claims `decodability 1.0`, so
+    `_SERVE_SQL`, `ANSWERABLE_SQL` and `warm.pool_coverage` all count them; only
+    the serve-time decoder pass can tell them apart. They are written FIRST, so
+    `last_served_at ASC NULLS FIRST, id ASC` puts every one of them ahead of the
+    good story — the walk cannot reach it by luck.
+    """
+    from storyforge.decoder import mastered_ids, validate_text
+
+    asked = 1
+    planted = _rows_beyond_any_fixed_budget(asked)
+    for i in range(planted):
+        await pool.story(
+            stage=asked,
+            theme="alpha",
+            title=f"Undecodable {i}",
+            story_words=[],
+            segments=(UNSERVABLE_SEGMENT,),
+        )
+    good = await pool.story(stage=asked, theme="alpha", title="Behind The Wall")
+
+    # Both premises measured rather than asserted from a constant: the bad rows
+    # really are refused at stage 1, and the good row really is servable there —
+    # otherwise a 503 would be the correct answer and this test would prove nothing.
+    sight = frozenset(
+        r[0]
+        for r in await session.execute(
+            text("SELECT word FROM sight_words WHERE stage_id <= :s"), {"s": asked}
+        )
+    )
+    measured = validate_text(
+        UNSERVABLE_SEGMENT, mastered_ids(asked), sight, frozenset()
+    ).decodability
+    assert measured < 0.95, f"the bad rows measure {measured:.3f}; they prove nothing"
+    readable = validate_text(
+        " ".join(FIXTURE_SEGMENTS),
+        mastered_ids(asked),
+        sight,
+        frozenset(w.lower() for w in FIXTURE_STORY_WORDS),
+    ).decodability
+    assert readable >= 0.95, (
+        f"the good row measures {readable:.3f} at stage {asked}; the gate would "
+        "refuse it too and this test would pass on a 503 being correct"
+    )
+
+    resp = await client.post(
+        "/api/stories/request",
+        json={"stage_id": asked, "theme_id_or_slug": pool.slug("alpha")},
+    )
+    assert resp.status_code == 200, (
+        f"{planted} rows the serve-time gate refuses ({measured:.1%} decodable) "
+        f"buried a story that measures {readable:.1%} on the SAME rung: "
+        f"{resp.status_code} {resp.text}. §01 says a child never sees an error and "
+        "§7 makes the warm pool the answer to every failure path"
+    )
+    body = resp.json()
+
+    assert body["id"] == good, f"expected the story behind the wall, got {body['id']}"
+    assert body["stage_id"] == asked
+    assert body["fallback"] is None, "the requested (stage, theme) was served — rung 1"
 
 
 async def test_theme_may_be_given_as_an_id_or_a_slug(client):
