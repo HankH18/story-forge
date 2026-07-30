@@ -14,12 +14,22 @@ and returns a verdict. §8 promotes on these counts; a client that could see the
 key could manufacture mastery. `mastery.grade_answer` is total over every Python
 value, so a hostile payload is a verdict or a 4xx, never a 500.
 
-**Completion is idempotent, by a latch rather than by a check.**
+**Completion is idempotent, and it takes two mechanisms rather than one.**
 `UPDATE readings SET completed_at = now() WHERE id = :id AND completed_at IS
 NULL RETURNING ...` is one statement, so exactly one caller can ever observe the
-transition — two concurrent completes, or a client that retries on a dropped
-response, cannot double-count `gpc_stats` or promote twice. A read-then-write
-would race; this cannot.
+transition on *one* reading — a client that retries on a dropped response cannot
+complete it twice. That latch is the whole answer to "the same reading, twice"
+and it is no answer at all to "the same STORY, twice", which is the question §8's
+evidence rule actually asks: a re-read yields no new `gpc_stats`, and *that* test
+was a SELECT followed by an INSERT. Under READ COMMITTED two concurrent
+completions of two different readings of one story are invisible to each other,
+so both credited the evidence — measured at N-fold amplification on 10 of 10
+trials, and measured promoting a stage-5 child on twelve counts of one tap
+against a floor of ten (DEVIATIONS 6.28-6.31, which is 6.7 reopened). So
+`complete_reading` takes a transaction-scoped advisory lock on `(kid_id,
+story_id)` before the latch. Moving the predicate inside the INSERT would not
+have helped: an uncommitted completion is in no other statement's snapshot
+either, and READ COMMITTED does not prevent phantoms.
 
 **Kids have no auth identity and no PII.** §13: a kid row is a first name and a
 stage. There is no email, no date of birth, no free-text field a child types
@@ -262,8 +272,36 @@ class ProgressDTO(BaseModel):
 
 
 # --- queries -----------------------------------------------------------------
-# The whole idempotency guarantee. One statement: the row that was NULL becomes
-# NOW() and returns; a second caller matches nothing and returns nothing.
+# What makes the evidence rule below atomic instead of a read-then-write.
+#
+# The latch under this comment is per READING. §8's evidence rule is per
+# (kid, STORY): the second reading of a story a child has already finished adds
+# nothing to `gpc_stats`. Deciding that with `_ALREADY_READ_SQL` and then writing
+# is two statements, and under READ COMMITTED a concurrent completion of another
+# reading of the same story is uncommitted and therefore in neither snapshot —
+# so both asked "already read?", both were told no, and both wrote. Measured:
+# N-fold amplification on 10 of 10 trials, and a stage-5 child promoted on twelve
+# counts of a single tap against a floor of ten (DEVIATIONS 6.28-6.31).
+#
+# The lock is what serialises those two callers, and it is deliberately NOT any
+# of the cheaper-looking alternatives. A unique partial index on (kid_id,
+# story_id, stage_id) WHERE completed_at IS NOT NULL would make the second
+# reading fail to COMPLETE, and re-reading a favourite is normal and must work
+# (6.7). `NOT EXISTS (...)` inside the upsert reads no better a snapshot than the
+# separate SELECT did — "no prior completion" is a phantom, the one anomaly READ
+# COMMITTED does not prevent, and it was measured still racing.
+#
+# Held to the end of the request, so the whole claim — latch, repeat test,
+# evidence write — is atomic against another completion of the same (kid, story).
+# Released during commit, AFTER the transaction is recorded as committed, and
+# every statement in the waiter takes a fresh READ COMMITTED snapshot: so the
+# waiter's repeat test cannot fail to see the completion it waited on. The key is
+# coarser than the (kid, story, stage) predicate it guards, which is the safe
+# direction; different stories take different locks and do not serialise.
+_CLAIM_STORY_SQL = text("SELECT pg_advisory_xact_lock(:kid_id, :story_id)")
+
+# The per-reading half of the guarantee. One statement: the row that was NULL
+# becomes NOW() and returns; a second caller matches nothing and returns nothing.
 _COMPLETE_SQL = text(
     """
     UPDATE readings SET completed_at = now()
@@ -349,6 +387,9 @@ _STORIES_AT_STAGE_SQL = text(
 # replays of that single tap satisfied it exactly. A GPC instance is evidence
 # the first time a child meets it in a story; the second time they already know
 # what the answer was.
+#
+# Correct only under `_CLAIM_STORY_SQL`. On its own this is a read whose answer a
+# later write depends on, and two callers holding no lock both read "no".
 _ALREADY_READ_SQL = text(
     """
     SELECT 1 FROM readings
@@ -822,6 +863,14 @@ async def complete_reading(
     at the same time. A replay returns the same reading with `newly_completed:
     false`, empty deltas and the kid's current standing.
 
+    **The latch is per reading and §8's evidence rule is per story, so the latch
+    is not enough on its own.** `_CLAIM_STORY_SQL` is taken first and held to the
+    commit, which is what makes "has this kid already finished this story?" and
+    the write that depends on the answer one indivisible claim rather than a
+    read-then-write. Without it, two completions of two *different* readings of
+    one story each saw no prior completion and each credited the evidence —
+    DEVIATIONS 6.28-6.31, and 6.7's own failure class through a concurrency door.
+
     Evidence comes from `tap_word` answers only (`mastery.MASTERY_QTYPES`), and
     each word's correspondences come from the decoder's own alignment at the
     STORY's stage — never from inspecting spelling here.
@@ -840,6 +889,11 @@ async def complete_reading(
     the cost of getting the order right is one indexed query.
     """
     reading = await owned_reading(session, principal, reading_id)
+    # Before the latch, not after: the thing being serialised is the (kid, story)
+    # evidence claim, and the latch says nothing about it.
+    await session.execute(
+        _CLAIM_STORY_SQL, {"kid_id": reading.kid_id, "story_id": reading.story_id}
+    )
     latched = (await session.execute(_COMPLETE_SQL, {"id": reading.id})).first()
 
     if latched is None:

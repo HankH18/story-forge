@@ -64,6 +64,14 @@ HIGH_TAP_STAGE = 5
 #: is not a question `check_tap_word` would ever have let through.
 HIGH_TAP_BODY = "Sam had oatmeal on a rainy day. The pup was sleepy."
 
+#: How many readings of ONE story `test_concurrent_completions_of_one_story_
+#: credit_it_once` completes at the same time. Two is enough for the defect to
+#: exist; eight is what makes the test *see* it reliably, because whether two
+#: gathered requests actually interleave inside the guard is up to the event loop
+#: and the connection pool. Measured against the reverted fix: at 5 readings the
+#: test caught the race on 9 of 10 runs, at 8 on 20 of 20.
+CONCURRENT_READINGS = 8
+
 
 @pytest.fixture
 async def client():
@@ -851,6 +859,68 @@ async def test_concurrent_completions_still_count_once(
         )
     ).scalar_one()
     assert seen == 1
+
+
+async def test_concurrent_completions_of_one_story_credit_it_once(
+    client, sandbox, session, story_at_stage_1, tap_question
+):
+    """The fourth cell of the table, and the one that was open (DEVIATIONS 6.28).
+
+    Its two neighbours cover the other three. `test_concurrent_completions_still_
+    count_once` above gathers five completes of ONE READING ID — the case the
+    latch answers by construction, so it never reaches the evidence guard at all.
+    `test_replaying_one_story_never_promotes` below replays one story ten times
+    STRICTLY SEQUENTIALLY, so every replay sees the previous completion
+    committed. Same story + concurrent is the cell neither occupies, and it is the
+    only path on which "has this kid already finished this story?" is a
+    read-then-write: under READ COMMITTED the competing completion is uncommitted
+    and therefore invisible, so both callers were told no and both wrote. Both
+    neighbours were green while five gathered completions credited one tap five
+    times, and while a stage-5 child was promoted on twelve counts of one tap
+    against a floor of ten.
+
+    All `CONCURRENT_READINGS` of them are real readings and all of them complete —
+    re-reading is allowed and normal (6.7), and a guard that refused the second
+    completion would be a 500 in front of a child. What must be true exactly once
+    is the *evidence*.
+
+    No sleep anywhere. A sleep would make this a test of the event loop's
+    scheduling rather than of the database's isolation, and it would pass for the
+    wrong reason on a slow machine. `asyncio.gather` over the ASGI transport is
+    what a retrying client, a double-tapped "Finish" button and two open tablets
+    all look like from here.
+    """
+    import asyncio
+
+    kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
+    reading_ids = []
+    for _ in range(CONCURRENT_READINGS):
+        reading_id = await _start(client, kid_id, story_at_stage_1)
+        await _answer(client, reading_id, tap_question, TAP_WORD)
+        reading_ids.append(reading_id)
+
+    results = await asyncio.gather(
+        *(client.post(f"/api/readings/{r}/complete") for r in reading_ids)
+    )
+    assert [r.status_code for r in results] == [200] * CONCURRENT_READINGS
+    bodies = [r.json() for r in results]
+
+    assert sum(b["newly_completed"] for b in bodies) == CONCURRENT_READINGS, (
+        "every one of them is a real, separate reading"
+    )
+    assert sum(not b["repeat_reading"] for b in bodies) == 1, (
+        "more than one completion claimed to be the first reading of this story"
+    )
+
+    # The counters, not just the DTO: the word was met once, so it is worth one.
+    rows = {
+        r.gpc_id: (r.n_seen, r.n_correct)
+        for r in await session.execute(
+            text("SELECT gpc_id, n_seen, n_correct FROM gpc_stats WHERE kid_id = :k"),
+            {"k": kid_id},
+        )
+    }
+    assert rows == {gpc: (1, 1) for gpc in word_gpc_ids(TAP_WORD, TAP_STAGE)}
 
 
 async def test_an_unanswered_reading_completes_with_no_evidence(

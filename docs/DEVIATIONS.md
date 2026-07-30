@@ -9768,3 +9768,868 @@ working in this tree throughout, and the shared-Postgres run produced four
 *moving* failures in `test_auth`/`test_kids` that all pass when those files are
 run alone. **Nothing touched on DigitalOcean.**
 
+## Phase 8 — `SYSTEM_RULES` rule 7 was prevention with no detection, and the grammar judge inverts agreement on COMPOUND subjects (11.91-11.98)
+
+Two HIGH findings from the cycle-2 audit, both reproduced live before anything was
+edited, and both governed by STATE invariant 5 — every change here is re-tested in
+BOTH directions, against the live judge, over multiple runs.
+
+1. `generate.py`'s own docstring said it: *"layer 3's REJECT list is all actions…
+   so 'Sam is fat. Sam is sad.' can clear all three layers."* 8.29 wrote that down
+   as a known gap and declined to close it. It is true, and a story carrying it is
+   servable today — **live story 27** (`status=warm`, stage 4, space, decodability
+   1.0000, one `tap_word` question) contains *"The man was big."*
+2. The grammar judge writes the correct agreement rule and points the arrow the
+   wrong way on plurals formed by COORDINATION — `"Sam and the rabbit spin."` ->
+   `spin -> spins`, note *"plural subject needs plain verb form"* — and it rejects
+   on SENSE while claiming grammar: `"The dragon did not like the case."` ->
+   `case -> cave`. This is 8.78 reappearing on the one plural form its bullet does
+   not illustrate, and 8.20 reappearing in the one shape the SUBSTITUTION TEST is
+   structurally blind to.
+
+**11.91 — the fixture's hole is closed FIRST, before a single character of the
+prompt moves. Seven cases, and the order is the point.**
+`tests/test_grammar.py::FIXTURE` had 40 cases and **no person-body case in either
+direction**, so finding 1 was invisible to it by construction. Its compound-subject
+sentences (`"The dragon and Dan camp."`, `"Sam and Dan nap in the cave."`) sit
+inside `approve/tense-shift-between-sentences` — a case labelled for a TENSE shift,
+which is what it is measured on — so coordination was *present* in the fixture and
+never the thing under test, and a judge that inverts it a third of the time reads
+as green. A fixture that cannot see a defect cannot measure its fix, and 8.80's
+whole lesson is that the prompt edit is judged by the WHOLE fixture, not by the
+case being worked on.
+
+Added, before the prompt was touched (three must-approve, four must-reject, so the
+new rules are tested against more true rejects than the prompt had before, not
+fewer — 8.20's rule):
+
+| case | direction | what it is FOR |
+|---|---|---|
+| `approve/compound-subject-plain-verb` | approve | coordination is the LABELLED feature, carrying both observed sentences verbatim |
+| `approve/wrong-noun-is-not-a-grammar-error` | approve | carries `"The dragon did not like the case."` verbatim |
+| `approve/things-are-described-people-are-not` | approve | the carve-out rule 7 depends on: a dark cave, a big rock, a big dragon, wide wings |
+| `reject/appearance-a-persons-body` | reject | **live story 27, verbatim** — the finding itself |
+| `reject/appearance-body-word-fat` | reject | the docstring's own example, `"Sam is fat. Sam is sad."` |
+| `reject/ungrammatical-compound-subject-singular-verb` | reject | a REAL agreement error in the construction being made salient |
+| `reject/ungrammatical-plural-noun-after-a` | reject | a REAL wrong-noun-FORM error whose arrow has a noun on BOTH sides |
+
+The last two are the controls that stop each fix being bought with the other
+direction. `"Sam and the dog runs up the hill."` is the inversion of the bullet
+11.94 adds; `"Sam sat on a rocks."` is the one arrow whose two sides are both nouns
+and which IS a grammar finding, so it is what stops 11.95 becoming an amnesty.
+
+**Two of the three must-approve bodies are now VERBATIM live stories, and the first
+drafts of both were wrong in a way worth recording.** I wrote invented bodies for
+the two grammar cases, measured them 3 times against the unchanged prompt, and
+neither reproduced the defect — one of them reproduced a DIFFERENT one. The
+past-tense draft of the coordination case was rejected 3 of 3 with
+`"Sam and the rabbit spin." -> "Sam and the rabbit spun." Past tense matches the
+story.` — a real false positive, and 8.71's, not 8.78's: the case would have been
+labelled for coordination while measuring tense. The present-tense rewrite then
+passed 3 of 3, which is the opposite failure — a case that cannot fail is not a
+case. So both bodies come out of `story_segments` instead, for the two stories the
+live judge actually rejected on these grounds: **9123** (stage 1 animals,
+decodability 1.0000, `"Sam and the rabbit spin." -> "Sam and the rabbit spins."`)
+and **9301** (stage 4 dragons, decodability 1.0000, `"The dragon did not like the
+case." -> "…the cave." Homophone or sound-alike word error.`). Story 9123 is the
+one DEVIATIONS 9.55 named, recorded as a real defect it declined to half-fix, with
+the instruction that *"the next pass at the grammar prompt should add a
+coordinated-subject example to the agreement rule and measure the whole fixture
+four or more times."* This is that pass.
+
+**11.92 — layer 3 gets a REJECT bullet for describing a PERSON's body, and the
+carve-out that makes it survivable is stated in the same breath.**
+Logged before the change. 8.29 added `SYSTEM_RULES` rule 7 as prevention and said
+exactly what it did not do: *"it is prevention only. `moderate()` still has no
+REJECT bullet for appearance-based content, so a story that gets past the prompt is
+not caught downstream. Adding one was deliberately not done — the hazard/harm
+prompt has a 55% false-positive history (3.10) and 'a big dragon' is exactly the
+shape that would trip it. **If a body description is ever observed in real output,
+detection is the next move**, and it needs 3.10's both-directions treatment before
+it ships."* One has been observed in real output, in a story a child can be served
+today, so this is that move, on 8.29's own terms.
+
+Prevention works and is not being replaced: **0 violations in the 69 servable
+stories generated after rule 7 shipped (`c42bd32`), 1 in the 51 that predate it**
+(11.93). What prevention cannot do is find the backlog, and this is the third
+instance of that class in the repository — the grammar verdict was fixed at source
+while 14% of the pool stayed ungrammatical, and 11.60 rebuilt the frame ladder
+while children kept reading retired prompts.
+
+The bullet is one sentence in the REJECT list and it names PEOPLE only. The
+carve-out is load-bearing — `big` is applied to 8 of the pool's inanimate nouns,
+and rule 7 permits creatures explicitly — so it is stated where the judge reads the
+decision rather than a paragraph away: a new APPROVE bullet for things, places and
+creatures described, immediately above the REJECT list, and the REJECT bullet
+itself says "a PERSON's". That is 8.78's shape (both directions in the same place),
+applied to the safety half.
+
+**11.94 — the agreement bullet gains the COORDINATION direction, worded next to the
+correction the judge keeps reaching for.**
+Logged before the change. 8.78 rewrote this bullet to state both directions and its
+worked examples are `"A dragon sit in a cave."` (one thing, "-s") and `"The cats
+runs fast."` (many things, plain) plus the carve-out `"Its wings help it."` — every
+one of them a plural by INFLECTION. A subject that is plural by COORDINATION
+matches no example in the prompt, and the judge inverts it: `spin -> spins`, `sit
+-> sits`, with the correct rule written out in the note beside the wrong arrow.
+The existing `dragon`/`cats`/`wings` examples are NOT removed; the bullet gains
+`"Sam and the rabbit spin."` and `"The dragon and the man sit."` as CORRECT, names
+`"spin -> spins"` as an agreement error of the judge's own — the same shape as
+8.78's `"wings helps"` — and closes with the reject direction in the same sentence
+(`"Sam and the dog runs up the hill."` is broken). A bullet that stated only the
+new direction would buy `reject/ungrammatical-compound-subject-singular-verb` for
+the price of the case above it.
+
+**11.95 — the SENSE claim is made MECHANICAL rather than prohibited a fourth time,
+and it is checkable in code as well as by the judge.**
+Logged before the change. The prompt already forbids rejecting on sense three
+times over — *"Judge the grammar, not the sense"*, the SUBSTITUTION TEST, and
+*"the writer should have picked a different word is never a grammar error"* — and
+8.20 is the entry that proves a fourth prohibition is not the answer: the sense
+rule was in the prompt and being ignored until it became a TEST the judge has to
+run. So the shape here is 8.20's and 8.82's, not another bullet.
+
+**The SUBSTITUTION TEST is structurally blind to a wrong-noun claim**, and that is
+why this one survived it: the test's own procedure is to swap the noun, so a judge
+that swaps `case` for `box` gets correct English and concludes the sentence passes
+— while the fix it is about to propose, `case -> cave`, is itself a noun swap.
+Every worked example at `moderate.py:79-84` is a verb or a nonsense predicate, so
+nothing in the test's examples covers the case where the ARROW is the swap. The
+rule added is a property of the arrow: **if both sides are nouns and they are
+DIFFERENT nouns, the substitution test cannot have been run, so it is not a grammar
+finding** — with the one exception the fixture now guards, NUMBER (`cat -> cats`,
+`rocks -> rock` are the SAME noun in the wrong form and ARE grammar errors).
+
+The same property is checked in code, in `moderate()`, off `grammar_note`. 8.79
+declined to enforce the note format in code and was right on its own terms —
+*"detecting 'does this note name a replacement' is brittle text matching, and the
+failure mode of getting it wrong is approving a story nobody vouched for"* — so
+this check is built to fail in the safe direction and is far narrower than the one
+8.79 refused. It overturns `well_formed=false` only when ALL of the following hold:
+
+- the note contains at least one `wrong -> right` arrow, and **every** arrow in it
+  is a sense claim (one real finding anywhere in the note and the rejection stands);
+- both sides are in `_SENSE_CLAIM_NOUNS`, a closed, deliberately incomplete list of
+  concrete nouns from the decodable register. A word that is not in it is not
+  judged a noun, so the check does not fire — unknown means REJECT stands;
+- the two are not the same noun in different NUMBER (`rocks`/`rock` are exempt);
+- the wrong word actually stands in a NOUN SLOT in the body — immediately after a
+  determiner, or one adjective past it. This is what stops the check from
+  dismissing a real stray word: `"The dragon had a got time."` has `got` after a
+  determiner, and the check still does not fire because `good` is not a noun, but
+  `"The man ran back stop."` fails the slot test outright.
+
+Every word that has ever appeared on the wrong side of one of this judge's arrows
+in `docs/DEVIATIONS.md` — `came`, `runs`, `sit`, `help`, `can`, `did see`, `got`,
+`use`, `live` — is excluded from the noun list by construction, and a test asserts
+it rather than trusting the reading.
+
+---
+
+## Phase 8 — the tap-a-word question proves a claim about LETTERS and speaks a claim about SOUNDS (11.99-11.104)
+
+Two HIGH findings from the same root: the phonics question is stated in phonemes
+and verified in graphemes, and §8's evidence denominator throws away every word
+the validator can prove decodable merely because it is also on a sight list.
+Logged **before** the change. Every number below was measured against the live
+local `storyforge` Postgres with the product's own pure functions, read-only
+except for the single-row repair recorded in 11.102. No API call, live spend
+$0.00.
+
+**11.99 — one live servable question has no correct answer, and the inventory
+guarantees more.**
+
+`PROMPT_FRAMES[0]` is *"Tap the word that starts with the same sound as {cue}."*
+and the web speaks *"Which word starts like {cue}? Tap it."* Both are claims
+about SOUND. Every proof in `check_tap_word` was about SPELLING: the correct
+word's first GRAPHEME had to equal `target_grapheme` (`:1244`) and a distractor
+had to not reuse that grapheme anywhere (`:1248`). The inventory has **12
+graphemes carrying more than one phoneme and 26 phonemes spelled more than one
+way**, so the two propositions come apart, and `sound_targets` grouped a story's
+words by first GRAPHEME — putting `c|K` and `c|S` words in one target.
+
+Live, servable, stage 8 — question 11294 on story 7319:
+
+```
+prompt  : Tap the word that starts with the same sound as can.
+payload : {"options": ["city","in","had"], "cue_word": "can"}
+answer  : {"index": 0, "correct": "city", "target_grapheme": "c"}
+```
+
+`can` is `c|K` (/k/), `city` is `c|S` (/s/). **No option starts with /k/.** A
+child applying phonics cannot answer; a 1-in-3 guess is credited as mastery
+evidence, and that row is 1 of the 8 observations stage 8's entire servable pool
+supplies. Re-derived from the current pure functions it comes back identical, so
+it is not a legacy row.
+
+Measured over all 120 servable `tap_word` rows: **1** cue whose first phoneme
+differs from its own answer's (11294), **0** distractors starting with the
+correct word's phoneme, **0** recorded `answers` on either set. Zero of 120 for
+the mirror case is luck, not a guard: at stage 1 `"same sound as cup"` over
+`['cap','kid','sat']` is admitted today — `kid` does not use grapheme `c`, so it
+is a legal distractor, and it starts with /k/, exactly what the child was asked
+for. A child who taps it is graded WRONG and `gpc_stats` is debited.
+
+`stage_of` (`:875`) was the third face of the same conflation: it keyed the
+stage a sound is taught at by GRAPHEME, with `min()` over every GPC sharing it.
+`c|K` is stage 1 and `c|S` is stage 8, so `stage_of["c"] == 1` and the soft-`c`
+target — the only stage-8 onset those stories carry — could never reach the
+`current_stage_onset` tier.
+
+**11.100 — the fix is a narrowing of a closed list, and the cue is what states
+the proposition.**
+
+The cue word is the only sound the child is ever given, so the question's claim
+is *the answer starts with the same phoneme as the cue*. That is now what is
+proved, and it is derived from the cue rather than stored in a new field, so a
+`SoundTarget` built anywhere (including in a test) is subject to it:
+
+- `sound_targets` groups by the first **GPC id**, not the first grapheme, so one
+  target is one sound. `stage_of` is keyed per GPC id (ids are unique across the
+  93-GPC inventory — checked, no duplicates).
+- a candidate cue must share the target's whole first GPC id, so the sentence's
+  claim is true by construction (`_cue_index`/`cue_candidates` are **unchanged**
+  and still keyed by grapheme — `warm.repair_leaky_cues` reads them and is not
+  this change's file).
+- `check_tap_word` adds two proofs beside the two it already had: the correct
+  word's first phoneme equals the CUE's, and no distractor's first phoneme
+  equals the correct word's. The grapheme proofs are kept exactly as they were.
+
+Nothing is relaxed anywhere: every clause added removes questions from the legal
+set. §0's gate is untouched — no call to `readable`/`passes_gate` moves.
+
+**11.101 — sight words the validator CAN decode were refused as §8 evidence,
+and that is one reason stage 7 is terminal.**
+
+`sound_targets` dropped every sight/story-bank word from the candidate pool
+saying *"the child has not sounded them out, so they carry no evidence about a
+grapheme."* The validator contradicts it: `out` is a stage-7 sight word and
+`ou|AW` is the GPC stage 7 introduces, and `validate_word('out', mastered_ids(7))`
+returns DECODABLE with alignment `['ou|AW','t|T']`. Over the servable pool,
+**4,681 sight/story-classified token occurrences, 3,555 (75.9%) of which the
+aligner decodes at the story's own stage.**
+
+`mastery.word_gpc_ids` — the function that actually awards the credit — passes
+no sight set at all, so the runtime already treats those words as evidence. The
+exclusion is now filtered through
+`validate_word(token, mastered_ids(stage_id)).verdict is DECODABLE`: a word the
+gate proves decodable at the story's own stage IS evidence. A sight word the
+gate cannot decode at that stage is still refused, which is the case the original
+sentence was about.
+
+**11.102 — the repair: one row, no `answers`, hint moved, `options`/`answer`
+untouched.**
+
+Row 11294 carries no recorded answers, so `repair_leaky_cues`' pattern applies
+without any `ON DELETE CASCADE` exposure: `UPDATE questions SET prompt, payload`
+only. `options`, `answer` and every other row are byte-identical afterwards.
+The repaired cue is drawn from the same `cue_candidates` list the node uses,
+filtered to the answer's own GPC id.
+
+**11.103 — what this does and does not do to `make promote-check`.**
+
+The gate reads the `answer.correct` already persisted on each row, so a change to
+the pure functions cannot move it. It is unchanged, and it is still red. What
+moved is what the pool COULD supply if its questions were re-derived, computed
+with the product's own `sound_targets` → `tap_word_options` → `check_tap_word`
+chain over every servable story. Both halves are reported in the finding, and
+the residual is stated rather than hidden: the remaining terminal stages are a
+SUPPLY problem in the allowlist and the generator, exactly as invariant 15 and
+11.70-11.74 record, and this was filed as one contributor.
+
+**11.104 — tests, and the sabotage that proves they can go red.**
+
+Recorded with the change.
+
+## Phase 8 — §8's evidence guard is a read-then-write, and concurrency forges it (6.28-6.31)
+
+Numbered in the 6.x block because it **is** 6.7, reopened. 6.7 closed *"the
+promotion signal was forgeable"* with two changes: `count(DISTINCT story_id)` for
+the story half, and *"skipping the `gpc_stats` upsert when the kid already
+completed that story at that stage"* for the evidence half. The first is one
+aggregate inside one statement and still holds. The second is a SELECT
+(`_ALREADY_READ_SQL`) followed by an INSERT, and a plain read-then-write is
+exactly what the module's own docstring claims this endpoint does not contain.
+Logged **before** the change. Every number below was measured against the live
+local `storyforge` Postgres through the real ASGI app; every kid and story a run
+creates is deleted again. No API call, live spend $0.00.
+
+**6.28 — two concurrent completions of two DIFFERENT readings of the SAME story
+each return `repeat_reading: false` and each credit the full evidence.
+Amplification is N, and it fired on 10 of 10 trials.**
+
+`complete_reading` latches `completed_at` in one statement, and that part is
+sound — one caller and only one ever observes the transition. It then asks a
+*second* question on a *second* statement: "has this kid already completed this
+story at this stage?" Under READ COMMITTED the other completion is uncommitted,
+so it is in neither transaction's snapshot, and both answer "no".
+
+One story, one `tap_word` worth one observation, N readings each answered
+correctly once, completed with `asyncio.gather`:
+
+```
+2 concurrent completes of ONE story -> (credited, n_seen): [(2,2),(2,2),(2,2),(2,2),(2,2)]   honest = (1,1)
+  races: 5 of 5 trials
+5 concurrent completes of ONE story -> (credited, n_seen): [(5,5),(5,5),(5,5),(5,5),(5,5)]   honest = (1,1)
+  races: 5 of 5 trials
+```
+
+**6.29 — and it promotes a child, by clearing the one floor that exists to stop
+exactly this.**
+
+`MIN_GPC_OBSERVATIONS = 10` was added (5.5) so that one lucky tap could not
+promote, and 6.7 was written because ten *replays* of that tap cleared it. This
+clears it with three replays of five taps, and the shape is not exotic — it is the
+live shape of stages 3, 6, 7, 8, 9 and 10 (invariant 15, 11.70), where a whole
+stage's pool is worth fewer than ten observations.
+
+Five DISTINCT stage-5 stories, each carrying one `tap_word` on `aid` — worth
+exactly **1** stage-5 observation, so a perfect reader's honest total over all five
+is **5**, against a floor of **10**, i.e. unpromotable by design. Each story read
+three times, the three completions gathered:
+
+```
+  stories_completed = 5   (honest: 5 — the DISTINCT count is correct throughout)
+  gpc_seen          = 12  vs MIN_GPC_OBSERVATIONS = 10   (honest: 5)
+  accuracy          = 1.0
+  kids.stage_id     = 5 -> 6   promoted=True
+```
+
+§8's five-story criterion was satisfied honestly. The evidence criterion was
+satisfied by counting one tap twelve times.
+
+**6.30 — the fix is a transaction-scoped advisory lock, NOT a `NOT EXISTS` inside
+the upsert, and the difference was measured rather than reasoned about.**
+
+Three candidate forms, and only one of them is a fix:
+
+- *A unique partial index on `(kid_id, story_id, stage_id) WHERE completed_at IS
+  NOT NULL`* — refused outright. A second reading of a story a child has already
+  finished **must still be allowed to complete**; re-reading a favourite is normal
+  and 6.7 says so explicitly. An index that made the second completion fail would
+  turn a correctness fix into a 500 in front of a child.
+- *`NOT EXISTS (... completed prior reading ...)` inside the same INSERT.* This is
+  the obvious answer and it **does not work**. Moving the predicate into the
+  writing statement changes nothing about *visibility*: the competing completion is
+  uncommitted, so it is not in the statement's snapshot either, and "no prior
+  completion" is a **phantom** — the one anomaly READ COMMITTED does not prevent.
+  Measured, two sessions interleaved exactly as `asyncio.gather` interleaves them:
+
+  ```
+  NOT EXISTS in the same statement, no lock : A credits=True  B credits=True   -> BOTH CREDIT (race open)
+  pg_advisory_xact_lock(kid_id, story_id)   : A credits=True  B credits=False   B blocked on A=True   -> exactly one credits
+  ```
+
+- **`pg_advisory_xact_lock(kid_id, story_id)`, taken before the latch.** Chosen.
+  It is the only form that makes the *whole* claim — latch, repeat test, evidence
+  write — atomic with respect to another completion of the same (kid, story), and
+  it works for a reason that is stated rather than hoped for: the lock is released
+  during commit, *after* the transaction is recorded as committed, and every
+  statement in the waiter takes a fresh READ COMMITTED snapshot — so the waiter's
+  repeat test cannot fail to see the completion it waited on.
+
+The key is `(kid_id, story_id)` and not `(kid_id, story_id, stage_id)`: coarser
+than the predicate it guards, which is the safe direction, and `pg_advisory_xact_lock`
+only takes two int4s. It is the only advisory lock in the codebase, so the global
+lock namespace holds nothing to collide with. Exactly one is taken per
+transaction and it is taken first, so it introduces no lock-ordering cycle.
+Concurrent completions of *different* stories take *different* locks and do not
+serialise — the honest case is not slowed.
+
+`mastery.py` is untouched and no threshold moves. §8's three published numbers —
+5 stories, 10 observations, 80% — are shown verbatim to parents and none of them
+is the problem here.
+
+**6.31 — the tests were green because neither of them tests this, and the module
+docstring asserts the opposite of what was measured.**
+
+- `test_concurrent_completions_still_count_once` gathers five completes of **one
+  reading id**. That is the case the latch handles *by construction*, so the test
+  is a test of `UPDATE ... WHERE completed_at IS NULL` and never reaches the
+  second query at all.
+- `test_replaying_one_story_never_promotes` does its ten replays strictly
+  **sequentially**, so every one of them sees the previous completion committed.
+
+Between them they cover "same reading, concurrent" and "same story, sequential",
+and the hole is the fourth cell: **same story, concurrent**. A new test fills it
+(`test_concurrent_completions_of_one_story_credit_it_once`) — distinct readings of
+one story, gathered, asserting `sum(not repeat_reading) == 1` and that `gpc_stats`
+saw the word once. **No sleep**: a sleep would make it a test of the scheduler.
+Sabotage-verified by reverting the lock, which turns it red.
+
+The docstring said:
+
+> two concurrent completes, or a client that retries on a dropped response, cannot
+> double-count `gpc_stats` or promote twice. A read-then-write would race; this
+> cannot.
+
+The first clause was true of the latch and false of the endpoint, and the second
+sentence described a read-then-write that was eleven lines below it. Corrected to
+name both halves and which mechanism holds which.
+
+**Live data: checked, and no kid holds evidence forged by this race.** Every
+`gpc_stats` row in the local database was reconstructed from scratch under the
+honest rule (per distinct `(kid, story, stage)`, only the earliest completed
+reading is evidence). Three of six kids disagree with the reconstruction —
+`Maya` 10 seen vs 7, `Priya` 40 vs 12, `Noah` 24 vs 8 — and **all three predate
+6.7's own fix** (76e86a1, 2026-07-29 17:55 UTC; the readings completed at 15:40,
+16:27 and 16:31 UTC the same day) and are **sequential**, not overlapping: each
+reading's `started_at` is after the previous one's `completed_at`, tens of
+milliseconds apart. That is 6.7's original defect, still visible in data 6.7
+fixed in code without rewriting history. It is not this race. Nothing was
+rewritten here either — see the report for the proposal. Production on
+DigitalOcean was deliberately **not** queried.
+
+**Verified after the change**, same three probes, same database:
+
+```
+2 concurrent completes of ONE story -> (credited, n_seen): [(1,1),(1,1),(1,1),(1,1),(1,1)]   races: 0 of 5
+5 concurrent completes of ONE story -> (credited, n_seen): [(1,1),(1,1),(1,1),(1,1),(1,1)]   races: 0 of 5
+5 distinct stories x 3 gathered completes: gpc_seen = 5 (honest 5) vs floor 10
+                                           kids.stage_id 5 -> 5   promoted=False
+```
+
+The new test's own sensitivity was measured rather than assumed, because a
+concurrency test that only *sometimes* sees the defect is a guard that only
+sometimes guards. With the lock reverted it caught the race on **9 of 10** runs
+at five concurrent readings and **20 of 20** at eight, which is why
+`CONCURRENT_READINGS = 8` is a named constant carrying that measurement. With the
+lock restored: 10 of 10 green, and the whole suite is **1057 passed, 3 skipped**
+against a private `pg_dump` copy (`sfrace`, dropped afterwards). The copy is not
+optional here — the shared local Postgres had three *different* red tests on three
+consecutive runs of the same tree, all of them in `test_questions.py` /
+`test_promotion_supply.py`, all of them sweeps over a warm pool another agent is
+rewriting right now. STATE.md's own warning, and it is still true.
+
+## Phase 8 — the forward-only trap, third occurrence: `check_mcq2` was fixed and the pool was never swept (11.99-11.103)
+
+Numbered in the 11.60-11.79 block because it IS 11.64, unfinished, and it is the
+same shape as 6.24 and 11.82-11.85. 11.64 taught `check_mcq2` to refuse a
+two-choice question that names the word distinguishing its own two answers, and
+to refuse an answer pair that differs only by `not`. Both refusals apply to
+**drafts**. Neither has ever been applied to a row already in the pool, and
+nothing in the build could notice: `_UNENRICHED_SQL`'s clauses all ask what a
+story is MISSING, and a leaking question is present, moderated and countable.
+`warm.py:72-83` says exactly this in its own docstring.
+
+Logged **before** the change. Every number below was measured read-only against
+the live local `storyforge` Postgres with the product's own functions
+(`warm.leaky_mcq2`, `questions.prompt_leaks_answer`, `questions.negation_pair`,
+`questions.mcq2_pair`). No API call, spend $0.00.
+
+**11.99 — 37 of 70 servable `mcq2` rows are answerable without reading the story,
+and 7 of them steer the child at the WRONG card.**
+
+```
+mcq2 rows: 74 total — 65 warm, 5 complete, 4 rejected (70 servable)
+prompt_leaks_answer, all statuses : 40      <- 11.64's own count, unmoved
+prompt_leaks_answer, servable     : 37
+  removable (no recorded answer, not the story's last question) : 35
+  blocked by recorded answers                                   :  2
+  points at the WRONG card (the leaked word is in the FALSE answer only) : 7
+negation_pair : 3 total, 2 servable, both removable
+```
+
+**40 is the identical number 11.64 measured when it wrote the generator-side
+refusal**, and 3 is its negation count. Two `make warm` passes and a ladder
+renumber later, not one row has moved, because nothing was ever going to move
+them. The distribution over the eleven-stage ladder:
+
+| stage | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| leaking (servable) | 6 | 7 | 5 | 3 | 4 | 4 | 3 | 3 | **0** | 1 | 1 |
+| of which point WRONG | 1 | 1 | 1 | 0 | 0 | 0 | 3 | 1 | 0 | 0 | 0 |
+
+Stage 9 at zero is 11.64's diagnosis surviving the renumber intact: it recorded
+*"stage 10 is 0 of 7"* under the twelve-stage ladder, and old stage 10 is new
+stage 9 (12.2). `readable_openers` gives that stage enough wh-words that the
+model stopped writing yes/no questions, and a yes/no prompt has to assert a
+proposition that one of the two cards then agrees with — the leak is
+near-structural for `Did`/`Was`, which are the only openers the low stages have.
+
+The two worst rows, verbatim:
+
+| q | story | stage | question | true card | false card |
+|---|---|---|---|---|---|
+| 706 | 14 | 2 | *Was the dragon glad?* | A man was glad. | The dragon was glad. |
+| 846 | 236 | 3 | *Was the dragon sad?* | The dragon was glad. | The dragon was sad. |
+
+A child who matches the question's letters against the two cards — which is the
+entire skill a decodable reader has at stage 2 — is graded **wrong** for it.
+
+**11.100 — the sweep's predicate is `check_mcq2`'s refusal set, BOTH halves.
+`negation_pair` was missing and that is a hole, not a simplification.**
+
+`leaky_mcq2` shipped reading `prompt_leaks_answer` alone. 11.64 added *two* pure
+checks and the pool holds violations of both, so a sweep that implements one of
+them leaves a defect that the gate below would then refuse forever with no
+remedy. Both predicates are imported from `llm/questions.py` rather than
+restated here, for the reason 11.84 gives about `prompt_is_current`: the sweep
+and the generator's refusal cannot drift apart if there is one definition.
+
+The negation rows are the same class of harm with a different mechanism — the
+false card is the true card with `not` in it, so the story still reads as saying
+it and a child who read correctly can be graded wrong:
+
+```
+q4414  story 1685 stage 3 [warm] 'Was the rabbit glad?'
+       true 'The rabbit was glad.' / false 'The rabbit was not glad.'
+q11268 story 7282 stage 5 [warm] 'Was the moon white and high?'
+       true 'The moon was white and high.' / false 'The moon was white and not high.'
+q697   story 8    stage 2 [rejected] — out of scope, never served
+```
+
+Neither is caught by `prompt_leaks_answer`: the only discriminating word is
+`not`, and the prompt does not contain it. So they are invisible to the sweep as
+it shipped and to every other check in the build.
+
+**11.101 — the repair DELETES, and the asymmetry with `repair_leaky_cues` is the
+design, not an inconsistency.**
+
+A leaking `tap_word` cue is replaceable by a pure function of (grapheme, options,
+stage vocabulary), so 7.14's repair never touches `options`, `answer` or the row.
+An `mcq2` prompt is free text a model wrote about this story's plot. Nothing in
+this codebase can re-derive one, and the single generic frame that would fit every
+row fails the decodability gate at exactly the stages most of the pool lives at.
+So the choice is between leaving the question in front of children and removing
+it, and §11.3's comprehension screen is worth less than nothing when it is
+answerable by letter-matching and, for 7 rows, actively punishes the child who
+reads.
+
+Two refusals, both expressed as SQL predicates in `_DELETE_LEAKY_MCQ2_SQL` rather
+than as a Python `if`, so the statement is structurally incapable of the wrong
+outcome whatever the caller believes about the ids it passed:
+
+- **`NOT EXISTS (SELECT 1 FROM answers ...)`** — `answers.question_id` is
+  `ON DELETE CASCADE`. An agent has already destroyed §8 evidence once on this
+  project by regenerating a question a child had answered.
+- **`EXISTS (SELECT 1 FROM questions o WHERE o.story_id = q.story_id AND o.id <> q.id)`**
+  — removing a story's last question manufactures STATE invariant 14's dead-end
+  session with a repair. Note the asymmetry the invariant implies and which is
+  worth stating: removing a story's only `mcq2` is fine (the child still gets a
+  question screen and §8 still moves, because `MASTERY_QTYPES` is `("tap_word",)`);
+  removing its only `tap_word` would not be.
+
+Servable-only, which is the opposite of `repair_leaky_cues`: that sweep is
+status-blind because moving a hint destroys nothing, and this one removes a row,
+so it stays off `rejected` stories — they are never served and they are the eval
+evidence for why a (stage, theme) pair is hard.
+
+The stripped story's route back to a comprehension screen is a receipt in the
+database, not a variable in `run_backfill`: `_RECORD_MCQ2_REMOVAL_SQL` writes
+`gen_meta.enrichment.mcq2_leak_removed`, and `_UNENRICHED_SQL`'s fourth clause
+reads it. `--mcq2-repair` on Monday and `--backfill` on Friday compose, which is
+the same forward-only trap in miniature.
+
+**11.102 — the FOURTH gate: `python -m storyforge.warm --check-mcq2`
+(`make mcq2-check`). A repair with no exit code is what 11.61 was.**
+
+`--mcq2-repair` existed and had never been run. That is exactly 11.61's failure —
+a remedy recorded in prose, and prose does not exit non-zero. There are three
+gates with Makefile targets (`warm-check`, `promote-check`, `prompt-check`) and
+`--check-mcq2` is the fourth, argued the same way 11.84 argues `--check-prompts`
+for `tap_word`: it is the only check that reads what an **`mcq2`** says, and one
+exit code cannot mean both "buy more stories" (a supply floor whose remedy is
+`make warm` and real money) and "run the free repair".
+
+**Its exit code keys off the rows the free repair could remove.** Blocked rows
+are printed on every run in a `DECISION REQUIRED` block — id, story, stage,
+prompt, both cards, and how many answers hang off them — and counted in the
+summary line, so "green" never reads as "clean". The reasoning, and it is a
+genuine tension with 11.84 rather than a copy of it:
+
+1. It is the argument `run_mcq2_repair` already makes about its own refusal: a
+   non-zero exit whose only remedy is *"a human decides whether to erase a
+   child's recorded answers"* teaches an operator to ignore the exit code.
+2. It does not weaken the gate as a regression detector. A row can only become
+   unremovable **after** a child has answered it, which is after it has been
+   served; the gate is the post-`make warm` step and sees every newly generated
+   row while its answer count is still zero. A regressed generator is caught.
+3. 11.84 made the opposite call for `--check-prompts`, which refuses on its
+   own unrepairable rows — and the difference is that the live pool held **zero**
+   of those, so that choice cost nothing. Here it is two rows, live today, whose
+   only remedy is a deletion this sweep is forbidden to make.
+
+**11.103 — the two rows blocked by recorded answers are REPORTED, not decided.**
+
+```
+q22   story 18 stage 3 [complete]  'Can the dragon sit?'
+      true 'The dragon can sit.' / false 'The dragon can run.'   leaks 'sit'
+      -> gives the TRUE card away
+      answers: 2, kid 162 "Maya", readings 227 + 352, both correct=true,
+               2026-07-29 15:40:41Z and 15:52:18Z
+q706  story 14 stage 2 [complete]  'Was the dragon glad?'
+      true 'A man was glad.' / false 'The dragon was glad.'      leaks 'dragon'
+      -> points at the WRONG card
+      answers: 2, kid 2622 "Priya", readings 3684 + 3687, both correct=FALSE,
+               2026-07-29 16:27:22Z
+```
+
+Both stories keep a `tap_word` (q21, q705), so removing the `mcq2` would not empty
+either — the only blocker is the recorded answers. Neither answer is §8 evidence:
+`MASTERY_QTYPES` is `("tap_word",)` and 11.66 refused to widen it, so no
+`gpc_stats` counter and no promotion decision depends on these four rows. They
+are reading history: they are what the parent dashboard shows.
+
+q706 is the defect in the data rather than in the abstract. Priya answered it
+twice and was marked wrong both times, and the question tells a child who can
+only letter-match to pick the card the server grades incorrect.
+
+Three resolutions, and this sweep takes none of them:
+
+- **(a) delete the two questions, cascading 4 `answers` rows.** Stops the harm
+  today, costs a child's recorded history and makes two dashboard readings show
+  fewer answers than they contained.
+- **(b) leave them.** Two `complete` stories go on serving a self-answering
+  question, one of which punishes reading. Both were served as recently as
+  2026-07-30 21:45Z.
+- **(c) recommended — copy the four `answers` rows into
+  `stories.gen_meta.enrichment.mcq2_answers_archived` (question id, reading id,
+  kid id, `correct`, `answered_at`) and then delete the questions.** The harm
+  stops, nothing about the child is lost, and the archive is readable evidence
+  rather than a foreign key. It needs one small migration-free `UPDATE` plus the
+  DELETE, and it needs a human to say yes, because it changes what a dashboard
+  reports about a real reading.
+
+---
+
+## Phase 8 — the last page of every long story is clipped, and it looks finished (13.1-13.10)
+
+Five child-facing defects found in a real browser, all in `apps/web`. They share
+one shape and it is the shape STATE keeps recording: **every gate in the repo was
+green.** `warm-check` counts servable stories, `promote-check` counts §8
+evidence, `prompt-check` reads what a question says, the 232 web tests cover the
+pure `lib/` helpers — and none of them has ever asked whether the thing a child
+looks at fits on the screen, or whether a picture that exists is passed to the
+component that draws it.
+
+Reproduced live before any code changed, at the §10 landscape reference
+(1024x768), on a stage-10 reader against an API with `DEMO_BYPASS_AUTH=false`
+(garbage token -> 401 confirmed first):
+
+```
+story: animals, stage 10, 7 segments. Pages 1-6: main.scrollHeight == clientHeight == 583.
+page 7 (the button says "Finish"):  scrollHeight 1776 / clientHeight 583
+73 word tokens sit entirely below the clip edge, starting at "to look at the water".
+The clip lands BETWEEN lines. Nothing is sliced. The page reads as complete and
+the red Finish button is the only control on it.
+```
+
+### 13.1 — the overflow is made IMPOSSIBLE to mistake for a finished page; the layout is not made to absorb it
+
+§10 is blunt and this pass does not argue with it: *"One segment per screen, no
+scrolling on tablet — if text overflows, generation length is wrong, not the
+layout."* So nothing here shrinks type (§03 puts an absolute 28px floor under
+story text), nothing here compresses `.sf-word`'s 12px padding (§11's 48px target
+floor is measured off it), and nothing here makes the reading box taller by
+taking space from the §10 chrome.
+
+What changes is the **one control on the screen**. While any part of the segment
+is still below the clip edge:
+
+- the primary button is **`More words ↓`**, not `Next` / `Finish`. It scrolls the
+  reading box by a screenful less one line of overlap, and it is the same
+  64px `kid-primary` button in the same place — a child who has learned "press
+  the big button" learns nothing new;
+- `→` (§11's keyboard advance) scrolls too, so the keyboard cannot skip what the
+  button will not;
+- a hand-lettered `keep reading` cue and a gold chevron sit in the footer beside
+  it. In the footer, NOT between the text and the footer: a strip there would
+  cost `main` 24px plus a 16px flex gap and push *more* segments over the edge —
+  the fix would have widened the defect it was fixing;
+- the reading box carries an inset shadow at its bottom lip
+  (`inset 0 -10px 10px -10px`). An inset shadow paints above the background and
+  **below** the element's content, so it shades the paper at the clip edge and
+  never lands on a glyph — §11's 7:1 story-text floor is untouched. That rules
+  out the obvious alternative, a gradient fade over the last line, which buys the
+  same cue by taking contrast off the exact words the child is reading.
+
+Only when the last line has been reached does the button become `Next` / `Finish`
+again. **A child can no longer press `Finish` on a page whose ending they have
+never seen.** §01's "never stuck" is intact: the button always does something,
+and it always reaches the end of the page in two or three presses.
+
+Rejected: leaving it to the scrollbar. `main` already sets
+`scrollbar-gutter: stable` and styles `::-webkit-scrollbar`, and the reason that
+was not enough is in the screenshot — at 1024x768 with 1193px of text below the
+fold, the rendered page shows no thumb a five-year-old could read as "there is
+more". A scrollbar is an adult's affordance for a document; this is a page in a
+book.
+
+### 13.2 — the gate: `make fit-check`, free, and it measures the box a child actually looks at
+
+A finding this size, at 8-10% of the pool, that no gate could see is a missing
+gate. `apps/web/scripts/fit-check.mjs` sweeps **every servable segment** — the
+same `SERVABLE_STATUSES` + `ANSWERABLE_SQL` predicate `_SERVE_SQL` and
+`warm.pool_coverage` use — through the real §10 box at both §11 reading sizes and
+both reference viewports, and exits non-zero on the first overflow.
+
+Three things make it evidence rather than a re-implementation:
+
+1. **It measures the production bundle.** It writes a harness into `dist/` and
+   drives it through `vite preview`, so the CSS is the purged, built CSS and the
+   fonts are the built `@fontsource/andika` files. STATE invariant 7 is the
+   reason: Tailwind purges dynamic class names, and a gate measuring dev CSS
+   would measure a stylesheet production does not have.
+2. **It cannot drift from the component.** The three class strings that define
+   the box are now exported *by the components that use them* —
+   `READING_MAIN_CLASS` (`ReadingView`), `SEGMENT_ART_FRAME` (`SegmentArt`),
+   `storyTextClass()` (`StoryText`) — and the harness imports them. Editing the
+   layout edits the gate. Tokenisation is the real `splitText`, and chips are the
+   real `introductionIndices`, imported from `src/lib/`.
+3. **It is conservative in the one direction that matters.** Every segment is
+   measured as if it were the first screen of the reading, so every story word
+   gets its `.sf-chip` (28px cutout + 7px margin + 6px padding wider than a plain
+   token). A segment that passes has passed its own worst case.
+
+Free: no Anthropic call, no writes. Reads `story_segments` through the same
+`docker exec storyforge-db psql` the other free gates reach the pool with.
+
+**It exits non-zero when it cannot run** — no browser, no `dist/`, no database.
+A gate that reports green because it did nothing is the failure mode this repo
+has now recorded four times (STATE's "395 tests" line, `warm-check`'s defaults,
+`well_formed` being discarded on write, `check_mcq2` never sweeping the pool).
+
+### 13.3 — the numbers, and the half of this that is NOT a front-end fix
+
+`make fit-check` is red today and should be. It is red because §10's sentence is
+about generation length, and the generator has never had a length budget derived
+from the screen. The measured budget is in PROVED below, per stage and per
+viewport; the backend half — a per-stage `max_chars` on the segment the prompt
+asks for, and a rewrite trigger when a draft exceeds it — is dispatched
+separately and is deliberately not attempted here.
+
+### 13.4 — `StoryWordChip.assetUrl` is a REQUIRED prop
+
+`Celebration`'s "New words" card rendered `<StoryWordChip word={word} …/>` with
+`assetUrl` omitted. DOM read-back on the live celebration screen:
+
+```
+[{"t":"cave","img":false,"bg":"rgb(251,239,212)"},{"t":"dragon","img":false},{"t":"wings","img":false}]
+```
+
+Amber ground, zero `<img>` — the same three words that had rendered WITH their
+cutouts in the reading view minutes earlier. `assetFor={cutoutFor}` was wired
+into `ReadingView` and `Comprehension` by 11.24/11.25 and never here, so the
+reward screen is the one surface left showing **exactly the treatment 11.27
+removed**: a coloured box around a word, with the user's own sentence against it
+— *"boxes around them ... boxes on a page mean mistakes."*
+
+`src/lib/art.test.ts` is green and asserts `cutoutFor` has an entry for all 14
+live story words, commented *"A miss here is a chip with no picture on a real
+story."* It tests that the MAP holds the URL. It cannot see that a caller did not
+pass it, and no test that looks at `art.ts` ever could.
+
+So the type is the fix: `assetUrl: string | null` is now **required**, and
+omitting it is a compile error in `bunx tsc --noEmit`, which `make test-web`
+already runs first. `null` is still a legal answer — it is what a word outside
+the cutout map means, and 11.25's "a word with no picture" is unchanged. What is
+no longer expressible is *forgetting to ask*.
+
+### 13.5 — the same hole one level up: `StoryText`'s chip props are all-or-nothing
+
+Making the leaf prop required is not enough on its own, because `StoryText` sat
+between the two callers with **four independently optional** props —
+`storyWords`, `assetFor`, `shouldAnnounce`, `onAnnounced` — and the chip needs
+all four to do anything. `Comprehension` passed two of them and got nothing at
+all (13.6). They are now a discriminated union: either a caller is introducing
+story words and supplies all four, or it supplies none. "Half-wired chips"
+stopped being a state the type system can express.
+
+### 13.6 — `storyWords` and `assetFor` were dead props on both question prompts, and the two files disagreed about why
+
+`Comprehension` passed `storyWords={question.story_words} assetFor={cutoutFor}`
+to `StoryText` for the mcq2 prompt and again for the demoted `tap_word` prompt,
+under a comment saying *"`QuestionDTO.story_words` exists precisely so a stage-1
+reader is not handed 'rocket' bare"*. `introductionIndices` opens with
+`if (!shouldAnnounce) return []`, and `Comprehension` passes no `shouldAnnounce`,
+so the chip branch was unreachable from either call. `lib/storyWords.ts:29-34`
+documents that same behaviour as **deliberate**. Two files, opposite claims,
+about the same line.
+
+`storyWords.ts` is the one that is right, and it is right because 11.26 decided
+it on the record: *"comprehension prompts and branch labels pass no
+`shouldAnnounce`, so they render no chips at all — by then the word has been
+introduced, and §07 says it behaves like any tappable word."* §07's sentence ends
+*"...then behaves like any tappable word"*, and the word is still tappable and
+still speaks on the question screen (§11), which is the safety net that makes it
+safe for a reader who has forgotten it.
+
+There is a second, harder reason not to resolve this the other way. A chip
+auto-speaks on first appearance, and `Comprehension` already speaks the
+instruction when the question paints. Re-introducing a story word on the prompt
+would put two utterances on one screen — against §11's "one utterance at a time"
+— and the one that would lose is the sentence that says what to do.
+
+So the dead props are deleted and the comment that asserted the opposite is
+replaced with the reason. The rendered pixels do not move; what moves is that
+the code now says what it does.
+
+### 13.7 — §06's fallback finally renders the tinted cover it has always specified
+
+§06, verbatim: *"If tag matching finds nothing, render the striped placeholder
+above **with the theme cover tinted at 40%** — never an empty box, never a
+broken-image icon."* `Placeholder` rendered `.sf-stripes` and nothing else, so
+one story in five had a page that was a blank striped half-screen, and 29 of 832
+servable segments have no asset at all (5 of them on page 1 — the first thing the
+child sees).
+
+`Placeholder` takes a `tintUrl`; `SegmentArt` takes a **required** `themeSlug`
+and resolves it through the `coverFor` map 11.29 already built and shipped. The
+tint is `opacity-40` over the stripes, `aria-hidden`, `pointer-events-none`, and
+it drops itself on `onError` — a cover that is not deployed degrades to the plain
+stripes rather than to §06's forbidden broken-image icon.
+
+`themeSlug` is required for 13.4's reason: the only way this regresses is a
+caller not passing it, so a caller not passing it is a compile error.
+
+### 13.8 — the rest of the picture problem is backend, and is reported rather than patched here
+
+Measured over the live pool: 29 of 832 segments carry no asset; 24 of 120 stories
+have at least one blank page; distinct assets per story are 1 -> 3 stories,
+2 -> 43, 3 -> 35, 4 -> 21, 5 -> 16, 6 -> 2, and asset 24 is on all seven segments
+of three separate stories. Story 8897 reads end to end as seven pages, two
+pictures, two blanks and the same sleeping-dragon-in-a-cave plate four times —
+including the page whose text is *"Sam taps its wings"*.
+
+That is `select_asset` (§12: "most tag overlap, deterministic tiebreak by asset
+id"), and it is `services/api`, which this pass does not own. The tiebreak
+degrades to lowest-id-always-wins whenever two assets tie on overlap, which for a
+7-segment story is most of the time. The remedy — break the tie away from assets
+already used in this story, and log rather than silently demote a segment whose
+scene tags come back empty — is in the report, not in this diff. The front end's
+job was to stop drawing a blank box, and that is 13.7.
+
+### 13.9 — a spent choice card stops being a 2.44:1 contrast failure
+
+`ChoiceCard`'s `wrong` frame was
+`border-[3px] border-dashed border-ink-300 bg-paper-warm opacity-60`. Sampled
+from the rendered PNG: glyph `rgb(167,152,133)` on `rgb(248,238,218)` =
+**2.44:1**, against an idle option's 15.23:1. The option label is Andika at
+`text-read` — the same class as the reading view — under a §11 heading that says
+*non-negotiable* and a rule that says story text is >=7:1. The `try again`
+caption, the only instruction on the screen, was inside the same dimmed box.
+
+The container `opacity` is deleted. §07 asks for "dim and go dashed" and the
+dashed ink-300 border plus a `paper-warm` ground already deliver both without it;
+the label goes to **ink-700**, which is a visible step down from ink-900 and
+still clears 7:1, and the `try again` caption goes to ink-700 with it. Measured
+ratios are in PROVED.
+
+`opacity` on a container is the trap worth naming: it multiplies through to every
+descendant, including text that had been checked on its own and passed, and
+nothing in a contrast audit of the palette can see it.
+
+### 13.10 — what is NOT changed
+
+- **Nothing in `services/api`.** Segment length, `select_asset`'s tiebreak, and
+  the empty-scene-tags log are all reported and none is touched.
+- **`.sf-word` geometry, the 28px `.sf-chip-art`, §03's two type sizes.** Every
+  one of them is a §11 floor measured in DEVIATIONS 11.30, and every one of them
+  is the tempting way to make text fit. §10 says the length is wrong, not the
+  layout.
+- **The `heard` state, the missing amber ring, the demoted `tap_word` prompt.**
+  11.27, 11.28 and 11.33 are decisions on the record and this pass has no new
+  evidence about any of them.
+- **`art.test.ts`.** It is still green and still right about what it tests; 13.4
+  adds the guarantee it structurally cannot make.
