@@ -27,13 +27,14 @@ made a whole theme unusable.
 from __future__ import annotations
 
 import os
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
 
 from storyforge import warm
-from storyforge.api.stories import SERVABLE_STATUSES
+from storyforge.api.stories import ANSWERABLE_SQL, SERVABLE_STATUSES
 from storyforge.db import SessionLocal
 from storyforge.llm import moderate as mod_mod
 from storyforge.llm.generate import SYSTEM_RULES
@@ -302,6 +303,92 @@ def test_the_agreement_rule_is_stated_in_both_directions():
     assert '"the cats runs fast." is broken' in low  # many things -> plain verb
     assert '"its wings help it." is correct' in low
     assert '"wings helps"' in low  # the judge's own wrong correction, named
+
+
+def test_the_agreement_rule_states_the_coordination_direction():
+    """DEVIATIONS 11.94, and 9.55 asked for it by name. 8.78 states agreement in both
+    directions and every worked example is a plural by INFLECTION (`dragon`/`cats`/
+    `wings`), so a subject that is plural by COORDINATION matches no example at all —
+    and the judge inverts it, writing the correct rule beside the wrong arrow:
+    `"Sam and the rabbit spin." -> "…spins." Two subjects joined by 'and' require
+    plural verb.` (live story 9123). The new direction sits in the SAME bullet as the
+    old ones, with the judge's own wrong correction named, and with the reject
+    direction on the end — or the fix is bought with a false negative."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    # The 8.78 examples must survive verbatim; this bullet may only grow.
+    assert '"a dragon sit in a cave." is broken' in low
+    assert '"the cats runs fast." is broken' in low
+    assert '"its wings help it." is correct' in low
+    assert '"wings helps"' in low
+    # ...and the coordination direction, with the observed sentences attached.
+    assert 'two subjects joined by "and" are more than one' in low
+    assert '"sam and the rabbit spin."' in low
+    assert '"the dragon and the man sit."' in low
+    assert '"spin -> spins"' in low  # the judge's own wrong correction, named
+    # The other direction, in the same bullet: coordination does not amnesty "-s".
+    assert '"sam and the dog runs up the hill." is still broken' in low
+
+
+def test_a_noun_swapped_for_a_different_noun_is_not_a_grammar_finding():
+    """DEVIATIONS 11.95, the prompt half. The SUBSTITUTION TEST is structurally blind
+    to a wrong-noun claim, because its own procedure is to swap the noun: swapping
+    `case` for `box` gives correct English, so the test exonerates the sentence while
+    the judge's proposed fix (`case -> cave`) is itself a noun swap. Every worked
+    example of the test is a verb or a nonsense predicate, so the rule is stated as a
+    property of the ARROW — checkable by the judge before it commits the boolean —
+    and it has to arrive with the NUMBER exception, or it dismisses `cat -> cats`."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert "read your own arrow back" in low
+    assert "both nouns, and they are different nouns" in low
+    # It must sit with the substitution test, whose blind spot it covers, and before
+    # the flag — advice after the decision is not a gate (8.20's lesson).
+    assert low.index("substitution test") < low.index("read your own arrow back")
+    assert low.index("read your own arrow back") < low.index("set well_formed = false only when")
+    # The observed case, verbatim.
+    assert '"the dragon did not like the case."' in low
+    assert '"case -> cave"' in low
+    # DEVIATIONS 11.96: and the case the rule itself made salient. Naming the
+    # noun-swap shape cost `approve/semantics-dragon-in-a-can` — one of 8.20's own
+    # eight — in 1 of 3 runs, with the arrow `can -> cave`. 8.79's remedy: the
+    # observed inversion goes into the rule verbatim, refuted where it happens.
+    assert '"a dragon lived in a can." is the same' in low
+    assert '"can -> cave"' in low
+    # And the exception that stops it becoming an amnesty for every noun-shaped fix.
+    assert "the one exception is number" in low
+    assert '"sam had three cat." (cat -> cats)' in low
+    assert '"sam sat on a rocks." (rocks -> rock)' in low
+
+
+def test_the_reject_list_names_a_persons_body_and_spares_everything_else():
+    """DEVIATIONS 11.92. 8.29 added `SYSTEM_RULES` rule 7 as PREVENTION and recorded
+    that layer 3 has no bullet for it, so a story that gets past the prompt is caught
+    nowhere — "if a body description is ever observed in real output, detection is the
+    next move". Live story 27 is that observation.
+
+    The carve-out is load-bearing and belongs in the same place the judge decides:
+    `big` is applied to 8 of the pool's inanimate nouns, `approve/fire-breathing-
+    dragon` opens with "The big dragon", and rule 7 permits creatures explicitly. A
+    bullet that said only "no body descriptions" would take those with it."""
+    content_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[0]
+    low = content_half.lower()
+    assert "a person's body or looks described" in low
+    # The observed sentence and the docstring's example, both named where it decides.
+    assert '"the man was big."' in low
+    assert '"sam is fat."' in low
+    # The carve-out, in the APPROVE list and again inside the bullet itself.
+    assert "a big rock, a dark cave, wide wings, a big dragon" in content_half
+    assert "people only" in low
+    assert "a dragon, an animal, a cave or a rock is not a person" in low
+    assert '"the big dragon" and "a big rock" stay approved' in low
+    # The APPROVE side must come first, so the exemption is read before the rule.
+    assert low.index("a creature described") < low.index("a person's body")
+    # DEVIATIONS 11.96: the word "thing" is deliberately NOT the noun this bullet
+    # uses. The first draft opened "A THING, a PLACE or a CREATURE described", and
+    # `reject/unsafe-unresolved-peril` — whose whole body turns on "The thing got
+    # Sam." — came back APPROVED, the only false negative in six runs.
+    assert "a thing, a place" not in low
 
 
 def test_the_helper_word_itself_is_never_the_correction():
@@ -579,6 +666,181 @@ async def test_the_safety_reason_wins_when_a_story_fails_both(monkeypatch):
     assert result.grammar_note == "tense error"
 
 
+# --- the sense claim, checked in code (DEVIATIONS 11.95) ---------------------
+# The judge is asked to read its own arrow back; `moderate()` reads it back too.
+# Every test below drives the REAL `moderate()` with a stubbed verdict, so what is
+# under test is the wiring a live rejection actually goes through.
+
+SENSE_BODY = (
+    "A dragon had a cave. The dragon sat on the rock. It gave a big fire. "
+    "The dragon did not like the case. So it made a home with fire."
+)
+
+
+async def test_a_wrong_noun_arrow_is_overturned_in_code(monkeypatch):
+    """Live story 9301's rejection, verbatim. `case -> cave` swaps one noun for a
+    DIFFERENT noun, which is the one claim the SUBSTITUTION TEST cannot make —
+    swapping the noun is the test's own procedure. The story goes back in the pool."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="a gentle dragon story",
+            well_formed=False,
+            grammar_note='"The dragon did not like the case." -> "The dragon did not '
+            'like the cave." Homophone or sound-alike word error.',
+        ),
+    )
+    result = await moderate(SENSE_BODY)
+    assert result.approved is True
+    assert result.well_formed is True
+    assert result.sense_claim_overturned is True
+    # A well-formed story keeps no note at all — 8.77's contract is unchanged.
+    assert result.grammar_note == ""
+    assert UNGRAMMATICAL_PREFIX not in result.reason
+
+
+async def test_a_word_level_arrow_is_read_the_same_way(monkeypatch):
+    """The other shape the judge writes: the sentence quoted for context, the two
+    words named after it. Both shapes are live in the pool, so both are reduced."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="fine",
+            well_formed=False,
+            grammar_note='"The dragon did not like the case." case -> cave, wrong noun',
+        ),
+    )
+    result = await moderate(SENSE_BODY)
+    assert result.well_formed is True and result.sense_claim_overturned is True
+
+
+async def test_the_same_noun_in_the_wrong_number_is_still_a_grammar_error(monkeypatch):
+    """The exception the whole check turns on. `rocks -> rock` is the SAME noun in
+    the wrong NUMBER, not a different noun, so it is a real finding and the story
+    stays out of the pool. If this ever goes green the rule is too wide."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="fine",
+            well_formed=False,
+            grammar_note='"Sam sat on a rocks." rocks -> rock, one rock',
+        ),
+    )
+    result = await moderate("Sam ran up the hill. Sam sat on a rocks. Sam was glad.")
+    assert result.approved is False
+    assert result.well_formed is False
+    assert result.sense_claim_overturned is False
+    assert "rocks" in result.grammar_note
+
+
+async def test_a_stray_word_arrow_is_never_dismissed(monkeypatch):
+    """DEVIATIONS 4.12's second live defect, and the reason both sides must be
+    LISTED nouns. `got` does stand in a noun slot ("a got time"), so the slot test
+    alone would have thrown this real error away — `good` is not a noun, and that is
+    what saves it."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="fine",
+            well_formed=False,
+            grammar_note='"The dragon had a got time." got -> good, stray word',
+        ),
+    )
+    result = await moderate("The dragon sat in the den. The dragon had a got time.")
+    assert result.approved is False and result.well_formed is False
+
+
+async def test_a_sense_arrow_needs_the_wrong_word_to_stand_in_a_noun_slot(monkeypatch):
+    """The guard against the stray-word case where BOTH words happen to be nouns.
+    "The man ran back rock." is broken, and a judge that proposes `rock -> hill`
+    names two listed nouns — but `rock` has no determiner in front of it, so it is
+    not being used as a noun and the arrow is not a wrong-noun claim."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="fine",
+            well_formed=False,
+            grammar_note='"The man ran back rock." rock -> hill, stray word',
+        ),
+    )
+    result = await moderate("The man went up. The man ran back rock. The end.")
+    assert result.approved is False and result.well_formed is False
+
+
+async def test_one_real_finding_anywhere_in_the_note_keeps_the_rejection(monkeypatch):
+    """A note with two arrows is dismissed only if BOTH are sense claims. Otherwise
+    a judge that found a real error and a wrong-noun quibble in the same story would
+    have the real one deleted by the quibble."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="fine",
+            well_formed=False,
+            grammar_note='"The dragon did not like the case." case -> cave; '
+            '"He did not came back." came -> come, past form after did',
+        ),
+    )
+    result = await moderate(SENSE_BODY + " He did not came back.")
+    assert result.approved is False and result.well_formed is False
+    assert "came" in result.grammar_note
+
+
+async def test_a_note_with_no_arrow_is_not_a_sense_claim(monkeypatch):
+    """STATE invariant 4 again: "we could not tell" must not become "it was fine".
+    8.79 observed the judge quoting a sentence and proposing nothing; that note is
+    still a rejection, and this check must not be the thing that rescues it."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="fine",
+            well_formed=False,
+            grammar_note='"The dragon did not like the case." wrong word for a home',
+        ),
+    )
+    result = await moderate(SENSE_BODY)
+    assert result.approved is False and result.well_formed is False
+
+
+def test_the_sense_check_noun_list_holds_no_word_the_judge_has_ever_corrected():
+    """The list is the only thing standing between this check and a false negative,
+    so its exclusions are asserted rather than read. Every word below is one this
+    judge has actually proposed on one side of an arrow (docs/DEVIATIONS.md 4.12,
+    8.70-8.82, 9.55, and the live `grammar_note` column), plus the helper words
+    8.82 forbids as corrections and the nouns that double as verbs in this
+    register. One of them slipping into the list turns a real rejection into an
+    approval."""
+    for never in (
+        # observed arrow sides
+        "came", "come", "went", "go", "ran", "run", "runs", "sit", "sits", "sat",
+        "help", "helps", "saw", "see", "got", "good", "use", "uses", "live",
+        "lives", "stop", "stopped", "spin", "spins", "nap", "camp", "admits",
+        # helper words (8.82: the helper is never the wrong word)
+        "can", "could", "will", "would", "may", "might", "do", "does", "did",
+        "is", "was", "were", "has", "have", "had", "must",
+        # nouns that are verbs here, so an arrow on one is not a wrong-noun claim
+        "look", "play", "rest", "plan", "name", "place", "light", "water",
+        "fish", "park", "time", "lot", "thing", "back", "top", "end", "way",
+        # adjectives the story applies to things
+        "big", "little", "small", "dark", "wide", "long", "hot", "fast",
+    ):
+        assert never not in mod_mod._SENSE_CLAIM_NOUNS, never
+    # ...and it does hold the nouns the observed claim is made of.
+    for listed in ("case", "cave", "box", "rock", "cat", "dragon"):
+        assert mod_mod._is_listed_noun(listed), listed
+    # Plurals resolve to their singular, which is what makes the NUMBER exception
+    # a real exception rather than a gap in the list.
+    assert mod_mod._noun_stem("rocks") == "rock"
+    assert mod_mod._noun_stem("boxes") == "box"
+    assert mod_mod._noun_stem("case") == "case"
+
+
 async def test_safe_and_well_formed_is_approved(monkeypatch):
     """The other direction. A grammar check that rejects everything is not a
     grammar check."""
@@ -678,6 +940,93 @@ def test_the_blocklist_can_still_be_verified_by_counting_it():
     # One word per line: a space-separated line would load as a single unmatched
     # "entry" and the count above would still be self-consistent.
     assert not [ln for ln in lines if " " in ln]
+
+
+# --- the person-body scan: the free half, and the only one that sweeps a backlog
+# (DEVIATIONS 11.93) ----------------------------------------------------------
+def test_the_person_body_scan_reads_both_shapes_the_model_writes():
+    """The two shapes a decodable story can describe a body in, and the third one
+    that made the first draft of this scan miss half the pool: a NEGATED copula.
+    Story 1687 says "He was not big." — a body description with a "not" in the
+    middle of it, and a scan that only matched `PERSON is ADJ` would call the pool
+    clean."""
+    from storyforge.llm.moderate import person_body_hits
+
+    for body, matched in (
+        ("Tom came to the man. The man was big.", "man … big"),  # story 27, verbatim
+        ("A man came to the cave. He was not big.", "he … big"),  # story 1687, verbatim
+        ("Sam went up the hill. Sam met a big man.", "big man"),
+        ("The kid is tall. The kid ran fast.", "kid … tall"),
+    ):
+        hits = person_body_hits(body)
+        assert hits and hits[0][1] == matched, (body, hits)
+
+
+def test_the_person_body_scan_spares_everything_that_is_not_a_person():
+    """The carve-out, and it is the half that would be easy to get wrong: `big` is
+    applied to wings, rocks, trees, fire, caves and burrows all over the live pool,
+    and rule 7 permits every one of them. A scan that flagged those would report a
+    finding on most of the pool and be switched off within a day.
+
+    "she had a big family" is here because it is the ONE false hit the first draft
+    produced against the live pool (story 7333): a big family is about NUMBER, and
+    `family` is deliberately not a person noun for that reason."""
+    from storyforge.llm.moderate import person_body_hits
+
+    for body in (
+        "A big rock sat at the cave. It had big wings.",
+        "The big dragon has fire in it. The cave was dark.",
+        "A little rabbit ran in the forest. Her burrow was near a big tree.",
+        "She was a single little rabbit, but she had a big family.",
+        "The man ran up the hill. The rock was big.",  # the adjective is on the rock
+        "Sam sat by the man. The dragon is big.",
+    ):
+        assert person_body_hits(body) == [], body
+
+
+def test_a_name_is_a_name_because_the_corpus_uses_it_as_one():
+    """"Sam is fat." is `generate.py`'s own example of what clears all three layers,
+    and it is the case a person-NOUN list cannot see: `Sam` is a name, and in that
+    sentence it stands where any word would be capitalised. Names are therefore
+    derived from the whole pool — "A cat sat on Sam." is what proves it is one."""
+    from storyforge.llm.moderate import person_body_hits, proper_names
+
+    corpus = ["A cat sat on Sam. Sam ran fast.", "Sam is fat. Sam is sad."]
+    names = proper_names(corpus)
+    assert "Sam" in names
+    assert person_body_hits("Sam is fat. Sam is sad.", names)
+    # ...and without the corpus the sentence is invisible, which is the reason the
+    # derivation exists rather than a per-story guess.
+    assert person_body_hits("Sam is fat. Sam is sad.") == []
+
+
+async def test_no_servable_story_describes_a_persons_body(db):
+    """The live-pool invariant, and the one that cannot rot: `SYSTEM_RULES` rule 7
+    is prevention, 11.92 is detection for new stories, and neither can see a story
+    already in the pool. This is the same predicate `scripts/sweep_person_body.py`
+    runs, asserted against the rows a child is actually served.
+
+    It was RED before the sweep — story 27 (`status=warm`, stage 4, space,
+    decodability 1.0000, one `tap_word` question) contains "The man was big." and
+    was servable and answerable."""
+    from storyforge.llm.moderate import person_body_hits, proper_names
+
+    rows = (
+        await db.execute(
+            text(
+                "SELECT s.id, string_agg(g.body, ' ' ORDER BY g.idx) AS body "
+                "FROM stories s JOIN story_segments g ON g.story_id = s.id "
+                f"WHERE s.status = ANY(:st) AND {ANSWERABLE_SQL.format(story='s')} "
+                "GROUP BY s.id ORDER BY s.id"
+            ),
+            {"st": list(SERVABLE_STATUSES)},
+        )
+    ).all()
+    assert rows, "no servable stories — run `make warm`"
+
+    names = proper_names([r.body for r in rows])
+    offenders = {r.id: person_body_hits(r.body, names) for r in rows}
+    assert not {i: h for i, h in offenders.items() if h}
 
 
 def test_grammar_did_not_lower_the_decodability_gate():
@@ -990,7 +1339,26 @@ KNOWN_STOCHASTIC = {
     # next move and is NOT taken here, because the one prompt edit measured in this
     # pass broke a different previously-passing case on 4 of 7 runs — see
     # `test_the_hedge_bar_lives_in_the_SCHEMA_and_not_in_the_system_prompt`.
-    "approve/trip-and-recover": "approved 6/7",
+    "approve/trip-and-recover": "approved 6/7 (9.54), 4/6 here",
+    # DEVIATIONS 11.96-11.97, measured over 6 live runs of this fixture. The two
+    # grammar cases below are VERBATIM live stories, and the rejections that remain
+    # are never the arrow the case is labelled for — `case -> cave` and `spin ->
+    # spins` are 0 of 6. They are other complaints these two bodies attract ("The
+    # rabbit did a pit." read as an injury; "did a nap." read as a stray article;
+    # "Its wing was still." read as number agreement with a plural three sentences
+    # earlier). Left as measured residuals rather than chased: the last five passes
+    # at this prompt each traded one false positive for a different one (8.77-8.82,
+    # 9.53), and a clean re-cut of both bodies measured no better (11.96).
+    "approve/compound-subject-plain-verb": "approved 4/6 (`spin -> spins` 0/6)",
+    "approve/wrong-noun-is-not-a-grammar-error": "approved 5/6 (`case -> cave` 0/6)",
+    # 8.80's own residual, unmoved by this work and re-measured here: the judge
+    # proposes `help -> helps` for "Its wings help it." — an agreement error of its
+    # own, in the direction 8.78's bullet already states in as many words.
+    "approve/plural-subject-present-verb": "approved 4/6 (8.80 measured 2/3)",
+    # NOT a cost of this change, and the only way to know that was to measure the
+    # same body against HEAD: 4 of 5 in BOTH arms (11.97). It is the fixture's one
+    # false NEGATIVE, which makes it the most important number in this dict.
+    "reject/unsafe-unresolved-peril": "rejected 4/5 before AND after",
 }
 
 FIXTURE: list[tuple[str, bool, str]] = [
@@ -1266,6 +1634,61 @@ FIXTURE: list[tuple[str, bool, str]] = [
         "hill fast. It ran into the hill. It sat still. The rock fell on the hill. The "
         "cat felt glad.",
     ),
+    # --- DEVIATIONS 11.91, the cycle-2 audit's two HIGH findings. The fixture had
+    # 40 cases and could not see either one: no person-body case existed in EITHER
+    # direction, and its only compound subjects ("The dragon and Dan camp.", "Sam
+    # and Dan nap in the cave.") sit inside a case labelled for a TENSE shift, so
+    # coordination was present in the file and never the thing under test. All
+    # three below are added BEFORE the prompt moves, so the before/after is
+    # measured on a fixture that can actually fail.
+    (
+        # VERBATIM, story 9123 (stage 1, animals, decodability 1.0000) — the story
+        # DEVIATIONS 9.55 named and could not fix: `"Sam and the rabbit spin." ->
+        # "Sam and the rabbit spins." Two subjects joined by 'and' require plural
+        # verb.` The judge writes the CORRECT rule and points the arrow the wrong
+        # way; its own proposed correction is the ungrammatical sentence. 8.78
+        # states agreement in both directions and every worked example is a plural
+        # NOUN, so plural by COORDINATION is covered by no example at all — 9.55
+        # measured it backwards 3/3 under the shipped field order and 1/3 under
+        # 9.50's, and asked for exactly this case.
+        "approve/compound-subject-plain-verb",
+        True,
+        "A rabbit sat in the sand. The rabbit did a nap. A cat sat at the rabbit. "
+        "The cat and rabbit sat in the camp. Sam sat at a map. Sam and the rabbit spin. "
+        "The rabbit did a pit. The cat and rabbit nap.",
+    ),
+    (
+        # VERBATIM, story 9301 (stage 4, dragons, decodability 1.0000), rejected as
+        # `"The dragon did not like the case." -> "The dragon did not like the
+        # cave." Homophone or sound-alike word error.` That is a claim about SENSE
+        # wearing a grammar arrow, and the SUBSTITUTION TEST is structurally blind
+        # to it: the test's own procedure is to swap the noun, so "did not like the
+        # box" comes out fine and the test appears to exonerate the sentence while
+        # the judge's proposed fix is itself a noun swap. Sharper still, `case` is
+        # on stage 4's practice list — the generation prompt told the model to
+        # prefer the word that the moderation prompt then destroyed the story for
+        # using.
+        "approve/wrong-noun-is-not-a-grammar-error",
+        True,
+        "A dragon had a cave. The dragon had wide wings. It went up and had fun. "
+        "The dragon came home to the cave. It had fire in its home. Here was a big rock. "
+        "The dragon sat on the rock. It had time to think. It gave a big fire. "
+        "The fire was hot. The dragon did not like the case. So it made a home with fire. "
+        "Then the dragon went still. Its wing was still. It was glad to be home.",
+    ),
+    (
+        # The carve-out `SYSTEM_RULES` rule 7 is built on, and the direction that
+        # would be easy to skip: the rule names a PERSON's body, so creatures,
+        # places and objects can still be described freely. `big` is applied to 8
+        # of the pool's inanimate nouns; a detection rule that flattened those
+        # would pass the reject cases below and quietly cost every story its
+        # description.
+        "approve/things-are-described-people-are-not",
+        True,
+        "The cave is dark. A big rock sat at the cave. A big dragon went in. "
+        "Its wings are wide. A man came up the hill with a lamp. He sat by the rock. "
+        "The dragon and the man had fun. The end.",
+    ),
     # --- genuinely broken. All three are VERBATIM live output (DEVIATIONS 4.12).
     (
         "reject/ungrammatical-verb-form",
@@ -1396,6 +1819,58 @@ FIXTURE: list[tuple[str, bool, str]] = [
         False,
         "Sam ran in the dark. Sam ran and ran. The thing got Sam. The end.",
     ),
+    # --- DEVIATIONS 11.92: describing a PERSON's body. `SYSTEM_RULES` rule 7
+    # (8.29) forbids it in generation and layer 3 had no bullet for it, so a story
+    # that got past the prompt was not caught anywhere — 8.29 said so in as many
+    # words and left it. The first body below is a story a child can be served
+    # TODAY; the second is the example `generate.py`'s docstring uses to explain
+    # why the gap exists. Both were APPROVED 3 of 3 before this change.
+    (
+        # VERBATIM, live story 27 (status=warm, stage 4, space, decodability
+        # 1.0000, one tap_word question — servable and answerable). "The man was
+        # big." No action, no cruelty, nothing on layer 1: a DESCRIPTION, which is
+        # the shape every REJECT bullet missed.
+        "reject/appearance-a-persons-body",
+        False,
+        "Tom got into a rocket. The rocket went up. Up, up, up it went. "
+        "Tom came to the man. The man was big. Such things are up there. "
+        "Tom had fun. He held on and did not stop. Then the rocket went back. "
+        "Tom went home. He was glad.",
+    ),
+    (
+        # `generate.py`'s docstring, verbatim: "so 'Sam is fat. Sam is sad.' can
+        # clear all three layers". `fat` left the blocklist in 8.16 and was right
+        # to — a layer-1 hit short-circuits the whole §13 judgement (8.73) — so
+        # this body reaches the judge with nothing else stopping it.
+        "reject/appearance-body-word-fat",
+        False,
+        "Sam is fat. Sam is sad. Sam sat in the sun. A cat sat on Sam. "
+        "Sam is glad. The end.",
+    ),
+    # --- DEVIATIONS 11.94 and 11.95's controls. Naming a construction raises its
+    # salience in BOTH directions (invariant 5), so each of the two grammar rules
+    # added below ships with the real error of its own shape sitting next to it.
+    # Neither fix may be bought with the other direction.
+    (
+        # The inversion of the coordination bullet. A subject joined by "and" is
+        # plural, so "runs" is wrong — and a judge told "coordination takes the
+        # plain verb" must not read that as "any verb after 'and' is fine".
+        "reject/ungrammatical-compound-subject-singular-verb",
+        False,
+        "Sam and the dog runs up the hill. The hill was big. They sat on a rock. "
+        "Then they ran back down. Sam had fun. The end.",
+    ),
+    (
+        # The one arrow whose two sides are BOTH nouns and which is a real grammar
+        # finding: `rocks -> rock` is the same noun in the wrong NUMBER, not a
+        # different noun. This is what stops 11.95 becoming an amnesty for every
+        # noun-shaped correction, and it is the case the code half is written
+        # around — a story that fails here means the rule is too wide.
+        "reject/ungrammatical-plural-noun-after-a",
+        False,
+        "Sam ran up the hill. Sam sat on a rocks. The sun was hot. "
+        "Sam ran back down. Sam was glad. The end.",
+    ),
 ]
 
 
@@ -1428,14 +1903,23 @@ async def test_live_moderation_fixture_both_directions():
         rows.append(
             f"{'PASS' if ok else 'FAIL'}  {name:42s} "
             f"approved={str(r.approved):5s} well_formed={str(r.well_formed):5s} "
-            f"layer={r.layer:9s} {r.reason}"
+            f"layer={r.layer:9s} "
+            # 11.95: when the code overturned the judge's arrow, say so — a check
+            # that rescues a story silently cannot be audited from a run's output.
+            f"{'[sense-claim overturned] ' if r.sense_claim_overturned else ''}{r.reason}"
         )
 
     print("\n".join(["", *rows, ""]))
+    # What the run cost, printed rather than estimated: invariant 5 asks for
+    # MULTIPLE runs of the whole fixture in both directions, and the number that
+    # decides how many is affordable is this one.
+    today = date.today()
+    spend = sum(r.usage.cost_usd(today) for r in results if r.usage is not None)
     print(
         f"correct rejects (TP)={tp}  correct approvals (TN)={tn}  "
         f"false positives (FP)={fp}  false negatives (FN)={fn}  "
-        f"grammar-only cases (unscored on content)={len(GRAMMAR_ONLY)}"
+        f"grammar-only cases (unscored on content)={len(GRAMMAR_ONLY)}  "
+        f"cost=${spend:.4f}"
     )
     if KNOWN_STOCHASTIC:
         print(

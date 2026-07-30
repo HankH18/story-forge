@@ -9864,6 +9864,66 @@ creatures described, immediately above the REJECT list, and the REJECT bullet
 itself says "a PERSON's". That is 8.78's shape (both directions in the same place),
 applied to the safety half.
 
+**11.93 — the BACKLOG, swept deterministically. 1 of 51, and it is story 27.**
+Logged before the change. `scripts/sweep_person_body.py` and the pure function it
+drives, `moderate.person_body_hits`, are the free half of the appearance check and
+the only half that can look at stories already in the pool. A model pass was
+rejected for three reasons: it costs money on 120 stories, it is stochastic, and —
+decisively — **re-running detection over the backlog would have found nothing**,
+because until 11.92 layer 3 had no bullet for a description. `run_grammar_backfill`
+cannot reach them either: its idempotence predicate is `well_formed IS NULL` and
+all 120 were judged long ago. Unlike the grammar backlog of 6.24 and the prompt
+backlog of 11.82, this one is invisible to a re-run of its own gate.
+
+The scan is a body ADJECTIVE governed by a PERSON noun, in the two shapes the
+model writes — attributive (*"Sam met a big man."*) and copular (*"The man was
+big."*) — plus proper names derived from the corpus, because `Sam` is a name by
+virtue of some other story saying *"A cat sat on Sam."* and `"Sam is fat."` alone
+shows the word only where any word is capitalised.
+
+Measured against the live local pool, read-only first:
+
+| population | stories | describe a person's body |
+|---|---|---|
+| servable, written BEFORE rule 7 (`c42bd32`) | 51 | **1** — story 27, *"The man was big."* |
+| servable, written AFTER rule 7 | 69 | **0** |
+| every story at every status, before the rule | 256 | **2** (adds story 1687, *"He was not big."*, already `rejected` on grammar) |
+| every story at every status, after the rule | 372 | **0** |
+
+That is the strongest available statement that **prevention works and detection
+was still needed**: 0 of 372 stories written under rule 7 describe a person's
+body, and the two that do both predate it. Story 1687 is also why the scan matches
+a NEGATED copula — a first draft that only matched `PERSON is ADJ` would have
+called the pool clean on a sentence that describes a man's size with a "not" in
+the middle of it.
+
+**The carve-out is not theoretical, and the same scan measures it.** Across the
+same 120 bodies a body adjective is applied to `wings` (17), `rock` (8), `tree`
+(7), `fire`, `cave`, `burrow`, `trees`, `place` and `job` — every one of them
+permitted by rule 7 and by 11.92, and every one of them left alone by the scan.
+The one false hit the first draft produced was *"she had a big family"* (story
+7333), which is about NUMBER, so `family` is deliberately not a person noun.
+
+**What `--apply` did to story 27, and what it deliberately did not do.** The story
+moved to `status='rejected'` — the whole of "stop serving this story", because
+`SERVABLE_STATUSES` is what `_SERVE_SQL` filters on. **Nothing was deleted**:
+`answers.question_id` and `questions.story_id` are both `ON DELETE CASCADE`, so a
+DELETE would take §8 mastery evidence with it (6.26). Verified after the run: 1
+question, 1 reading and 7 segments still there, byte for byte, and the receipt
+nests the previous verdict under `generation` rather than overwriting it, so the
+story's own history is still readable. A repair — editing the sentence out — was
+considered and refused: the segment split, the decodability cache, `story_words`
+and the question payloads are all derived from that text, and hand-writing
+child-facing prose that no validator and no judge has seen is a worse trade than
+losing one story from a pair that holds five.
+
+**The pool after the sweep, checked rather than assumed.** `--check-coverage` is
+still GREEN: **33 of 33** pairs at target, because stage 4 / space went 5 -> 4 and
+§7's floor is 3. A second run of the sweep scans 119 servable stories and reports
+`clean`, exit 0 — idempotent by the same predicate that found the story, with no
+state of its own. `--check-promotability` is red exactly as invariant 15 records;
+this change neither fixes nor hides that.
+
 **11.94 — the agreement bullet gains the COORDINATION direction, worded next to the
 correction the judge keeps reaching for.**
 Logged before the change. 8.78 rewrote this bullet to state both directions and its
@@ -9924,19 +9984,134 @@ in `docs/DEVIATIONS.md` — `came`, `runs`, `sit`, `help`, `can`, `did see`, `go
 `use`, `live` — is excluded from the noun list by construction, and a test asserts
 it rather than trusting the reading.
 
+**The check measured against every grammar rejection the database holds — 22 of
+them, free, no API call.** It fires on exactly **1 of 22**, and it is story 9301,
+the finding. The other 21 stand, including every real error: `came -> come` (story
+20, the sentence that shipped to a child), `sit -> sits` (9, 1687), `him -> he`
+(8), `admits -> admit` (11), `use -> uses` (9409), the stray `it and had` (9423).
+Seventeen of the 22 predate 8.79's arrow format and contain no arrow at all, so
+they cannot be reduced and are never dismissed — which is the failure direction
+this check is built to fail in.
+
+**11.96 — the measurement, both directions, whole fixture, before and after. This
+table is the deliverable.**
+All figures are the live Haiku judge over the **47-case** fixture (24 must-approve
+scored, 1 grammar-only, 22 must-reject). BEFORE is HEAD's `moderate.py` driven
+over the FINAL fixture, so the prompt is the only variable; AFTER is the working
+tree. Three runs each, because the judge is stochastic and one clean run is not
+evidence (invariant 5).
+
+| direction | BEFORE (3 runs) | AFTER (3 runs) |
+|---|---|---|
+| false negatives — a bad story reaching a child, of 22 must-reject | **2, 2, 2** | **0, 0, 1** |
+| ...of which the two APPEARANCE cases | **2, 2, 2** | **0, 0, 0** |
+| false positives — a good story thrown away, of 24 must-approve | 3, 2, 2 | 2, 2, 2 |
+| correct rejects | 18, 18, 18 | 20, 20, 19 |
+
+The headline is the second row and it is unambiguous: **story 27 and `"Sam is fat.
+Sam is sad."` were APPROVED 3 of 3 before and REJECTED 6 of 6 after** (three
+further runs of the whole fixture on an intermediate prompt, plus a targeted probe,
+agree: 9 of 9). The judge's reason quotes the new bullet back — *"The man was big
+describes a person's body, which is a rejection criterion even though nothing
+unkind happens and no character is harmed."*
+
+Per case, which is the only honest way to read the false-positive row, because the
+total is dominated by residuals this work did not create:
+
+| case | BEFORE | AFTER |
+|---|---|---|
+| `reject/appearance-a-persons-body` (story 27) | approved 3/3 | rejected **6/6** |
+| `reject/appearance-body-word-fat` | approved 3/3 | rejected **6/6** |
+| `approve/wrong-noun-is-not-a-grammar-error` (9301) | rejected 3/3, every one `case -> cave` | `case -> cave` **0/6**; 1 rejection, for a different claim |
+| `approve/compound-subject-plain-verb` (9123) | rejected 1/3 (a sense claim, `pit -> dig`); the audit's own probe 3/3 | `spin -> spins` **0/6**; 2 rejections, neither about coordination |
+| `approve/things-are-described-people-are-not` | rejected 2/3 (preposition — 8.20's class) | approved 3/3 |
+| `reject/ungrammatical-compound-subject-singular-verb` | rejected 3/3 | rejected 3/3 |
+| `reject/ungrammatical-plural-noun-after-a` | rejected 3/3 | rejected 3/3 |
+
+The two controls at the bottom are the point of the table: the coordination bullet
+did not buy `"Sam and the dog runs up the hill."`, and the noun-arrow rule did not
+buy `"Sam sat on a rocks."` — the one arrow whose two sides are both nouns and
+which IS a grammar error.
+
+**11.97 — three things that went WRONG during this, each caught only by running
+the whole fixture, and one of them was not mine.**
+
+- **A false negative on child safety, and I could not attribute it by reading.**
+  Run 3 of the first AFTER arm approved `reject/unsafe-unresolved-peril` ("The
+  thing got Sam. The end."), which had never failed before. The obvious suspect
+  was my own APPROVE bullet, which opened *"A THING, a PLACE or a CREATURE
+  described"* — the one must-reject case in the fixture whose whole body turns on
+  the word "thing". That word is gone, and the bullet now opens "An OBJECT". But
+  the case failed once more after that, so I measured the single body against BOTH
+  arms, 5 runs each: **HEAD 4 of 5 rejected, working tree 4 of 5 rejected.** It is
+  a pre-existing stochastic case, not a regression, and it is now in
+  `KNOWN_STOCHASTIC` with that number. 8.80 reported `fn = 0` in every run; over
+  enough runs that is not true, and saying so is worth more than the clean row.
+- **My own rule made its own construction salient, exactly as 8.79 predicts.**
+  Naming the noun-swap shape cost `approve/semantics-dragon-in-a-can` — one of
+  8.20's original eight — in 1 of 3 runs, with the arrow `can -> cave`. Fixed the
+  way 8.20 and 8.79 fixed theirs: the observed inversion goes into the rule
+  verbatim, refuted at the point it happens. 3 of 3 clean afterwards.
+- **The first two fixture bodies I wrote could not fail.** Recorded in 11.91: an
+  invented past-tense body reproduced a DIFFERENT defect (8.71's tense claim), and
+  its present-tense rewrite reproduced nothing at all, 3 runs each. A case that
+  cannot fail measures nothing, and it would have shipped as evidence.
+
+**11.98 — what is deliberately NOT done, and the residuals with their sizes.**
+
+- **The coordination inversion is reduced, not eliminated.** It is 0 of 6 on the
+  live body in the fixture, and 1 of 3 on a clean re-cut of the same sentences
+  probed separately. The next move is another line in the prompt, and 8.77-8.82 and
+  9.53 are five consecutive measurements of that move costing a different
+  previously-passing case; 8.80's judgement — leave a measured residual rather than
+  chase it — is followed here.
+- **The code check reads only reducible arrows.** A note whose two sides are
+  sentences of different lengths, or a sentence against a single word, yields no
+  pair and the rejection stands. That is 4 of the 5 arrow-bearing notes in the
+  database, on purpose: the alternative is guessing which word the judge meant.
+- **`warm.persist` does not record `sense_claim_overturned`.** The flag lives on
+  `ModerationResult` and prints in the live fixture, so a run can be audited; it is
+  not in the receipt, because `_body_verdict`'s shape is `warm.py`'s and this work
+  does not own that file. Named here so the next pass knows it is missing rather
+  than absent by decision.
+- **The production database on DigitalOcean is untouched and almost certainly
+  holds story 27.** It cannot be repaired from here and must not be. What ships for
+  it is the script, which is free, read-only by default, and exits non-zero while
+  any servable story describes a person's body — the same shape 11.85 gave the
+  prompt backlog.
+
+**Gates, and the spend.**
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **1069 passed, 3
+  skipped**. The brief's baseline was 1030/3; **15** of the +39 are this work's new
+  tests in `tests/test_grammar.py` and the rest arrived in the same shared tree from
+  another agent's commits (`aad2911`…`4604a5f`) while this was in flight.
+- `.venv/bin/ruff check storyforge tests scripts` — all checks passed, and
+  `ruff format --check storyforge/llm/moderate.py` is clean, as it was at HEAD.
+- `python -m storyforge.warm --check-coverage` — GREEN, 33 of 33 pairs, after the
+  sweep pulled story 27 (stage 4 / space 5 -> 4).
+- `python scripts/sweep_person_body.py` — exit 0, `clean`, on a re-run.
+- The live fixture went red before this change and is red-by-residual after it:
+  `assert fp == 0` is not weakened, and `KNOWN_STOCHASTIC` reports the six open
+  rates rather than allowing them (9.54's rule).
+- **`make eval`, `make warm` and `make eval-smoke` were NOT run. Nothing on
+  DigitalOcean was touched.** Live spend, all Haiku, all of it moderation calls:
+  **$3.29** — 12 whole-fixture runs at ~$0.19 (one of them wasted on a crash in my
+  own before-arm harness, recorded rather than netted out) plus four targeted
+  probes at $0.02-$0.04.
+
 ---
 
-## Phase 8 — the tap-a-word question proves a claim about LETTERS and speaks a claim about SOUNDS (11.99-11.104)
+## Phase 8 — the tap-a-word question proves a claim about LETTERS and speaks a claim about SOUNDS (11.110-11.115)
 
 Two HIGH findings from the same root: the phonics question is stated in phonemes
 and verified in graphemes, and §8's evidence denominator throws away every word
 the validator can prove decodable merely because it is also on a sight list.
 Logged **before** the change. Every number below was measured against the live
 local `storyforge` Postgres with the product's own pure functions, read-only
-except for the single-row repair recorded in 11.102. No API call, live spend
+except for the single-row repair recorded in 11.113. No API call, live spend
 $0.00.
 
-**11.99 — one live servable question has no correct answer, and the inventory
+**11.110 — one live servable question has no correct answer, and the inventory
 guarantees more.**
 
 `PROMPT_FRAMES[0]` is *"Tap the word that starts with the same sound as {cue}."*
