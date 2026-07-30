@@ -9976,7 +9976,7 @@ stage a sound is taught at by GRAPHEME, with `min()` over every GPC sharing it.
 target — the only stage-8 onset those stories carry — could never reach the
 `current_stage_onset` tier.
 
-**11.100 — the fix is a narrowing of a closed list, and the cue is what states
+**11.111 — the fix is a narrowing of a closed list, and the cue is what states
 the proposition.**
 
 The cue word is the only sound the child is ever given, so the question's claim
@@ -9998,7 +9998,7 @@ proved, and it is derived from the cue rather than stored in a new field, so a
 Nothing is relaxed anywhere: every clause added removes questions from the legal
 set. §0's gate is untouched — no call to `readable`/`passes_gate` moves.
 
-**11.101 — sight words the validator CAN decode were refused as §8 evidence,
+**11.112 — sight words the validator CAN decode were refused as §8 evidence,
 and that is one reason stage 7 is terminal.**
 
 `sound_targets` dropped every sight/story-bank word from the candidate pool
@@ -10017,29 +10017,188 @@ gate proves decodable at the story's own stage IS evidence. A sight word the
 gate cannot decode at that stage is still refused, which is the case the original
 sentence was about.
 
-**11.102 — the repair: one row, no `answers`, hint moved, `options`/`answer`
-untouched.**
+**11.113 — the repair: one row, no `answers`, hint moved, `options`/`answer`
+untouched, and the gate that keeps it fixed is a test rather than a paragraph.**
 
-Row 11294 carries no recorded answers, so `repair_leaky_cues`' pattern applies
-without any `ON DELETE CASCADE` exposure: `UPDATE questions SET prompt, payload`
-only. `options`, `answer` and every other row are byte-identical afterwards.
-The repaired cue is drawn from the same `cue_candidates` list the node uses,
-filtered to the answer's own GPC id.
+The sweep is `repair_leaky_cues`' pattern with the sound predicate in place of
+the shape one: cue and prompt are pure functions of (grapheme, option set, stage
+vocabulary), so a repaired row is the row the fixed node would have written,
+computed with no API call. `UPDATE questions SET prompt, payload` and nothing
+else — no DELETE, no regenerated row, `options` and `answer` byte-identical —
+because `answers.question_id` is `ON DELETE CASCADE` and an agent has already
+destroyed §8 evidence once by regenerating a question a child had answered.
 
-**11.103 — what this does and does not do to `make promote-check`.**
+```
+row 11294 (story 7319, stage 8, 0 recorded answers)
+  before: 'Tap the word that starts with the same sound as can.'    cue=can    (c|K vs c|S)
+  after : 'Tap the word that starts with the same sound as center.' cue=center
+REPAIRED 1 of 137 row(s); stuck []; carrying answers []
+```
 
-The gate reads the `answer.correct` already persisted on each row, so a change to
-the pure functions cannot move it. It is unchanged, and it is still red. What
-moved is what the pool COULD supply if its questions were re-derived, computed
-with the product's own `sound_targets` → `tap_word_options` → `check_tap_word`
-chain over every servable story. Both halves are reported in the finding, and
-the residual is stated rather than hidden: the remaining terminal stages are a
-SUPPLY problem in the allowlist and the generator, exactly as invariant 15 and
-11.70-11.74 record, and this was filed as one contributor.
+A second run repaired **0** — idempotent. Served through the real route
+(`GET /api/stories/7319`, `DEMO_BYPASS_AUTH`) the row now reads
+`Tap the word that starts with the same sound as center.` over
+`['city','in','had']`, and `target_grapheme` is still absent from the payload.
 
-**11.104 — tests, and the sabotage that proves they can go red.**
+`center` rather than `cell` or `cent` because those two sit at positions 589 and
+640 of stage 8's allowlist and the prompt window is the top 400 — the product's
+own vocabulary, not a hand-picked word. Getting even `center` needed one further
+narrowing, and it is the one place `_cue_index` had to move: it truncated to
+`MAX_CUE_CANDIDATES` **per grapheme**, and stage 8's 24 shortest, commonest `c`
+words are every one of them `c|K`, so filtering by sound afterwards left the
+soft-`c` question with an empty candidate list. The cut is now per SOUND, before
+the merge. The returned dict stays keyed by grapheme (`warm.repair_leaky_cues`
+reads it that way) and is a superset ordered by the same comparator, so its first
+`limit` entries are exactly what it returned before and no existing caller's
+choice moves.
 
-Recorded with the change.
+**What keeps it repaired is `test_the_live_pool_asks_no_question_whose_cue_names_a_different_sound`**,
+which reads every servable row as the child gets it and is spelled out of the
+decoder rather than through `check_tap_word`, so a bug in the judge cannot make
+its own invariant pass. 11.84's lesson applied: the pool went 125-for-125 wrong
+for two phases because the record was a paragraph in this file, and a paragraph
+does not go red.
+
+**11.114 — what this does and does not do to `make promote-check`, measured both
+ways.**
+
+`stage_supply` reads the `answer.correct` already persisted on each row, so a
+change to the pure functions cannot move it, and it did not: the gate's output is
+**byte-identical with this change stashed and unstashed**, run back to back. It is
+still red. (The table did move between the run at the start of this work and the
+run at the end — six terminal stages to five — because other agents were
+enriching the same pool concurrently. None of that movement is this change's, and
+the stash/unstash pair is what proves it.)
+
+What DID move is what the pool would supply if its questions were re-derived,
+computed over every servable story with the product's own
+`sound_targets` → `tap_word_options` → `check_tap_word` chain plus 11.67's second
+question — one pool, one diff between the two columns:
+
+```
+stage   whole pool          best 5        note
+        before -> after   before -> after
+  1       71 ->  71        18 -> 18
+  2       16 ->  20        10 -> 10
+  3       10 ->  15         8 -> 10       clears the floor
+  4       22 ->  22        10 -> 10
+  5       17 ->  17        10 -> 10
+  6       11 ->  11         7 ->  7
+  7       12 ->   9         8 ->  5       REGRESSES, and becomes terminal
+  8       14 ->  11        10 ->  8       REGRESSES
+  9        8 ->  12         7 -> 10       clears the floor, stops being terminal
+ 10        3 ->   3         3 ->  3       terminal either way
+```
+
+**The stage-7 regression is real and it is reported rather than buried.** It is
+not the phoneme work; it is `_prefer_current_stage` returning ONLY the winning
+tier. Stage-7 stories 7302, 7306 and 9110 used to offer five or six older sounds
+and got 11.67's second question out of them — and those questions still credited
+`ou|AW`, because `stage_evidence` counts every introduced GPC in the credited
+word, not only the onset. Narrowed, all three now offer exactly one sound (`ou`,
+the sound the stage teaches), so there is no second grapheme left to ask about
+and the story is worth 1 instead of 2. Better pedagogy, less evidence.
+
+That is a THIRD finding and it is not this one: *a story that GAINS a
+current-stage onset can lose half its §8 supply, because the extra question may
+only draw from the winning tier.* Measured as a one-line experiment that is
+deliberately NOT shipped here — appending the lower tiers behind the winning one
+instead of discarding them:
+
+```
+stage      2   3   4   5   6   7   8   9  10
+best 5    10  10  10  10  10  10  10  10   3
+```
+
+Every gated stage but 10 reaches the floor. It is not shipped because it changes
+what the MODEL is offered — `build_sound_block` prints every target — so the
+FIRST question could then be about an older sound, which is exactly the §8
+preference `_prefer_current_stage` exists to hold. Letting only 11.67's *extra*
+question draw from the remainder would keep both, and that is a change to the
+tier contract deserving its own finding, its own measurement and its own review.
+
+The stages that remain terminal are 6, 7, 8, 9 and 10, and the reason is
+unchanged from invariant 15 and 11.70-11.74: SUPPLY. Nine stories worth one
+observation each cannot reach a floor of ten. This was filed as one contributor
+and it is reported as one.
+
+**11.115 — tests: ten added, one replaced under `justify-test-edit`, eight
+sabotages each restored and verified restored.**
+
+Added to `tests/test_questions.py`:
+
+| test | proposition |
+|---|---|
+| `test_the_live_question_with_no_correct_answer_is_refused` | row 11294 reproduced verbatim and refused |
+| `test_a_cue_whose_sound_differs_from_the_answers_is_never_offered` | the menu never composes it |
+| `test_a_distractor_that_starts_with_the_answers_sound_is_refused` | the mirror: `cup` over `cap`,`kid`,`sat` |
+| `test_a_word_that_spells_the_targets_sound_another_way_is_not_a_distractor` | `kid` leaves the `c` menu, `cap`/`cat` leave the `k` menu |
+| `test_no_distractor_of_an_offered_triple_shares_the_answers_sound` | the property over every offered triple |
+| `test_the_stage_a_sound_is_taught_at_is_keyed_per_gpc_not_per_letter` | soft `c` is a stage-8 sound |
+| `test_a_sight_word_this_stage_can_sound_out_carries_its_sound` | `out` at stage 7 offers `ou` |
+| `test_a_sight_word_this_stage_cannot_sound_out_is_still_refused` | `out` at stage 1 does not |
+| `test_a_sight_word_this_stage_can_sound_out_IS_offered` | `dragon`, a STORY word, is decodable at stage 2 |
+| `test_the_live_pool_asks_no_question_whose_cue_names_a_different_sound` | the property over the real pool |
+
+**One existing assertion was edited and the `justify-test-edit` verdict is
+recorded at the site, in the replacement's own docstring.**
+`test_sight_and_story_words_are_never_offered` asserted
+`not offered & set(SIGHT)` and `not offered & set(STORY_WORDS)` because *"the
+child has not sounded them out ... and a story word is not decodable by design
+(§5.5)"*. **The second clause is factually false and the fixture itself proves
+it**: `validate_word("dragon", mastered_ids(2))` is DECODABLE with alignment
+`['d|D','r|R','a|AE','g|G','o|AA','n|N']`, and so is `the` (`['th|DH','e|EH']`).
+The first clause contradicts the function that awards the credit —
+`mastery.word_gpc_ids` passes no sight set, and
+`test_mastery.py::test_a_word_that_is_a_sight_word_but_also_decodable_still_counts`
+already says *"at which point a correct tap IS evidence"*. Verdict: **TEST IS
+WRONG** — its contract was replaced by the cited decision in 11.112 and its
+stated rationale is independently false. It was not weakened: the surviving half
+is asserted precisely (`test_a_word_this_stage_cannot_sound_out_is_never_offered`
+requires `word_graphemes(...) is not None` of every offered word and names `is`,
+`was`, `he`, `fire`, `cave` as still refused) and the changed half is asserted as
+a fact rather than as an absence.
+
+Blast radius, checked and reported rather than edited — three PROSE references in
+files this change does not own go stale, none of them an assertion:
+`test_stage_coverage.py::test_sight_words_are_never_offered`'s docstring and
+`test_mastery.py`'s both cite `sound_targets` as the reason their own (unrelated)
+assertions hold, and `llm/generate.py:224` says *"`questions.sound_targets`
+refuses them as tap-a-word options"*. All three still pass.
+
+**Sabotage — eight, each restored and verified restored.** Seven against the
+code, one against the data. The record is what actually went red.
+
+| sabotage | result |
+|---|---|
+| the cue-sound proof in `check_tap_word` removed | RED: `test_the_live_question_with_no_correct_answer_is_refused` |
+| the distractor-sound proof removed | RED: `test_a_distractor_that_starts_with_the_answers_sound_is_refused` |
+| `stage_of` keyed by letter again (`min()` over the grapheme) | RED: `test_the_stage_a_sound_is_taught_at_is_keyed_per_gpc_not_per_letter` |
+| the blanket sight/story exclusion restored | RED x2: both 11.112 tests |
+| the cue not filtered to the target's GPC | RED: `test_a_cue_whose_sound_differs_from_the_answers_is_never_offered` |
+| the clean list allowed to share the target's sound | RED x2: the `kid` test and the triple property |
+| targets grouped by first LETTER again | RED x2 — this is the finding itself |
+| the DATA: row 11294 set back to `cue_word='can'` after the repair | RED: the live-pool test, naming `(11294, 7319, 8, 'can', 'city')`. Re-running the repair returned it to green; a third run repaired 0 |
+
+**Gates.**
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **1069 passed,
+  3 skipped**. `tests/test_questions.py` goes 83 -> 93 test functions (+10, one of
+  which replaces one); the rest of the movement from the 1030 baseline is other
+  agents' concurrent work in this same tree.
+- `.venv/bin/ruff check storyforge/llm/questions.py tests/test_questions.py` — all
+  checks passed. (A repo-wide `ruff check` is red on `tests/test_warm_coverage.py`,
+  which another agent is mid-edit on and this change does not touch.)
+- `make promote-check` — unchanged by this diff, proved by running it with the
+  diff stashed and unstashed; still red, still a supply problem.
+- **No `make warm`, no `make eval`, no model call, nothing touched on
+  DigitalOcean. Live spend $0.00.**
+
+**Residual, and it is a one-line handoff.** `warm.repair_leaky_cues` re-cues a row
+from `cue_candidates(...).get(grapheme, [])` with no sound filter, so it can still
+put a `c|K` cue on a `c|S` answer while fixing a SHAPE leak. `warm.py` is not this
+change's file. The fix is the clause `sound_targets` now applies —
+`onset_gpc(candidate, mastered) == onset_gpc(correct, mastered)` — and the
+live-pool test added here is what would catch it if it ever fired.
 
 ## Phase 8 — §8's evidence guard is a read-then-write, and concurrency forges it (6.28-6.31)
 
