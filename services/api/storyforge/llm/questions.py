@@ -636,6 +636,31 @@ def prompt_leaks_answer(
     return sorted(leaked)
 
 
+def mcq2_pair(payload: object, answer: object) -> tuple[str, str] | None:
+    """The (true, false) answers a PERSISTED `mcq2` row is asking about.
+
+    `check_mcq2` judges a draft, which carries the pair as two named fields; a
+    row in the pool carries the same pair as `payload.options` (shuffled, so the
+    order says nothing) plus `answer.correct`. This is the one place that
+    reverses the shuffle, so a sweep over the pool can hand `prompt_leaks_answer`
+    exactly what the generator hands it and the two cannot end up judging
+    different strings.
+
+    ``None`` for a row this cannot be read out of — no `correct`, or no second
+    option distinct from it. A caller must treat that as "unknown", never as
+    "clean": the row is malformed, not proven innocent.
+    """
+    options = payload.get("options") if isinstance(payload, dict) else None
+    correct = str((answer or {}).get("correct") or "").strip() if isinstance(answer, dict) else ""
+    if not correct or not isinstance(options, list):
+        return None
+    incorrect = next(
+        (o for option in options if (o := str(option).strip()) and o.lower() != correct.lower()),
+        "",
+    )
+    return (correct, incorrect) if incorrect else None
+
+
 def negation_pair(correct: str, incorrect: str) -> bool:
     """Is one answer just the other with `not` added or removed?
 
