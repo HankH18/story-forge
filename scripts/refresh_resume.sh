@@ -145,14 +145,24 @@ provider connected. §17's demo runs end to end; its playground step is now
   your change. \`git clone --no-hardlinks . /tmp/x\` gives a real repo at HEAD
   with the in-flight edits excluded. (The eval renderer itself is honest here —
   it prints "dirty-tree state NOT RECORDED" rather than claiming clean.)
-- **Do not run the suite while several agents are live.** Four concurrent
-  pytest runs against the one Postgres produce \`connection refused\` bursts and a
-  DIFFERENT set of failures every run, while the container still reports healthy
-  at 16/100 connections. Varying failures across runs means contention, not a
-  regression — wait for the agents, then gate once.
+- **Postgres is on port 5433, NOT 5432.** \`services/api/.env\` is the authority;
+  read the port out of it rather than typing one. Hardcoding 5432 gives
+  \`connection refused\`, which surfaces as a DIFFERENT set of test failures on
+  every run — because each run fails wherever it happened to need the database
+  first. That looks exactly like concurrent-writer contention and it is not: it
+  is the wrong port. I diagnosed it as contention, wrote that here as a lesson,
+  and was wrong; an agent running against the right port got 1133 passed on the
+  same tree at the same moment. **Varying failures mean a broken connection far
+  more often than they mean a race.** Prove which by connecting once by hand.
+- **Real contention does exist and looks different.** When several agents run
+  suites at once you get 1-2 failures that MOVE between runs and pass in
+  isolation (\`test_story_stage_binding\`, \`test_phase2\`, \`test_stories_api\`).
+  The fix is the private DB copy below, not waiting.
 - **Measure against a private DB copy** when anything else is writing:
-  \`docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfscratch'\`
-  then \`DATABASE_URL=.../sfscratch\`. A green shared-DB run is as untrustworthy as a red one.
+  \`docker exec storyforge-db psql -U storyforge -d postgres -c 'CREATE DATABASE sfscratch'\`
+  then \`docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -q -U storyforge -d sfscratch'\`
+  then \`DATABASE_URL=postgresql+psycopg://storyforge:storyforge@localhost:5433/sfscratch\`
+  — note **5433**. A green shared-DB run is as untrustworthy as a red one.
 - **Never \`git add -A\` while an agent is live.** I did, four times, and committed
   another agent's half-finished work under a message describing something else.
 - **Never test auth against a bypassed server.** \`/api/health\` reports
