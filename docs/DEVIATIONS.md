@@ -11546,3 +11546,267 @@ tension, it needs a design decision (a portrait height cap on the art is the
 obvious candidate, and §06's "full card width" is the sentence it argues with),
 and this pass deliberately does not take it — the front end's job was to stop the
 page pretending to be finished, and it does that in portrait too (verified).
+
+## Phase 8 — the title passed none of §13's three layers, and five schemas typed the ladder's length (17.1-17.3)
+
+Three findings from one adversarial pass. The first is a child-safety claim the
+README makes and the code did not honour. The second is a single source of truth
+that existed, was documented as existing, and was not used. The third is an audit
+whose stated premise turned out to be **false**, and which is recorded here in
+full because a withdrawn finding is worth as much as a fixed one.
+
+### 17.1 — the story `title` is model-authored child-facing text and passed ZERO of §13's three layers
+
+§13: *"All child-facing text passes: deterministic blocklist → allowlist-constrained
+generation → moderation node. Three independent layers."* The README repeats it as
+*"Every child-facing string passes three independent layers."*
+
+The title passed none. One line explains all three:
+
+```python
+def draft_text(draft: StoryDraft) -> str:
+    return " ".join(seg.text.strip() for seg in draft.segments).strip()
+```
+
+`run_pipeline` builds `body = draft_text(draft)` and hands that same `body` to
+`validate_draft` (layer 2) and to `moderate` (layer 3) — and `blocklist_check`
+(layer 1) runs *inside* `moderate`, on whatever `moderate` was given. The title is
+not in `draft_text`, so one omission removed all three layers at once. It is
+assigned raw (`result.title = draft.title`) and persisted by `warm.persist`.
+
+**Measured, not asserted, over the live pool (119 servable stories):**
+
+| Layer | Applied to the title? | Live measurement |
+|---|---|---|
+| 1 blocklist | no | **0 of 119** titles carry a hit — the hole was unexploited, not absent |
+| 2 allowlist-constrained generation | no | **28 of 119 (23.5%)** use a word that would fail the very gate their own body had to clear |
+| 3 moderation | no | never judged; 119 unjudged titles are still in the pool |
+
+The layer-2 row is the proof, not the complaint. `StoryDraft.title`'s schema says
+*"Three to six words, from the permitted vocabulary"* — and §0 says the LLM is an
+untrusted generator. 28 titles (`Sam Goes To The Moon`, `The Rabbit Finds Home`,
+`Jack Flies Past The Stars`, `Sam And Dan In Space`, `Tom Rides The Rocket`) show
+the instruction being ignored roughly a quarter of the time with nothing to notice.
+
+**Was it live or latent?** Latent, and the audit brief's phrasing — *"displayed to
+a five-year-old"* — is not true today. Nothing under `apps/web/src/routes/`
+renders `story.title` in kid mode; it is rendered on the **parent** dashboard
+(`ParentDashboard.tsx`) and in the admin cold-generate view. It is nonetheless
+persisted to `stories.title`, returned on every `StoryDTO` (`api/stories.py`),
+and written into that reader's own device storage by `lib/lastStory.ts`, whose
+shape check requires `typeof story.title === 'string'`. It was one
+`<h1>{story.title}</h1>` from being live, and the README's claim was false either
+way. **The finding stands; the word "displayed" does not.**
+
+**The fix: one call, not two.** `child_facing_text(title, body)` puts the title
+into the string the existing MODERATING node already judges. That buys layer 1
+and layer 3 together, because layer 1 lives inside `moderate()`.
+
+Why not a second `moderate()` call on the title alone — which was the first
+design and was discarded: `_moderate_questions` already measured what happens
+when `moderate()` is handed something that is not a short story. *"Handed a whole
+question block it rejects 16 of 16 live cases as 'not a coherent story'."* A bare
+six-word noun phrase is further from a story than a question block is. A title
+**above** its story is exactly what a children's book looks like — and it costs
+no extra API call.
+
+Why labelled `Title: ` rather than prepended bare: the same call carries the
+grammar half of the verdict (4.12), and a bare noun phrase read as prose invites
+a `well_formed = false` that would cost the story. The label is asserted not to be
+a blocklist entry, so it cannot manufacture a layer-1 hit of our own making.
+
+**`MODERATION_SYSTEM` is byte-identical.** STATE invariant 5 is explicit that every
+one of the four previous passes at that prompt broke a case that had been passing,
+and that naming a construction moves the judge in both directions. Nothing was
+named. `tests/test_grammar.py::FIXTURE` — the 40-case live fixture — therefore
+still describes this judge exactly, and `child_facing_text("", body) == body`, so a
+titleless story's verdict cannot have moved.
+
+### 17.1a — what is deliberately NOT done: the title is not gated on decodability
+
+The brief warned that a prior agent inferred a §11.3 decodability requirement that
+does not exist, and that the wrong inference cost 71 of 125 rows their meaning.
+The same trap is live here, so the reasoning is recorded rather than left implicit.
+
+**The build doc contains the word "title" zero times.** The only line in it that
+requires a rendered string to pass the validator is §10:
+
+> "Choice labels must themselves pass validation (they're rendered text)."
+
+That names choice labels. It does not name titles, and §6's constraint sentence is
+scoped the same way — *"Output schema: story **segments** with text only from
+allowed material."*
+
+Gating the title on decodability would therefore reject ~24% of generation to
+enforce a rule nobody wrote. Worse, it would corrupt a §1 acceptance metric:
+`stories.decodability` is a fact about the BODY, and folding the title into
+`draft_text` would silently change what that number measures.
+
+Note also what the 28 offending words actually are — `goes`, `finds`, `flies`,
+`rides`, `rabbit's`. Every one is excluded from `allowed_words` for a
+**decodability** reason (`oe`, `-es` on an irregular, a possessive), not a safety
+one. A vocabulary gate on titles would be a decodability gate wearing a safety
+hat. `test_the_title_is_deliberately_not_gated_on_decodability` pins the
+non-requirement so the next reader does not re-derive it wrongly.
+
+Layer 2's *safety* contribution — that the generator can only reach for pre-vetted
+words, which is what keeps brands and real people out of the body — is delivered
+for the title by layer 3 instead: `MODERATION_SYSTEM` already carries the bullet
+"Real brands, real people, or real places presented as real", and it now reads the
+title.
+
+### 17.1b — every other child-facing string, swept
+
+The brief asked the same question of every string that reaches a child. Answered
+in full so the README's claim can be read against a table rather than a hope.
+
+| String | Author | L1 | L2 | L3 | Note |
+|---|---|---|---|---|---|
+| segment body | model | yes | yes | yes | the path everything else is measured against |
+| **story `title`** | **model** | **now** | n/a (see 17.1a) | **now** | this finding |
+| `mcq2` prompt + options | model | yes | yes | yes | `_moderate_questions` (5.12) |
+| `tap_word` prompt + cue + options | frame + allowlist | yes | yes | **exempt** | `LAYER3_EXEMPT_QTYPES` — a fixed `PROMPT_FRAMES` frame, a cue from the precomputed allowlist, and `check_tap_word` refuses any option that is not already a word of the moderated story. Documented, justified, unchanged. |
+| `choice_label` | **nobody** | — | — | — | branching is not live; `warm.persist` never sets it and `StoryDraft` has no branch field. §10 *does* require these to pass validation and **no code implements that** — a latent gap with nothing to fix today. Recorded, not built. |
+| theme `display_name` / `emoji` | `data/seed/themes.csv` | no | no | no | seed data we authored and reviewed |
+| `assets.alt_text` | `data/seed/assets.csv` | no | no | no | hand-authored, and accessible-name only — `SegmentArt.tsx` forbids rendering it as visible text |
+| `story_word_bank.gloss` | `data/seed/story_words.csv` | no | no | no | never rendered at all; prompt input only |
+| `scene_tags` | model | n/a | closed enum | n/a | `SceneTag` StrEnum; not rendered |
+| kid `display_name` | **a parent** | no | no | no | free text typed by an adult, rendered full-screen as "hello {name}". Guarded by an allowlist regex in `api/kids.py` + a DB CHECK, which that file's own docstring already calls out as structurally the same hole arriving by a different door. Left as is — the guard is real and a moderation call on a child's name is the wrong instrument. |
+| all kid-mode UI copy | **us, in source** | no | no | no | not the same risk class: source-reviewed, in the diff, and unable to change without a commit. Named here rather than churned. |
+
+So the honest form of the README sentence is: *every child-facing string a MODEL
+writes* passes three layers, with `tap_word` explicitly exempt from layer 3 for a
+stated and measured reason. Strings we or a parent author are governed by review
+and by type constraints instead.
+
+### 17.1c — the backlog, and the half of it that is not covered
+
+Fixing generation does not fix rows already written, and this project has been
+burned by exactly that four times (6.24 the discarded grammar verdict, 11.82-11.85
+the retired prompt frames, 11.99-11.103 the unrun mcq2 repair, 11.117 the archive
+erased by its own backfill).
+
+`test_the_live_pool_holds_no_servable_story_with_a_blocklisted_title` asserts
+layer 1 over every servable row. It is a pure function and one query, so it costs
+nothing and runs on every commit. Sabotage-checked by planting `The Cat Will Kill`
+on story 2 inside a transaction that was then rolled back; the sweep found it.
+
+**Layer 3 over the backlog is NOT done.** Re-judging 119 titles is a Haiku spend,
+and the audit was explicitly not authorised to spend. It is the one open item from
+this finding — and it is written down as open rather than quietly counted as done,
+which is the specific failure the four incidents above have in common.
+
+### 17.2 — five schemas typed the ladder's length; `MAX_STAGE` existed and was not used
+
+The renumber from twelve stages to eleven (12.1-12.14, migration `f3a91c6d0e24`)
+edited the ceiling **by hand** in five Pydantic schemas, one range check, one
+error message and two CLI defaults, while `MAX_STAGE` sat in
+`storyforge.decoder` — already re-exported into `storyforge.mastery` precisely so
+there would be one source of truth.
+
+Every hand edit was made correctly. **The defect is that nothing could tell.**
+`tests/decoder/test_inventory.py` pins `MAX_STAGE == 11`; past that, every
+assertion about a *request* bound was a literal. `test_phase2.py` probes
+`stage_id: 99` and expects 422, which passes for any ceiling below 99.
+`test_admin.py` pins the error *string* `"within 1..11"`. A renumber to twelve
+would leave five schemas silently refusing the top stage under a green suite.
+
+Now derived: `api/validate.py`, `api/kids.py`, `api/stories.py`, `api/admin.py`
+(the `Query`, the `Field`, the `1..11` range check **and its message**),
+`eval.DEFAULT_STAGES`, `warm.DEFAULT_STAGES`, eval's `--stages` help text, and
+`ParentDashboard.tsx`'s "Stage 11 is the last stage" — from the server's own
+`from_stage`, which IS the top of the ladder whenever `to_stage` is null.
+
+**Cannot derive, so pinned instead** (`tests/test_stage_bounds.py`):
+
+- `data/seed/stages.csv` is asserted against `MAX_STAGE` here. `apps/web`'s
+  `SEEDED_STAGES` is already asserted against that CSV by `seeds.test.ts` (8.61),
+  so the chain **MAX_STAGE → CSV → TypeScript** closes without a second copy of
+  the number in TypeScript.
+- the `stages` **rows**, because there is no SQL `CHECK` on `stage_id` anywhere:
+  every other table reaches the ladder through this table's foreign key, so
+  `max(stages.id)` *is* the database-side bound.
+
+The request-bound test is a **sweep over the generated OpenAPI document**, not a
+list of four file paths: it finds every bound on a stage-shaped field, so a bound
+added tomorrow is covered by a test written today — and it names the four schemas
+it expects to find, so it cannot pass over an empty set (the `_UNENRICHED_SQL`
+failure of 11.99 reached by another route).
+
+Sabotage, both directions, because the two halves fail on opposite events:
+
+| Sabotage | Result |
+|---|---|
+| `MAX_STAGE` 11 → 12 | CSV + `stages`-table tests RED. The derived tests stay green — which is the point of deriving: a renumber needs a data change and must say so out loud. |
+| one bound put back to a literal `le=10` | the OpenAPI sweep names the exact JSON path |
+
+### 17.3 — §18's "bind-address control": the premise is FALSE, and here is what is actually there
+
+The audit brief said *"§18 specifies how the service binds."* **It does not.**
+§18 (*Risks & Fragility Audit*, lines 306-314 of the build doc) contains no
+requirement about network binding, and the whole document contains zero
+occurrences of `bind`, `0.0.0.0`, `127.0.0.1`, `localhost` or `--host`. Recorded
+as withdrawn rather than quietly dropped — this is the fifth finding in this
+project to be withdrawn as a measurement artefact.
+
+**What §18 actually specifies about deployment is one line:** *"Clerk outage
+during demo: `DEMO_BYPASS_AUTH=true` env flag renders a fixed parent session
+locally. **Never enabled in prod deploy.**"* Audited against the code and against
+the running system:
+
+| Question | Answer |
+|---|---|
+| Is the §18 control enforced or documented? | **Enforced.** `auth.assert_demo_bypass_is_local()` runs at module import *and* inside the grant branch, over six signal families (env names, ~30 platform vars by presence, `PORT`, container filesystem markers, DB host, `sk_live_` key). |
+| Does the deployed container match? | **Yes, read back from the live system, not assumed.** `GET https://storyforge-vtwne.ondigitalocean.app/api/health` → `"demo_bypass_auth": false`, and the response carries `x-storyforge-auth: enforced`. |
+| Where does the service bind? | `services/api/Dockerfile` → `--host 0.0.0.0 --port ${PORT:-8080}`, correct for a container behind App Platform's router. `Makefile` and `scripts/dev.sh` pass **no** `--host`, so a laptop gets uvicorn's 127.0.0.1 default; `vite.config.ts` sets no `host`. The only `0.0.0.0` in the repo's runtime path is the Dockerfile's, and nothing makes the bind env-configurable. |
+
+**The one real gap, which the code documents against itself** (`auth.py`,
+`deployment_signals`): *"This is mostly a list of negative signals, and that is
+its weakness… The remaining half of the inverse control — refuse unless the
+process is bound to `127.0.0.1` — is still not taken, because the bind address
+does not exist yet when this runs (this module is imported before uvicorn has a
+socket); see 8.66."* That is almost certainly what the brief was pointing at, and
+it is still open. **Not implemented here** — it is a new auth control whose whole
+value is behaviour at a real socket, and the test suite drives the app through an
+ASGI transport that has no socket at all. A green test for it would be evidence
+of nothing.
+
+**What was closed instead, because it was free and nothing covered it:**
+`tests/test_deploy_spec.py` asserts the committed `.do/app.yaml` itself. That file
+calls `ENVIRONMENT: production` a *"§18 TRIPWIRE — do not remove to make something
+work"* and explains that `DEMO_BYPASS_AUTH` is *"deliberately ABSENT rather than
+set to `false`"* — and both statements were enforced by nothing at all. The value
+of a tripwire is that someone debugging a broken deploy at 3am cannot start the
+container by deleting one line; a comment saying "do not remove this" is
+removable, and a red suite answers back. Asserted through
+`auth.is_deployed_env_value` rather than against the string `"production"`, so if
+the guard's notion of a deployed value ever narrows the test moves with it.
+
+Sabotage: deleting the `ENVIRONMENT` block → 2 red; adding `DEMO_BYPASS_AUTH:
+"false"` → 1 red; `ENVIRONMENT: main` → 1 red. (`ENVIRONMENT: prodcution`, a
+typo, stays GREEN — correctly: the guard matches the `prod` prefix, so the typo
+really is still a deployed signal.)
+
+### 17.4 — not fixed here, and why
+
+- **Layer 3 over the 119 existing titles.** Real money; the audit was not
+  authorised to spend. Open, and named as open (17.1c).
+- **The positive bind-address half of the §18 guard.** Needs a real socket to be
+  evidence of anything (17.3).
+- **`choice_label` has no validation path** and §10 requires one. Branching is not
+  live and nothing generates a label, so there is nothing to gate today. Building
+  the gate before the feature would be a check with no subject.
+- **`eval.parse_stages` is unbounded where `warm.parse_stages` is bounded.** Real
+  asymmetry, and `warm.py`'s docstring already records it. Adding the bound is a
+  CLI behaviour change to the one command that spends money, and
+  `api/admin.py` already bounds the same parser on the route that a client can
+  reach. Reported, not changed.
+- **`tap_word`'s layer-3 exemption.** Deliberate, documented and reasoned
+  (`LAYER3_EXEMPT_QTYPES`). Not weakened, not widened.
+- **Hardcoded kid-mode UI copy, theme names, `alt_text`, glosses.** Authored by
+  us in source or in `data/seed/`, in the diff, and unable to change without a
+  commit. A different risk class from model output; named rather than churned.
+- **Stale `12`s in prose** (`docs/EVAL.md` line 25's `--stages 1..12`,
+  `apps/web/src/lib/api.ts` and `AdminEvalRun.tsx` doc comments, `AddKid.tsx`'s
+  "twelve radios"). Documentation drift, not a bound; other agents hold those
+  files in this worktree and a doc sweep is not this audit's remit.
