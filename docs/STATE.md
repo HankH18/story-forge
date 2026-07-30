@@ -43,7 +43,8 @@ Lint: `cd services/api && uv run ruff check storyforge tests`.
 
 ## Commands
 ```
-make dev | test | seed | precompute | warm | warm-check | promote-check | prompt-check | warm-plan
+make dev | test | seed | precompute | warm | warm-plan
+make warm-check | promote-check | prompt-check | mcq2-check      # the four gates
 make eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
@@ -65,7 +66,20 @@ re-derives a prompt already in the pool, so for two phases every child was read 
 retired sentence — 66 of 120 of which never said what the task was — under a green
 suite and two green gates. Its remedy is `--backfill`, which re-derives prompts in
 place with no API call and never DELETEs a row §8 evidence hangs off.
-All three are free, and none implies the others.
+**`make mcq2-check` (`--check-mcq2`) is the FOURTH gate and `prompt-check`'s other
+half** — non-zero while a servable `mcq2` row is one the current `check_mcq2` would
+refuse: the question names the word distinguishing its own two cards, or the false
+card is the true card with `not` in it. GREEN today, and it was **37 of 70 RED**
+until DEVIATIONS 11.99-11.103, **7 of them pointing the child at the WRONG card**.
+Same trap a third time: 11.64 fixed the generator, `--mcq2-repair` was written and
+never run, and `_UNENRICHED_SQL` cannot see a leaking question because all its
+clauses ask what a story is MISSING. Its remedy is `--mcq2-repair` (a DELETE whose
+two refusals are SQL predicates: it cannot cascade a recorded answer and cannot
+leave a story with no question) followed by `--backfill`. **Two rows are pending an
+operator decision** — q22 and q706, both `complete`, both carrying 2 recorded
+answers, q706 pointing at the wrong card — and the gate prints them on every run
+without setting its exit code (11.103).
+All four are free, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
 `reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest
@@ -134,7 +148,11 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     is reachable inside §8's five stories. **Never lower the floor to make this
     green** (5.5: it is what stops one lucky tap promoting a child) — the remedy
     is supply, and at stages 9-11 it is the allowlist, not the question count
-    (DEVIATIONS 11.70-11.74).
+    (DEVIATIONS 11.70-11.74). **Now five terminal, not six** (`[6, 7, 8, 9, 10]`;
+    8 of 10 stages below the floor, stage 3 promotable and stage 5 clearing it):
+    the `--backfill` that re-enriched 37 mcq2-stripped stories wrote 11.67's
+    `extra_tap_words` and the pool gained 17 `tap_word` rows. Still RED, and the
+    invariant is the shape, not the number (DEVIATIONS 11.99-11.103).
 16. **Every sound `sound_targets` offers is provably answerable, and `tap_word` has
     a pure-function proposer of last resort.** A tier of `_prefer_current_stage`
     fires on answerability, not non-emptiness — "first non-empty tier" handed stage

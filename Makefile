@@ -11,10 +11,13 @@ WEB := apps/web
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
         migrate seed precompute warm warm-check promote-check prompt-check \
-        warm-plan eval eval-smoke codegen clean
+        mcq2-check warm-plan eval eval-smoke codegen clean
 
+# `[0-9]` is load-bearing: `mcq2-check` was invisible to `make help` without it,
+# which is a target that exists and cannot be discovered — the same class as a
+# gate that is never run. A digit in a target name must not hide it.
 help: ## List available targets
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-14s\033[0m %s\n", $$1, $$2}'
 
 install: ## Install API and web dependencies
@@ -112,6 +115,21 @@ promote-check: ## Refuse a pool no child can be promoted from: non-zero while an
 # answer.
 prompt-check: ## Refuse a pool serving tap-a-word instructions no current frame produces
 	cd $(API) && uv run python -m storyforge.warm --check-prompts
+
+# The FOURTH gate, and `prompt-check`'s other half: that one reads what a
+# tap-a-word question SAYS, this one reads what a two-choice question says.
+# DEVIATIONS 11.64 taught `check_mcq2` to refuse a question that names the word
+# distinguishing its own two answers, and a false card that is the true card with
+# `not` in it. Both refusals apply to DRAFTS, so they reached none of the 37
+# servable rows already doing it — `_UNENRICHED_SQL` selected zero stories,
+# because every clause it has asks what a story is MISSING and a leaking question
+# is present, moderated and countable. That is the third occurrence of the same
+# forward-only trap (6.24, 11.82). 7 of the 37 pointed the child at the WRONG card.
+# Free: one query per (stage, theme) for the sight words, no API client. The
+# repair is `--mcq2-repair` (a DELETE that cannot cascade a recorded answer or
+# empty a story) followed by `--backfill` (DEVIATIONS 11.99-11.103).
+mcq2-check: ## Refuse a pool serving two-choice questions answerable without reading the story
+	cd $(API) && uv run python -m storyforge.warm --check-mcq2
 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run

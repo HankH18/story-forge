@@ -131,6 +131,8 @@ python -m storyforge.warm --check-coverage   # MANDATORY. Non-zero = partial poo
 python -m storyforge.warm --check-promotability  # MANDATORY. Non-zero = no child can be promoted. Free.
 python -m storyforge.warm --check-prompts    # MANDATORY. Non-zero = retired instructions. Free.
 python -m storyforge.warm --backfill         # ^ that check's remedy. No API call when nothing is unenriched.
+python -m storyforge.warm --check-mcq2       # MANDATORY. Non-zero = questions answerable unread. Free.
+python -m storyforge.warm --mcq2-repair      # ^ that check's remedy, then --backfill again.
 ```
 
 - `make seed`'s `migrate` prerequisite is already satisfied by the PRE_DEPLOY job.
@@ -236,6 +238,35 @@ with it. (`--backfill` *does* call Haiku for a story whose questions are missing
 or unmoderated; run `--check-prompts` first and you will know which case you are
 in.) Run both after **any** restore from a dump, and after any deploy that changes
 `PROMPT_FRAMES`.
+
+### `--check-mcq2` is the same check for the OTHER question type
+
+A two-choice question (§11.3) is free text a model wrote about one story's plot,
+so nothing can re-derive it and `--backfill` cannot repair one. What the build can
+do is *refuse* it, and DEVIATIONS 11.64 taught `check_mcq2` two pure refusals: the
+question must not contain the word that distinguishes its own two cards, and the
+false card must not be the true card with `not` in it. **Both apply to drafts**, so
+they reached none of the rows already in the pool — 37 of 70 servable rows were
+answerable by matching the question's letters against the two cards with the story
+unread, and **7 pointed the child at the WRONG card**:
+
+```
+  q706 story 14 stage 2: 'Was the dragon glad?'
+       true 'A man was glad.' / false 'The dragon was glad.'   <- letter-matching is graded wrong
+```
+
+`--check-coverage`, `--check-promotability`, `--check-prompts` and the whole suite
+were green throughout, because none of them reads an `mcq2`'s text.
+
+**Its remedy is `--mcq2-repair` followed by `--backfill`.** The repair is free and
+DELETEs, which is the one place in this module that does — and both of its
+refusals are SQL predicates rather than Python conditions, so the statement cannot
+cascade a recorded answer away (`answers.question_id` is `ON DELETE CASCADE`) and
+cannot leave a story with no question at all. It writes a receipt on each stripped
+story so `--mcq2-repair` today and `--backfill` tomorrow still compose. Rows the
+repair is forbidden to touch are printed under `DECISION REQUIRED` on every run
+and deliberately do **not** set the exit code: their only remedy is a human
+deciding whether to erase a child's recorded answers (DEVIATIONS 11.99-11.103).
 
 ## 5. One manual Clerk step the API cannot do for you
 

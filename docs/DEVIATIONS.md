@@ -10350,6 +10350,13 @@ genuine tension with 11.84 rather than a copy of it:
    of those, so that choice cost nothing. Here it is two rows, live today, whose
    only remedy is a deletion this sweep is forbidden to make.
 
+**One more thing the Makefile target found about itself.** `make help` greps
+`^[a-zA-Z_-]+:.*?## `, so `mcq2-check` — the first target in this project with a
+digit in its name — was added, worked, and did not appear in `make help`. A target
+that exists and cannot be discovered is the same class of defect as a repair that
+exists and is never run, which is what this whole entry is about. The character
+class now includes `[0-9]`; all four gates are listed.
+
 **11.103 — the two rows blocked by recorded answers are REPORTED, not decided.**
 
 ```
@@ -10390,6 +10397,120 @@ Three resolutions, and this sweep takes none of them:
   rather than a foreign key. It needs one small migration-free `UPDATE` plus the
   DELETE, and it needs a human to say yes, because it changes what a dashboard
   reports about a real reading.
+
+### PROVED — the repair, run for real, and the defect it exposed in itself
+
+**`--mcq2-repair`.** Removed **37** rows from **37** stories — the 35 leaking and
+the 2 negation pairs 11.100 added — and refused the 2 blocked ones by name. Free,
+no API call. Read back from the pool afterwards rather than taken from the
+counters: `answers` **41 before, 41 after** (24 `tap_word`, 17 `mcq2`, unchanged),
+servable stories with **no question at all: 0 before, 0 after**, servable `mcq2`
+70 → 33.
+
+**And then `--backfill` selected ZERO stories and printed "nothing to backfill".**
+That is the finding inside the finding, and it is the same class as
+`_STRIPPED_STORY_SQL` two commits earlier: **`_RECORD_MCQ2_REMOVAL_SQL` was
+defined, its comment explained exactly why it had to exist, `_UNENRICHED_SQL`'s
+fourth clause read the key it writes — and nothing ever executed it.** The receipt
+was never written, so the only record of what had been stripped was
+`repair_leaky_mcq2`'s return value, which died with the first process.
+`--mcq2-repair` on Monday and `--backfill` on Friday did not compose; only running
+the two halves in one command ever worked, which is the precise failure the
+constant's own comment claims to prevent. Measured, not reasoned about: 0 of 37
+stories carried `gen_meta.enrichment.mcq2_leak_removed`.
+
+`repair_leaky_mcq2` now writes it, and
+`test_the_repair_leaves_the_receipt_the_backfill_reads` asserts it **from a
+separate session**, so the in-memory `stripped` list cannot be what makes it pass.
+The 37 stories already stripped were back-filled with the receipt through that
+same statement; the (story → question id) mapping is **proven, not guessed** —
+each of the 37 had exactly one question row left, `max(id) + 1` reproduces the
+recorded removed-id list exactly and bijectively, and it agrees with all nine
+(question, story) pairs the repair itself printed.
+
+**`--backfill`, second run: 37 of 37 backfilled, cost $0.4075.** Live spend for
+this whole change is **$0.4075** and nothing else — no `make warm`, no `make
+eval`, no `make eval-smoke`, no generation call, nothing touched on DigitalOcean.
+
+| | before | after |
+|---|---|---|
+| servable `mcq2` rows | 70 | 51 |
+| servable `tap_word` rows | 120 | 137 |
+| `answers` rows | 41 | 41 |
+| servable stories with no question | 0 | 0 |
+| stories carrying `mcq2_leak_removed` | — | 37 |
+
+**19 of the 37 stripped stories did not get a comprehension question back**, and
+that is the fixed `check_mcq2` doing its job rather than a failure of the
+backfill: the model's drafts for those stories were refused by the same two pure
+checks. One of them, story **1672**, cannot get one at all — it carries an
+answered question, so `enrich` takes `_remoderate_questions` and never runs
+QUESTION_GEN (`answers` cascades). It keeps its `tap_word`, so it is still
+servable and still moves §8. **Not a regression this change introduced**: those
+19 stories previously had an `mcq2` a child could answer without reading, which
+is worth less than no comprehension screen at all (11.101).
+
+**`--backfill` moved `--check-promotability` in the GOOD direction, and it was not
+asked to.** Re-enrichment wrote 11.67's `extra_tap_words`, so the pool gained 17
+`tap_word` rows:
+
+| | before | after |
+|---|---|---|
+| stages below §8's floor | 9 of 10 | **8 of 10** |
+| TERMINAL stages | 6 — `[3, 6, 7, 8, 9, 10]` | **5 — `[6, 7, 8, 9, 10]`** |
+| stage 2 best-5 observations | 5 of 10 | 9 of 10 |
+| stage 3 | 5 (TERMINAL) | 8 |
+| stage 4 | 5 | 8 |
+| stage 5 | 6 | **10 — clears the floor** |
+
+`make promote-check` is **still RED** and STATE invariant 15 still stands. This
+change neither fixes nor hides it, and the floor was not touched.
+
+### Sabotage — six, each restored and verified restored
+
+The record is what actually went red, not what was expected to. Two of these
+found real defects rather than confirming a guard.
+
+| sabotage | the defect it stages | result |
+|---|---|---|
+| the DATA, before the repair: the live pool as it stood | the finding itself | `--check-mcq2` exit **1**, `37 of 70 servable two-choice question(s) are answerable with the story unread ... 6 of which steer the child at the WRONG card` |
+| the DATA, after the repair: one leaking row planted on live story 2 | a single row regressing | both live-pool tests **RED**, `--check-mcq2` exit **1**; removed, both green again |
+| `negated = False` in `leaky_mcq2` | 11.100 — the sweep implementing one of 11.64's two checks | **1 RED** (`test_the_gate_refuses_a_false_card_that_is_the_true_card_negated`) |
+| the `_RECORD_MCQ2_REMOVAL_SQL` call removed | the two halves not composing across runs | **1 RED**, `assert None == [29512]` — *the story carries no record of what was taken from it* |
+| `NOT EXISTS (SELECT 1 FROM answers ...)` deleted from `_DELETE_LEAKY_MCQ2_SQL` | the repair cascading a child's §8 evidence | **GREEN at first — a real hole.** `repair_leaky_mcq2` filters in Python (`LeakyMcq2.removable`) before the statement ever sees the id, so every test that went through the sweep exercised the Python guard and left the SQL one unexecuted (8.51's guard that is green without having run). `test_the_delete_itself_refuses_an_answered_row_and_a_story_s_last_question` calls the statement directly with ids a caller has no business passing; with it, **1 RED** |
+| `EXISTS (SELECT 1 FROM questions o ...)` deleted from the same statement | the repair manufacturing invariant 14's dead-end session | **1 RED**, same test |
+
+Live, end to end, against the running CLI rather than the functions: a leaking row
+committed on a throwaway story → `--check-mcq2` exit **1**; the same story
+carrying a negation pair whose prompt leaks nothing → exit **1**; one recorded
+answer added to it → exit **0** with the row moved into `DECISION REQUIRED` and
+`repair_leaky_mcq2` returning `deleted=[] kept=[29277]`, the answer row intact;
+the story removed → exit **0**. Nothing was left behind (checked by name).
+
+### Gates — measured after the change, commands as run
+
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **1069 passed,
+  3 skipped**. The baseline measured in this tree at the start of the session was
+  **1032 passed, 3 skipped**; +7 of the difference is this change
+  (`test_warm_coverage.py` 14 → 21 tests) and the rest is other agents' work
+  landing in the same tree concurrently. (The brief's 1030 was already stale.)
+- `.venv/bin/ruff check storyforge tests scripts` — all checks passed.
+- `--check-coverage` **exit 0** — 33 of 33 pairs, unmoved by removing 37 `mcq2`
+  rows, which is the point: a story keeps its `tap_word` and stays servable.
+- `--check-promotability` **exit 1** — still red (invariant 15), and better than
+  it was: see the table above.
+- `--check-prompts` **exit 0** — 136 rows, up from 120; the 17 new `tap_word` rows
+  the backfill wrote are current by construction.
+- `--check-mcq2` **exit 0** — 51 rows, with the 2 pending an operator decision
+  printed and counted.
+- No `make warm`, no `make eval`, no `make eval-smoke`, no generation call.
+  Nothing touched on DigitalOcean. **Live spend $0.4075**, all of it Haiku
+  enrichment on the 37 stripped stories.
+
+**The production database on DigitalOcean is untouched and almost certainly holds
+the same 40 rows.** It cannot be repaired from here and must not be. What ships
+for it is the gate and the Makefile target: `make mcq2-check` is free, reads
+nothing but the pool, and names its own remedy on the line it fails.
 
 ---
 

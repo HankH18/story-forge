@@ -80,7 +80,18 @@ stories after the fix. `repair_leaky_mcq2` is the reach-back, and unlike every
 other repair here it DELETES: an `mcq2` prompt is free text about a plot and
 nothing can re-derive one, so the sweep removes what it cannot repair and hands
 the stripped story ids straight to the enrichment selection, which is the only
-route back to a comprehension screen (11.86-11.89).
+route back to a comprehension screen (11.99-11.103).
+
+**A repair with no exit code is what 11.61 was.** `--mcq2-repair` shipped and was
+never run, which is 11.61's failure exactly: a remedy recorded in prose, and
+prose does not exit non-zero. So there is a FOURTH gate beside the other three:
+
+    python -m storyforge.warm --check-mcq2   # non-zero while a servable row leaks
+
+It is the only check that reads what an `mcq2` SAYS, and its predicate is
+`check_mcq2`'s own refusal set — `prompt_leaks_answer` AND `negation_pair`, both
+imported rather than restated, so the pool sweep and the generator cannot drift
+apart (11.102).
 """
 
 from __future__ import annotations
@@ -114,6 +125,7 @@ from storyforge.llm.questions import (
     cue_leaks,
     generate_questions,
     mcq2_pair,
+    negation_pair,
     prompt_is_current,
     prompt_leaks_answer,
     story_word_tokens,
@@ -1760,7 +1772,7 @@ _UNENRICHED_SQL = text(
                  )
                )
             -- ...or `repair_leaky_mcq2` took this story's comprehension question
-            -- away because the question named its own answer (11.86). The other
+            -- away because the question named its own answer (11.99). The other
             -- three clauses cannot see that story: it has questions, a §13
             -- receipt and a `tap_word`, so it is fully enriched by every measure
             -- they take, and §11.3's second screen is simply gone. The receipt IS
@@ -1925,7 +1937,7 @@ async def repair_leaky_cues(
     return repaired, stuck, answered
 
 
-# --- the mcq2 half of the same defect (DEVIATIONS 11.86-11.89) ----------------
+# --- the mcq2 half of the same defect (DEVIATIONS 11.99-11.103) ---------------
 #: Every two-choice comprehension row, with what a leak test needs and what a
 #: DELETE is not allowed to destroy: whether a child has answered it, and whether
 #: the story has any OTHER question to fall back on.
@@ -1949,7 +1961,13 @@ _MCQ2_ROWS_SQL = text(
 
 @dataclass(frozen=True)
 class LeakyMcq2:
-    """One `mcq2` row whose QUESTION contains the word that answers it."""
+    """One `mcq2` row the CURRENT `check_mcq2` would refuse (DEVIATIONS 11.64).
+
+    Two defects, not one, because 11.64 added two pure checks and the pool holds
+    violations of both. A sweep that implemented only `prompt_leaks_answer`
+    would leave `negation_pair` rows in front of children with no remedy and no
+    gate able to name them (11.100).
+    """
 
     question_id: int
     story_id: int
@@ -1967,6 +1985,19 @@ class LeakyMcq2:
     #: opposite sign, and the reason this is a defect rather than a missed
     #: opportunity to teach.
     points_wrong: bool
+    #: `negation_pair`: the false card is the true card with `not` added or
+    #: removed, so the story still reads as saying it. Independent of `leaked` —
+    #: the only discriminating word is `not` and it is not in the prompt, so
+    #: these rows are invisible to `prompt_leaks_answer` and were invisible to
+    #: this sweep as it first shipped.
+    negated: bool = False
+
+    @property
+    def defect(self) -> str:
+        """Why `check_mcq2` would refuse this row, in the operator's words."""
+        if self.negated:
+            return 'the false card is the true card with "not" in it'
+        return "points at the WRONG card" if self.points_wrong else "gives the true card away"
 
     @property
     def removable(self) -> bool:
@@ -2027,12 +2058,21 @@ async def leaky_mcq2(
     target_status: Sequence[str] | None = SERVABLE_STATUSES,
     only: Sequence[int] | None = None,
 ) -> list[LeakyMcq2]:
-    """Every `mcq2` row in the pool whose question gives one of its answers away.
+    """Every `mcq2` row in the pool the current `check_mcq2` would refuse.
 
-    Read-only, and the predicate is `questions.prompt_leaks_answer` itself —
-    imported, not restated — so this sweep and the `check_mcq2` that refuses the
-    same shape at generation time cannot drift apart. `mcq2_pair` reverses the
-    option shuffle so the pure function is handed exactly what a draft hands it.
+    Read-only, and the predicates are `questions.prompt_leaks_answer` and
+    `questions.negation_pair` themselves — imported, not restated — so this sweep
+    and the `check_mcq2` that refuses the same shapes at generation time cannot
+    drift apart. `mcq2_pair` reverses the option shuffle so the pure functions are
+    handed exactly what a draft hands them.
+
+    **Both halves of 11.64, not one.** The first version of this function tested
+    `prompt_leaks_answer` alone, and the pool holds 3 `negation_pair` rows whose
+    only discriminating word is `not` — a word the prompt does not contain, so
+    `prompt_leaks_answer` returns nothing and the row reads as clean. Widening
+    here rather than adding a parallel sweep is deliberate: the DELETE, its two
+    refusals, the receipt and the gate are identical for both defects, and two
+    code paths would be two chances to protect only one of them (11.100).
 
     A row whose pair cannot be read out (`mcq2_pair` returns None) is skipped and
     NOT reported as clean: it is malformed, and this function has no opinion
@@ -2062,7 +2102,8 @@ async def leaky_mcq2(
         # "the" are shared by every English sentence and discriminate nothing.
         sight = frozenset(w.strip().lower() for w in vocab_cache[key].sight_words)
         leaked = prompt_leaks_answer(row.prompt or "", correct, incorrect, sight)
-        if not leaked:
+        negated = negation_pair(correct, incorrect)
+        if not leaked and not negated:
             continue
         false_only = {w for w in story_word_tokens(incorrect) if w not in sight} - {
             w for w in story_word_tokens(correct) if w not in sight
@@ -2080,6 +2121,7 @@ async def leaky_mcq2(
                 n_answers=int(row.n_answers),
                 n_other=int(row.n_other),
                 points_wrong=bool(false_only & set(leaked)),
+                negated=negated,
             )
         )
     return found
@@ -2099,7 +2141,7 @@ async def repair_leaky_mcq2(
     about this story's plot; nothing in this codebase can re-derive one, and the
     only generic frame that would fit every row ("Which one did the story say?")
     fails the decodability gate at exactly the stages most of the pool lives at —
-    measured, stage by stage, in DEVIATIONS 11.87. So the choice is between
+    measured, stage by stage, in DEVIATIONS 11.101. So the choice is between
     leaving the question in front of children and removing it, and §11.3's
     comprehension screen is worth less than nothing when it is answerable by
     letter-matching and, for the rows that echo the FALSE answer, actively
@@ -2132,6 +2174,26 @@ async def repair_leaky_mcq2(
     )
     gone = {r.id for r in deleted}
     kept = [row for row in leaking if row.question_id not in gone]
+
+    # The receipt, written HERE rather than by the caller, and this line is the
+    # whole reason `--mcq2-repair` and `--backfill` compose across runs. It was
+    # missing on the first pass: `_RECORD_MCQ2_REMOVAL_SQL` was defined, its
+    # comment explained exactly why it had to exist, `_UNENRICHED_SQL`'s fourth
+    # clause read the key it writes — and nothing ever executed it. The live
+    # consequence was measured, not imagined: `--mcq2-repair` removed 37 rows,
+    # `--backfill` five minutes later selected ZERO stories and printed "nothing
+    # to backfill", because the only in-memory record of what had been stripped
+    # died with the first process. That is `_STRIPPED_STORY_SQL` again (a symbol
+    # referenced by a caller and never written) and the forward-only trap again,
+    # this time inside the repair for the forward-only trap.
+    if deleted:
+        by_story: dict[str, list[int]] = {}
+        for row in deleted:
+            by_story.setdefault(str(row.story_id), []).append(row.id)
+        await session.execute(
+            _RECORD_MCQ2_REMOVAL_SQL,
+            {"removed": json.dumps({k: sorted(v) for k, v in by_story.items()})},
+        )
     return sorted(gone), kept, sorted({r.story_id for r in deleted})
 
 
@@ -2139,10 +2201,13 @@ def _render_leaky_mcq2(rows: Sequence[LeakyMcq2], limit: int = 12) -> list[str]:
     """The questions themselves, not just a count — 8.43's rule for a gap."""
     out = []
     for row in rows[:limit]:
-        why = "points at the WRONG card" if row.points_wrong else "gives the true card away"
+        # A negation pair leaks nothing by word, so `names [...]` would print an
+        # empty list and read as "no evidence" for the one defect whose evidence
+        # is the pair itself. Both cards are printed either way.
+        names = f"names {sorted(row.leaked)} — " if row.leaked else ""
         out.append(
             f"    q{row.question_id} story {row.story_id} stage {row.stage_id} "
-            f"[{row.status}]: {row.prompt!r} names {sorted(row.leaked)} — {why}; "
+            f"[{row.status}]: {row.prompt!r} {names}{row.defect}; "
             f"true {row.correct!r} / false {row.incorrect!r}"
         )
     if len(rows) > limit:
@@ -2156,8 +2221,9 @@ def _report_mcq2_repair(
     """Print what `repair_leaky_mcq2` did — including what it could not do."""
     if deleted:
         print(
-            f"  removed {len(deleted)} two-choice question(s) whose prompt named the word "
-            f"that answers them (11.64): {sorted(deleted)}"
+            f"  removed {len(deleted)} two-choice question(s) the current check_mcq2 refuses "
+            "— the question names the word that answers it, or the false card is the true "
+            f'card with "not" in it (11.64): {sorted(deleted)}'
         )
         print(
             f"    {len(stripped)} story/stories lost their comprehension screen and keep "
@@ -2361,6 +2427,126 @@ async def run_prompt_check() -> None:
     print(f"OK — all {total} carry a rung of the current ladder, filled with their own cue.")
 
 
+#: Every two-choice row on a servable story, for the gate's denominator. The
+#: gate's own numerator comes from `leaky_mcq2`; this is what "37 of 70" means.
+_SERVABLE_MCQ2_COUNT_SQL = text(
+    """
+    SELECT count(*) FROM questions q JOIN stories s ON s.id = q.story_id
+    WHERE q.qtype = 'mcq2' AND s.status = ANY(:statuses)
+    """
+)
+
+#: How an operator fixes a self-answering comprehension question. Free, and —
+#: unlike `_STALE_PROMPT_HINT`'s remedy — a DELETE, so the sentence has to say
+#: what the DELETE cannot reach: the row goes, the story keeps its `tap_word`,
+#: and `--backfill` is the only route back to a comprehension screen.
+_LEAKY_MCQ2_HINT = (
+    "Repair with `python -m storyforge.warm --mcq2-repair` — free, no API call, "
+    "and `_DELETE_LEAKY_MCQ2_SQL` is structurally incapable of cascading a "
+    "recorded answer away or of leaving a story with no question at all. Then "
+    "`python -m storyforge.warm --backfill` re-enriches the stripped stories, "
+    "which is the only route back to a comprehension screen. Verify with "
+    "`python -m storyforge.warm --check-mcq2`."
+)
+
+
+def _render_blocked_mcq2(blocked: Sequence[LeakyMcq2]) -> list[str]:
+    """The rows the free repair is forbidden to touch, with WHY, one line each.
+
+    Printed in full — never truncated — because the whole point of this block is
+    that each of these is a decision somebody has to make by name.
+    """
+    out = [
+        f"  DECISION REQUIRED — {len(blocked)} leaking row(s) the free repair is "
+        "forbidden to remove:"
+    ]
+    out += _render_leaky_mcq2(blocked, limit=len(blocked))
+    for row in blocked:
+        if row.n_answers:
+            out.append(
+                f"      q{row.question_id}: {row.n_answers} recorded answer(s). "
+                "`answers.question_id` is ON DELETE CASCADE, so removing this row "
+                "would erase a child's own reading history to fix our defect."
+            )
+        else:
+            out.append(
+                f"      q{row.question_id}: it is story {row.story_id}'s only question. "
+                "Removing it would leave a servable story a child reads and then "
+                "just stops (STATE invariant 14)."
+            )
+    out.append(
+        "    These do NOT set this gate's exit code. A refusal whose only remedy is "
+        "'a human decides whether to erase a child's answers' is a refusal an "
+        "operator learns to ignore (the argument `run_mcq2_repair` already makes "
+        "about its own). They are printed on EVERY run instead, and counted in the "
+        "summary line, so green never reads as clean."
+    )
+    return out
+
+
+async def run_mcq2_check() -> None:
+    """`--check-mcq2`: §11.3's comprehension question as an exit code. Free.
+
+    The FOURTH gate, and the only one that reads what an `mcq2` SAYS —
+    `--check-prompts` is the same argument for `tap_word` (11.84) and this is its
+    other half. `--mcq2-repair` existed and had never been run: 37 of 70 servable
+    rows were answerable by matching the question's letters against the two cards
+    with the story unread, and 7 of them pointed at the WRONG card, under a green
+    suite and three green gates, because no check anywhere read an `mcq2`'s text.
+    A paragraph in DEVIATIONS does not exit non-zero; this does (11.102).
+
+    A FOURTH command rather than a clause inside `--check-coverage`, for the
+    reason `run_promotability_check` and `run_prompt_check` both give about
+    themselves: those are supply floors whose remedy is `make warm` and real
+    money, and this is a content defect whose remedy is a free DELETE. One exit
+    code cannot mean both.
+
+    The exit code keys off rows the free repair COULD remove. Rows blocked by a
+    recorded answer or by being their story's last question are printed in full on
+    every run and counted in the summary — see `_render_blocked_mcq2` for why they
+    do not set the code, and note that this is not a hole: a row can only become
+    unremovable AFTER a child has answered it, which is after it has been served,
+    and this gate is the post-`make warm` step that sees every newly generated row
+    while its answer count is still zero.
+
+    Read-only. One query per (stage, theme) for the sight words, no API client.
+    """
+    async with SessionLocal() as session:
+        leaking = await leaky_mcq2(session, SERVABLE_STATUSES)
+        total = (
+            await session.execute(_SERVABLE_MCQ2_COUNT_SQL, {"statuses": list(SERVABLE_STATUSES)})
+        ).scalar_one()
+
+    print(f"\nTWO-CHOICE QUESTIONS — {total} row(s) on servable stories", flush=True)
+    removable = [row for row in leaking if row.removable]
+    blocked = [row for row in leaking if not row.removable]
+    if blocked:
+        for line in _render_blocked_mcq2(blocked):
+            print(line, flush=True)
+
+    if removable:
+        wrong = sum(1 for row in removable if row.points_wrong)
+        print(f"  {len(removable)} row(s) a child can answer without reading the story:")
+        for line in _render_leaky_mcq2(removable):
+            print(line, flush=True)
+        raise SystemExit(
+            f"\n{len(removable)} of {total} servable two-choice question(s) are answerable "
+            f"with the story unread (DEVIATIONS 11.64/11.102), {wrong} of which steer the "
+            "child at the WRONG card and grade them incorrect for letter-matching — which "
+            "is the entire skill a decodable reader has.\n" + _LEAKY_MCQ2_HINT
+        )
+
+    pending = (
+        f" {len(blocked)} row(s) above are pending an operator decision and are NOT counted here."
+        if blocked
+        else ""
+    )
+    print(
+        f"OK — all {total} require the story to answer: no question names the word that "
+        f"distinguishes its two cards, and no false card is the true card negated.{pending}"
+    )
+
+
 def _report_cue_repair(repaired: int, stuck: Sequence[int], answered: Sequence[int]) -> None:
     """Print what `repair_leaky_cues` did — including what it could not do."""
     if repaired:
@@ -2445,7 +2631,7 @@ async def run_backfill(
         # Before the prompt refresh: a repaired cue produces a new prompt, and
         # the refresh below would otherwise re-derive the OLD one.
         _report_cue_repair(*await repair_leaky_cues(session, None, only))
-        # The mcq2 half (11.86). It runs HERE, before the selection below, for a
+        # The mcq2 half (11.99). It runs HERE, before the selection below, for a
         # reason the selection cannot express: a story that loses its leaking
         # comprehension question still has its `tap_word`, a §13 receipt and a
         # `MASTERY_QTYPES` row, so all three clauses of `_UNENRICHED_SQL` are
@@ -2795,6 +2981,18 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--check-mcq2",
+        action="store_true",
+        help=(
+            "report every two-choice question on a servable story that the current "
+            "check_mcq2 would refuse — the question names the word distinguishing "
+            "its two answers, or the false answer is the true one negated — and "
+            "exit NON-ZERO while any exists that the free repair could remove, then "
+            "exit. No API calls, nothing spent. The repair is `--mcq2-repair` "
+            "followed by `--backfill` (DEVIATIONS 11.64/11.102)"
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -2832,7 +3030,7 @@ def main() -> None:
         help=(
             "remove servable two-choice questions whose prompt contains the word "
             "that distinguishes their two answers, then exit. Free, no API call, "
-            "and never touches a row a child has answered (DEVIATIONS 11.64/11.86)"
+            "and never touches a row a child has answered (DEVIATIONS 11.64/11.99)"
         ),
     )
     p.add_argument(
@@ -2847,6 +3045,8 @@ def main() -> None:
             asyncio.run(run_promotability_check())
         elif a.check_prompts:
             asyncio.run(run_prompt_check())
+        elif a.check_mcq2:
+            asyncio.run(run_mcq2_check())
         elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
         elif a.mcq2_repair:
