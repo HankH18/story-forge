@@ -11,10 +11,11 @@ Two consequences shape the code below.
 the best available story rather than an error. "Best" is decided by the
 decodability guarantee, which is the product:
 
-1. requested stage, requested theme      — what was asked for
-2. requested stage, any theme            — theme is preference; stage is safety
-3. nearest LOWER stage, requested theme
-4. nearest LOWER stage, any theme
+1. requested stage, UNREAD by this kid, requested theme  — what was asked for
+2. requested stage, UNREAD by this kid, any theme        — theme is a preference
+3. requested stage, already read, requested theme        — a re-read, not an error
+4. requested stage, already read, any theme
+5. nearest LOWER stage, same four tiers in the same order
 
 A story written for a *higher* stage may contain GPCs this reader has never been
 taught, which breaks the guarantee outright, so the ladder never climbs — the
@@ -23,6 +24,27 @@ taught, which breaks the guarantee outright, so the ladder never climbs — the
 cumulative (§4), so anything decodable at stage N is decodable at stage N+1
 (the §5.7c monotonicity property). It is easier than ideal, never unsafe.
 Ties inside a rung break least-recently-served, then by id for determinism.
+
+**"the kid hasn't read" is §7's clause, and until DEVIATIONS 9.80 it existed
+nowhere** — `_SERVE_SQL` took no `kid_id` parameter at all, so the requested
+theme's stories held the top ranks unconditionally and a child who tapped the
+same theme card twice cycled that pair's three stories forever. §8 counts
+DISTINCT stories completed, so the promotion counter stopped at "3 of 5" and
+never moved again while six other stories at that child's own stage sat one sort
+key away. It is `warm.py`'s `_STUCK_CHILD` sentence by a second route, and it was
+driven end to end: twelve completed readings, three distinct stories.
+
+Novelty is a **sort key and not a filter**, and it sits below `stage_id DESC` and
+above the theme tier. Below the stage key because an unread story one stage up is
+still a story with untaught GPCs in it (invariant 6 again); above the theme key
+because ranking it below is where it would have been inert for exactly the child
+that defect is about. Not a filter because the candidate set is also the serve
+budget (`_serve_attempt_budget`), because a child who has read everything at their
+stage must get a re-read rather than the 503 that says the pool is empty, and
+because re-reading a decodable story is correct decodable-reader behaviour — the
+same argument invariant 3 makes about repeated words. `POST /api/readings` already
+credits a re-read with no §8 evidence (DEVIATIONS 6.7), so it costs mastery
+nothing.
 
 The whole ladder is one `ORDER BY`; see `_SERVE_SQL`.
 
@@ -100,11 +122,12 @@ import logging
 import math
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import Integer, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from storyforge.auth import Principal, owned_kid, require_parent
@@ -339,6 +362,18 @@ class StoryRequest(BaseModel):
 # `:excluded` carries the ids a previous attempt served and then rejected at the
 # serve-time decodability re-check. It is never empty (the caller seeds it with
 # a sentinel), so Postgres always knows the array's element type.
+#
+# `:kid` is §7's "the kid hasn't read" clause (DEVIATIONS 9.80) and is the ONE
+# parameter here that is allowed to be NULL: the §7.21 admin preview asks for a
+# stage with no child in the room, and `r.kid_id = NULL` is never true, so the
+# novelty key is constant TRUE for every row and the ordering degrades to exactly
+# what it was before this clause existed. Measured on a copy of the live pool over
+# the full stage-6 candidate set: 74 rows compared, 0 positions differ (9.82).
+#
+# It is a sort key and NOT a `WHERE` predicate. The candidate set is also the
+# serve budget (`_serve_attempt_budget`, 9.71), the 503 must keep meaning "the
+# pool is empty" rather than "you have read everything", and a re-read is correct
+# behaviour that `POST /api/readings` already credits with no §8 evidence (6.7).
 _SERVE_SQL = text(
     f"""
     UPDATE stories SET last_served_at = now()
@@ -348,6 +383,10 @@ _SERVE_SQL = text(
           AND NOT (id = ANY(:excluded))
           AND {ANSWERABLE_SQL.format(story="stories")}
         ORDER BY stage_id DESC,                  -- never above; nearest below
+                 (NOT EXISTS (SELECT 1 FROM readings r
+                              WHERE r.kid_id = :kid
+                                AND r.story_id = stories.id)) DESC,
+                                                 -- unread by THIS kid (§7)
                  (theme_id = :theme) DESC,       -- requested theme first
                  last_served_at ASC NULLS FIRST, -- least recently served (§7)
                  id ASC                          -- deterministic tiebreak
@@ -356,6 +395,12 @@ _SERVE_SQL = text(
     )
     RETURNING id
     """
+).bindparams(
+    # A DEFAULT, not a placeholder: "no kid" is the admin preview's own semantics
+    # (§7.21), and it is the value every caller that has no reader should send —
+    # so a caller that omits it gets that behaviour rather than a `ProgrammingError`.
+    # Typed, so the driver sends an integer NULL rather than an untyped one.
+    bindparam("kid", value=None, type_=Integer)
 )
 
 # Every story the request above can ever return for this reader, before
@@ -582,10 +627,29 @@ def _fallback(dto: StoryDTO, stage_id: int, theme_id: int, theme_slug: str) -> F
     )
 
 
-async def _resolve_stage(
+@dataclass(frozen=True)
+class _Anchor:
+    """What this request is anchored to: a stage, and the reader it came from.
+
+    `kid_id` is `None` on the §7.21 admin preview and is the value `_SERVE_SQL`
+    reads for "the kid hasn't read". It is carried HERE rather than taken from
+    `StoryRequest.kid_id` at the point of use so that the only way to obtain it is
+    to have gone through `owned_kid` first (DEVIATIONS 9.80): a reading history is
+    a fact about a child, and reading one for a kid this caller does not own would
+    be the same mistake `stage_id` was until 7.21, one field along.
+    """
+
+    stage_id: int
+    kid_id: int | None
+
+
+async def _resolve_anchor(
     session: AsyncSession, principal: Principal, body: StoryRequest
-) -> int:
-    """The stage this request is anchored to (§9, DEVIATIONS 7.21).
+) -> _Anchor:
+    """The stage this request is anchored to, and whose it is (§9, 7.21, 9.80).
+
+    Was `_resolve_stage`, which returned the stage alone; it now returns the
+    reader too, because §7's serve order is a function of both.
 
     Exactly one anchor is legal per request, and the parent-facing one is the
     child. `owned_kid` is what makes it an anchor rather than another number the
@@ -603,7 +667,7 @@ async def _resolve_stage(
 
     if body.kid_id is not None:
         kid = await owned_kid(session, principal, body.kid_id)
-        return int(kid.stage_id)
+        return _Anchor(stage_id=int(kid.stage_id), kid_id=int(kid.id))
 
     if body.stage_id is None:
         raise HTTPException(
@@ -623,7 +687,9 @@ async def _resolve_stage(
                 "client-chosen number."
             ),
         )
-    return int(body.stage_id)
+    # No child in the room, so nothing has been read: the novelty key is inert and
+    # the ordering is the one this endpoint has always had (DEVIATIONS 9.82).
+    return _Anchor(stage_id=int(body.stage_id), kid_id=None)
 
 
 async def _sight_words(session: AsyncSession, stage_id: int) -> frozenset[str]:
@@ -666,7 +732,8 @@ async def request_story(
 ) -> StoryDTO:
     """Serve a story for this reader's (stage, theme) from the warm pool (§7).
 
-    Least-recently-served wins; `last_served_at` is stamped as part of the same
+    Unread by this child wins, then the requested theme, then
+    least-recently-served; `last_served_at` is stamped as part of the same
     statement that picks the row. `status` is intentionally left alone: §8 defines
     `complete` as "a kid read it", and that fact belongs to `POST /api/readings`
     (Phase 5). Flipping it here would drain the warm pool on every request,
@@ -680,7 +747,8 @@ async def request_story(
             headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
         )
 
-    stage_id = await _resolve_stage(session, principal, body)
+    anchor = await _resolve_anchor(session, principal, body)
+    stage_id = anchor.stage_id
 
     stage = (
         await session.execute(text("SELECT 1 FROM stages WHERE id = :s"), {"s": stage_id})
@@ -716,6 +784,7 @@ async def request_story(
                     "statuses": list(SERVABLE_STATUSES),
                     "stage": stage_id,
                     "theme": theme_id,
+                    "kid": anchor.kid_id,
                     "excluded": excluded,
                 },
             )

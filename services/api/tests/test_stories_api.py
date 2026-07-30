@@ -39,6 +39,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from storyforge.api.stories import (
+    _SERVE_SQL,
+    ANSWERABLE_SQL,
     RATE_LIMIT_PER_MINUTE,
     SERVABLE_STATUSES,
     limiter,
@@ -391,6 +393,78 @@ async def _request(client, stage_id: int, theme=DRAGONS) -> dict:
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+async def _request_for(client, kid_id: int, theme=DRAGONS) -> dict:
+    """The kid-mode request (§9): the stage AND the reading history come from the
+    child, and no number in this body decides either (DEVIATIONS 7.21, 9.80)."""
+    resp = await client.post(
+        "/api/stories/request", json={"kid_id": kid_id, "theme_id_or_slug": theme}
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+async def _kid(client, stage_id: int, name: str = "Rowan") -> int:
+    """A kid owned by the caller. Created through the endpoint, so `owned_kid`
+    resolves it; rolled back with the rest of the fixture's transaction."""
+    resp = await client.post("/api/kids", json={"display_name": name, "stage_id": stage_id})
+    assert resp.status_code == 201, resp.text
+    return int(resp.json()["id"])
+
+
+async def _kid_row(session: AsyncSession, stage_id: int, name: str = "Wren") -> int:
+    """A kid nobody owns, for the tests that never call an endpoint with one."""
+    return (
+        await session.execute(
+            text("INSERT INTO kids (display_name, stage_id) VALUES (:n, :s) RETURNING id"),
+            {"n": name, "s": stage_id},
+        )
+    ).scalar_one()
+
+
+async def _start_reading(client, kid_id: int, story_id: int) -> int:
+    """§9 `POST /api/readings` — the row that makes a story "read" (9.86)."""
+    resp = await client.post("/api/readings", json={"kid_id": kid_id, "story_id": story_id})
+    assert resp.status_code == 201, resp.text
+    return int(resp.json()["id"])
+
+
+async def _serve_order(
+    session: AsyncSession, *, stage: int, theme_id: int, kid_id: int | None
+) -> list[int]:
+    """`_SERVE_SQL`'s COMPLETE ordering, not just the row that wins.
+
+    Walked with `:excluded` growing, which is the endpoint's own mechanism
+    (DEVIATIONS 9.66): every pick is the head of what is left, so the sequence is
+    the full sort. The production statement is executed rather than a restatement
+    of it — a test that spelled the `ORDER BY` again could only prove it agrees
+    with itself.
+
+    Every pick stamps `last_served_at`, because that is what `_SERVE_SQL` does.
+    Excluded ids cannot be picked again so the walk is exact, but a caller that
+    walks twice must re-establish the stamps it cares about in between.
+    """
+    seen: list[int] = []
+    excluded: list[int] = [0]
+    while True:
+        row = (
+            await session.execute(
+                _SERVE_SQL,
+                {
+                    "statuses": list(SERVABLE_STATUSES),
+                    "stage": stage,
+                    "theme": theme_id,
+                    "kid": kid_id,
+                    "excluded": excluded,
+                },
+            )
+        ).first()
+        await session.commit()
+        if row is None:
+            return seen
+        seen.append(int(row.id))
+        excluded.append(int(row.id))
 
 
 # --- happy path --------------------------------------------------------------
@@ -759,6 +833,193 @@ async def test_rejected_stories_are_never_served(client, shared_pool):
             f"rejected story {story_id} is fetchable by id ({resp.status_code}) — it "
             "failed the decodability gate or moderation (§7)"
         )
+
+
+# --- §7's "the kid hasn't read" clause (DEVIATIONS 9.80) ---------------------
+async def test_a_kid_is_served_every_unread_story_at_their_stage_before_any_repeat(
+    client, pool
+):
+    """§7 line 188: "serve least-recently-served warm/complete story **the kid
+    hasn't read**". That clause existed nowhere until DEVIATIONS 9.80 —
+    `_SERVE_SQL` took no `kid_id` parameter at all.
+
+    RED against the shipped code, and the shape of the fixture is what makes it
+    red. A pair holding N stories requested N+1 times is NOT enough: once every
+    story in the pair has been read, re-serving one is the correct answer on any
+    build, and the (N+1)th pick is a re-read either way. The defect is that
+    `(theme_id = :theme) DESC` outranked everything below it **unconditionally**,
+    so the requested theme's three stories held the top three ranks forever while
+    six other stories at the child's own stage sat one sort key away. Hence the
+    second theme at the same stage: the shipped code serves 3 distinct and then
+    repeats; the clause serves 6.
+
+    Measured through the endpoint against a copy of the live pool, kid at stage 6
+    asking for dragons twelve times: **3 distinct before, 9 after** ("3 of 5
+    stories completed at stage 6" forever, against "9 of 5"). §8 counts DISTINCT
+    stories and `POST /api/readings` credits a re-read with nothing (6.7), so
+    before this the progress screen could not move for a child who liked one
+    theme — `warm.py`'s own `_STUCK_CHILD` sentence by a second route.
+
+    A READING ROW is what "has read" means, not a completed one, and this test
+    never completes one (DEVIATIONS 9.86). A completed-only predicate would leave
+    an abandoned story permanently unread, and novelty ranks above
+    `last_served_at`, so the abandoned story would be re-served first every single
+    time — the same loop in a narrower form.
+    """
+    requested = [
+        await pool.story(stage=pool.base, theme="alpha", title=f"Alpha {i}") for i in range(3)
+    ]
+    other = [
+        await pool.story(stage=pool.base, theme="beta", title=f"Beta {i}") for i in range(3)
+    ]
+    # Unread, in the requested theme, one rung UP. Invariant 6 outranks novelty:
+    # a story a child has never seen may still contain GPCs nobody has taught them.
+    above = await pool.story(stage=pool.base + 1, theme="alpha", title="Unread, One Stage Up")
+
+    kid_id = await _kid(client, pool.base)
+
+    served: list[dict] = []
+    for _ in range(len(requested) + len(other)):
+        limiter.clear()
+        body = await _request_for(client, kid_id, pool.slug("alpha"))
+        served.append(body)
+        await _start_reading(client, kid_id, body["id"])
+
+    ids = [b["id"] for b in served]
+    assert len(set(ids)) == len(ids), (
+        f"the same story was served twice while unread stories remained: {ids} — "
+        "§7 says the kid hasn't read it, and §8 counts DISTINCT stories (9.80)"
+    )
+    assert set(ids) == set(requested) | set(other)
+    assert set(ids[:3]) == set(requested), (
+        "the requested theme is still the preference INSIDE the unread tier"
+    )
+    assert set(ids[3:]) == set(other), (
+        "once the requested theme is read, the same stage's other themes are what "
+        "an unread story means — not a lower stage (9.83)"
+    )
+
+    # STATE invariant 6, on the path this change touches: the novelty key sits
+    # BELOW `stage_id DESC`, so it can never lift a story over the reader.
+    assert above not in ids
+    for body in served:
+        assert body["stage_id"] <= pool.base, "the ladder climbed a stage (STATE invariant 6)"
+    assert [b["fallback"] for b in served[:3]] == [None, None, None]
+    assert {b["fallback"]["kind"] for b in served[3:]} == {"other_theme"}
+
+    # And when everything at the stage HAS been read, the answer is a re-read, not
+    # a 503: novelty is a sort key, never a `WHERE` clause (9.81). `readings.py`
+    # credits a re-read with no §8 evidence, so it costs mastery nothing, and §01
+    # says a child never sees an error.
+    limiter.clear()
+    again = await _request_for(client, kid_id, pool.slug("alpha"))
+    assert again["id"] in set(requested), (
+        "with every story read, the requested theme's least-recently-served story "
+        "is the right answer — the pool is not empty"
+    )
+
+
+async def _spread_last_served(session: AsyncSession, stories: list[int]) -> None:
+    """A `last_served_at` spread with something to get wrong: never-served rows,
+    two distinct stamps, and a tie inside each that only `id ASC` can break."""
+    await session.execute(
+        text("UPDATE stories SET last_served_at = NULL WHERE id = ANY(CAST(:ids AS int[]))"),
+        {"ids": stories},
+    )
+    for minutes, ids in ((30, stories[:2]), (10, stories[2:4])):
+        await session.execute(
+            text(
+                "UPDATE stories SET last_served_at = now() - make_interval(mins => :m) "
+                "WHERE id = ANY(CAST(:ids AS int[]))"
+            ),
+            {"m": minutes, "ids": ids},
+        )
+    await session.commit()
+
+
+#: `_SERVE_SQL`'s `ORDER BY` exactly as it stood before the unread key was added
+#: (DEVIATIONS 9.82). Spelled out rather than imported, on purpose: the assertion
+#: is that the §7.21 admin preview — which has no kid, so `:kid` is NULL — orders
+#: byte-identically to the endpoint that shipped, and a baseline imported from the
+#: statement under test could not fail.
+_LEGACY_SERVE_ORDER = (
+    "ORDER BY stage_id DESC, (theme_id = :theme) DESC, "
+    "last_served_at ASC NULLS FIRST, id ASC"
+)
+
+
+async def test_the_admin_preview_orders_exactly_as_it_did_before_the_unread_key(pool):
+    """§7.21's preview has no child in the room, so §7's clause must be inert.
+
+    `r.kid_id = NULL` is never true, so `NOT EXISTS (…)` is TRUE for every
+    candidate row and the key is constant — the remaining keys, which end in
+    `id ASC`, decide everything. This asserts that over the WHOLE candidate set
+    rather than over the one row that happens to win: `_SERVE_SQL` is walked with
+    `:excluded` growing, which enumerates its complete ordering, and the result is
+    compared with the pre-change `ORDER BY` run as a plain `SELECT`.
+
+    The fixture is built to have something to get wrong — two stages, two themes,
+    served and never-served rows, and readings **by a real kid** on three of them.
+    Those readings are the point: an admin preview must not be reordered by what
+    some child has read, which is the one way a NULL `:kid` could still leak.
+
+    Measured the same way on a copy of the live pool before this test existed: 74
+    rows compared for a stage-6 request, 0 positions differ.
+    """
+    session = pool.session
+    alpha = await pool.theme("alpha")
+    stories: list[int] = []
+    for stage in (pool.base, pool.base - 1):
+        for theme in ("alpha", "beta"):
+            for i in range(2):
+                stories.append(await pool.story(stage=stage, theme=theme, title=f"{theme}{i}"))
+
+    await _spread_last_served(session, stories)
+    kid_id = await _kid_row(session, pool.base)
+    for story_id in stories[:3]:
+        await session.execute(
+            text(
+                "INSERT INTO readings (kid_id, story_id, stage_id, path) VALUES "
+                "(:k, :s, :st, CAST('{\"choices\": []}' AS jsonb))"
+            ),
+            {"k": kid_id, "s": story_id, "st": pool.base},
+        )
+    await session.commit()
+
+    legacy = [
+        r[0]
+        for r in await session.execute(
+            text(
+                "SELECT id FROM stories WHERE status = ANY(:statuses) AND stage_id <= :stage "
+                f"AND {ANSWERABLE_SQL.format(story='stories')} {_LEGACY_SERVE_ORDER}"
+            ),
+            {"statuses": list(SERVABLE_STATUSES), "stage": pool.base, "theme": alpha},
+        )
+    ]
+    assert len(legacy) == len(stories), "the fixture does not own the candidate set"
+
+    served = await _serve_order(session, stage=pool.base, theme_id=alpha, kid_id=None)
+    assert served == legacy, (
+        "the admin preview (`stage_id`, no kid) no longer orders the way it did "
+        f"before §7's unread key: {served} != {legacy} (DEVIATIONS 9.82)"
+    )
+
+    # The control, in the same test: with a kid the order DOES change, so what the
+    # assertion above proves is that NULL is inert and not that the key is dead.
+    # The walk above stamped every row it took, so the spread is re-established.
+    await _spread_last_served(session, stories)
+    for_kid = await _serve_order(session, stage=pool.base, theme_id=alpha, kid_id=kid_id)
+    assert set(for_kid) == set(legacy), "the candidate set moved; only the ORDER may"
+    assert for_kid != legacy, (
+        "the unread key changed nothing even for a kid with three readings — the "
+        "admin assertion above would then be vacuous"
+    )
+    at_base = [s for s in for_kid if s in set(stories[:4])]
+    assert at_base[0] == stories[3], (
+        "the one story at the reader's own stage they have NOT read must come "
+        f"first: {at_base}"
+    )
+    assert set(at_base[1:]) == set(stories[:3])
 
 
 # --- fallback ladder ---------------------------------------------------------

@@ -11088,6 +11088,143 @@ nothing in a contrast audit of the palette can see it.
   evidence about any of them.
 - **`art.test.ts`.** It is still green and still right about what it tests; 13.4
   adds the guarantee it structurally cannot make.
+
+## Phase 8 — §7's "the kid hasn't read" clause was never implemented, and a child who loves one theme is permanently stuck (9.80-9.86)
+
+Numbered 9.80-9.86 to stay clear of 9.60-9.79 and of every block above. Logged
+**before** the change. Every number below was measured in this tree against a
+private `pg_dump` copy (`sfunread`) of the live pool — no model call, nothing
+written to the shared database.
+
+**9.80 — the dropped clause. §7 line 188 reads "serve least-recently-served
+warm/complete story **the kid hasn't read**"; nothing in the codebase has ever
+looked at what a kid has read.**
+
+`grep -rn "hasn't read\|not yet read\|unread" services/api/ apps/web/src/ docs/`
+returned zero hits before this entry, no deviation logged the clause as dropped
+(§0 requires every deviation be logged), and `_SERVE_SQL` took **no `kid_id`
+parameter at all** — the child was the anchor for the *stage* (7.21) and for
+nothing else.
+
+The consequence is not a missing nicety, it is `warm.py`'s own `_STUCK_CHILD`
+sentence arriving by a second, unmeasured route. `_SERVE_SQL` orders
+`stage_id DESC, (theme_id = :theme) DESC, last_served_at ASC …`, so the requested
+theme's stories hold the top ranks **unconditionally**: a child who taps the same
+theme card twice cycles that pair's three stories forever, while six other
+stories at their own stage sit one sort key away. §8 counts DISTINCT stories
+(`readings.py` correctly credits a re-read with nothing, 6.7), so the promotion
+counter stops at three of the five §8 asks for and never moves again.
+
+Driven end to end through the real ASGI app against the copy — request →
+`POST /api/readings` → `/complete`, twelve times, kid at stage 6, theme dragons:
+
+```
+ 1  story=7296  repeat=False  1 of 5      7  story=7296  repeat=TRUE  3 of 5
+ 2  story=7294  repeat=False  2 of 5      8  story=7294  repeat=TRUE  3 of 5
+ 3  story=7295  repeat=False  3 of 5      9  story=7295  repeat=TRUE  3 of 5
+ 4  story=7296  repeat=TRUE   3 of 5     10  story=7296  repeat=TRUE  3 of 5
+ 5  story=7294  repeat=TRUE   3 of 5     11  story=7294  repeat=TRUE  3 of 5
+ 6  story=7295  repeat=TRUE   3 of 5     12  story=7295  repeat=TRUE  3 of 5
+
+served 12 times, 3 distinct: [7296, 7294, 7295, 7296, 7294, 7295, …]
+GET /api/kids/{id}/progress: readings_completed 12,
+  promotion {promote: false, stories_completed: 3, stories_required: 5}
+```
+
+Stage 6 holds **nine** servable, answerable stories — three per theme. The child
+was shown three of them, twelve times.
+
+**9.81 — the fix is a SORT key, not a `WHERE` clause.**
+
+```sql
+ORDER BY stage_id DESC,
+         (NOT EXISTS (SELECT 1 FROM readings r
+                      WHERE r.kid_id = :kid AND r.story_id = stories.id)) DESC,
+         (theme_id = :theme) DESC, last_served_at ASC NULLS FIRST, id ASC
+```
+
+A `WHERE NOT EXISTS` would have been wrong three times over:
+
+- it changes the **candidate set**, and `_serve_attempt_budget` is the size of
+  that set (9.71) — the budget and the pick would stop meaning the same thing;
+- it moves the **503 boundary**: a child who has read everything at their stage
+  would be answered "the warm pool is empty, run `make warm`" when it is full.
+  §01 says a child never sees an error, and a re-read is a better answer than a
+  503 (`readings.py` already credits it with nothing, so it costs §8 nothing);
+- re-reading a decodable story is **correct decodable-reader behaviour** (STATE
+  invariant 3 makes the same argument about repeated words). Novelty is a
+  preference, exactly as theme is; stage is the only safety bound.
+
+`stage_id <= :stage` is untouched, and the new key sits **below** `stage_id DESC`
+— so an unread story one stage up can never outrank a read story at the reader's
+own stage. STATE invariant 6 is a property of the `WHERE` clause and of the first
+sort key, and this change is neither.
+
+Ranked below `(theme_id = :theme)`, novelty would have been inert for exactly the
+child this entry is about; ranked above `stage_id DESC` it would break invariant
+6. Between them is the only position that means "the theme is a preference and
+the stage is a bound".
+
+**9.82 — `:kid` is NULL on the admin preview path, and NULL is what makes the
+ordering identical to today's.**
+
+§7.21's `stage_id` knob exists because §11's admin portal and the eval path both
+ask for a stage with no child in the room. `r.kid_id = NULL` is never true, so
+`NOT EXISTS (…)` is TRUE for every candidate row, the key is constant, and the
+remaining keys — which end in `id ASC`, a total order — decide everything.
+Measured on the copy over the full candidate set for a stage-6 request, legacy
+`ORDER BY` against the new one at `:kid = NULL`: **74 rows compared, 0 positions
+differ.**
+
+`_SERVE_SQL` therefore carries `bindparam("kid", value=None)`: the statement
+stays callable with the parameter map every existing caller already passes, and
+the default is the admin path's own semantics rather than a placeholder.
+
+**9.83 — what the stuck child gets instead.** Same pool, same kid, the three
+dragons stories marked read, new ordering:
+
+```
+7299 stage 6 space    (never served)      7298 stage 6 space
+8935 stage 6 animals  (never served)      7293 stage 6 animals
+7297 stage 6 space                        ---- then the read dragons rows ----
+7291 stage 6 animals                      7296, 7294, 7295 (stage 6, dragons)
+                                          ---- then stage 5 ----
+```
+
+Six further **unread stage-6** stories before any repeat, **none above stage 6**,
+and the read rows are still there behind them rather than deleted from the
+candidate set. `stories_completed` reaches 9 of 5 at the stage where it used to
+stop at 3.
+
+**9.84 — the test that fails against the shipped code needs a SECOND theme at the
+same stage.** A pair holding N stories, requested N+1 times, is not enough on its
+own: `last_served_at` ties (under the fixture transaction `now()` is the
+transaction timestamp, and in production the whole pair is simply re-served in
+`id` order), so once every story in the pair is read the (N+1)th request is a
+correct re-read whichever build is running. The defect is that the **theme tier
+outranks novelty**, so the fixture plants three stories in the requested theme and
+three more at the same stage in another theme: the shipped code serves 3 distinct
+and then repeats, the fixed code serves 6 distinct. Both halves are asserted, and
+so is the `fallback: other_theme` the DTO now carries for rungs 4-6 — which is the
+honest signal kid mode already knows how to render.
+
+**9.85 — reported, not fixed: both supply gates are green or ask the wrong
+question about exactly this pool.** Neither file is this change's to touch
+(`warm.py`), and neither is a code change this entry makes.
+
+- `--check-coverage` reports **33 of 33 pairs at target** while **29 of 33 hold
+  fewer than 5** servable+answerable stories. `TARGET_PER_PAIR = 3` is §7's own
+  number and should stay 3; what is missing is that nothing compares any count
+  with §8's `STORIES_REQUIRED_AT_STAGE = 5`. After this change the quantity §8
+  needs is the **stage** total, not the pair total — 3 per pair × 3 themes = 9,
+  and the live pool holds 9-24 per stage — so the gate the pool lacks is a
+  per-stage assertion, not a bigger `TARGET_PER_PAIR`.
+- `--check-promotability` computes "its best 5 of 9 stories" from `_SUPPLY_SQL`,
+  which has **no theme predicate**. Before this change that described a reader the
+  serving path could not produce. After it, it is true: a child who keeps tapping
+  one theme is served the whole stage. Adding a theme predicate now would make
+  the gate measure something the serving path deliberately no longer does.
+
 ## Phase 8 — the operator's decision on the two answered rows, and the archive that did not survive its own backfill (11.116-11.118)
 
 11.103 left two live rows undecided and named three resolutions. The user chose
@@ -11260,7 +11397,8 @@ Driven off **exit codes**, not off grepping the output: `pyproject.toml` sets
 
 ```
 cd services/api && DATABASE_URL=…/sfunread .venv/bin/python -m pytest -p no:randomly
-  1076 passed, 3 skipped in 94.35s   (exit 0; +2 tests, both new here)
+  1076 passed, 3 skipped in 89.08s   (exit 0; +2 tests, both new here — 20
+                                      test functions in this file before, 22 now)
 .venv/bin/ruff check storyforge/api/stories.py tests/test_stories_api.py
   All checks passed!
 ```
