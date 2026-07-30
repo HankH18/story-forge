@@ -9,11 +9,39 @@
 #
 # HISTORY: this began as a 56-word seed. A stage-coverage agent found `shit` in
 # PERMITTED WORDS; a sweep then found 42 profane or inappropriate words reaching
-# the generation prompt. §5.4's "expand before any public deploy" was not
-# optional. Categories below are deliberately over-inclusive: exact-match means
-# over-blocking costs a few innocent words (`crack` an egg, `hang` a coat),
-# while under-blocking puts them in a five-year-old's reading vocabulary. §6 is
-# explicit that those costs are not symmetric.
+# the generation prompt (docs/DEVIATIONS.md 6.15). §5.4's "expand before any
+# public deploy" was not optional, and every profanity that sweep found is still
+# here.
+#
+# That purge also assumed over-blocking "costs a few innocent words (`crack` an
+# egg, `hang` a coat)". The §14 eval repriced the estimate: 2 of the 3 layer-1
+# rejections in a 180-cell matrix were the single word `high`, one of them killing
+# a 100%-decodable, entirely safe stage-6 story — while `moderate.py`'s own
+# approve list names "high places" verbatim. `moderate()` SHORT-CIRCUITS on a
+# blocklist hit, so an innocuous word here does not just narrow the allowlist, it
+# stops layer 3 from ever applying the hazard-vs-harm judgement DEVIATIONS 3.10
+# spent two rounds calibrating. 15 words were removed (8.14).
+#
+# THE TEST for anything added or removed here: is the hazard carried by the WORD,
+# or only by the SENTENCE it is in?
+#   in the word     -> `fuck`, `rape`, `kill`, `gun`. No sentence makes them safe.
+#                      Layer 1 is the right layer. Keep, including dual-use words
+#                      whose innocent sense has a synonym a kid's book would use
+#                      anyway (`ass` the donkey, `cock` the rooster).
+#   in the sentence -> the hazardous reading is a judgement ABOUT a sentence, and
+#                      layer 3's REJECT bullets already name it. Layer 1 cannot
+#                      read sentences; layer 3 can. Do not block here unless the
+#                      innocuous sense is also rare in this product's domain.
+# When removing, name the layer-3 bullet that still covers the hazard.
+#
+# `shot`, `beat`, `blade`, `hurt`, `fight`, `hate`, `butt` and `smoking` were all
+# examined under that test and KEPT — see 8.15. Removing a genuine hazard to fix a
+# false positive is much worse than the false positive.
+#
+# INVARIANT: `load_blocklist()` reads ONE WORD PER LINE. A space-separated
+# rewrite once loaded 22 words instead of 240 and the only symptom was a row count
+# moving the wrong way (6.15). Lines and entries are kept equal so the list can be
+# verified by counting it: 224 non-comment lines, 224 entries.
 
 # --- profanity ---
 fuck
@@ -87,7 +115,6 @@ pedophile
 poo
 poop
 pee
-piss
 fart
 farted
 farting
@@ -127,10 +154,7 @@ cigarettes
 smoking
 tobacco
 vape
-weed
-pot
 dope
-crack
 meth
 cocaine
 coke
@@ -138,7 +162,6 @@ heroin
 opium
 pill
 pills
-high
 stoned
 addict
 addiction
@@ -166,7 +189,6 @@ bomb
 bombed
 explode
 blood
-bloody
 wound
 wounded
 injure
@@ -178,12 +200,9 @@ punch
 punched
 slap
 slapped
-kick
-kicked
 choke
 choked
 strangle
-hang
 hanged
 noose
 dead
@@ -194,8 +213,6 @@ dying
 corpse
 coffin
 grave
-bury
-buried
 funeral
 war
 weapon
@@ -228,16 +245,12 @@ dummy
 loser
 freak
 ugly
-fat
 obese
 skinny
-weird
-creep
 creepy
 nasty
 evil
 cruel
-mean
 bully
 bullied
 bullying
@@ -251,8 +264,6 @@ worthless
 jerk
 jerks
 brat
-pig
-rat
 swine
 scum
 disgusting

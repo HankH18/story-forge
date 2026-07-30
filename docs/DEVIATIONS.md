@@ -2035,3 +2035,1095 @@ so `--resume 2` ignores `--stages`, `--n`, `--effort` and `--pricing-date` and
 takes them from the row. A resume trail (`config.resumed`) records each
 continuation with its timestamp, the item count at the time, and the git commit,
 so a report says plainly that its matrix was gathered in more than one sitting.
+
+---
+
+## Phase 8 — the generation timeout and the warm-run fallback
+
+Two defects with one root: §7 fixes the generation node's timeout at 30s, and
+30s is below the latency of a stage 9–12 generation. `make eval` reported 11 of
+180 cells as `api_fail`, every one of them `anthropic.APITimeoutError` at
+stages 9–12; `warm.py` treats the same exception as fatal to the whole run.
+
+Logged before the change, per §0. Every claim below is marked PROVED (with the
+command that reproduces it) or ASSUMED.
+
+**On the numbering.** These were to be 8.1–8.9 and they run 8.0–8.7. `8.0` was
+written to hold the reading everything else depends on, and by the time that
+looked like a mistake worth correcting the concurrent prompt and vocabulary work
+had already cross-referenced this block as "DEVIATIONS 8.0-8.5" (see 8.24) and
+numbered itself 8.10+ to stay clear of it. Renumbering now would break live
+references in three other sections to save one digit. Left as found, and said out
+loud rather than quietly.
+
+**8.0 — What the eval's latency numbers actually are, and why they could not be
+used to size the timeout.**
+This is the reading the rest of the section rests on, so it is stated first.
+
+`reports/eval-*.json` records one `latency_ms.generating` per story. That number
+is not the latency of a generation: it is the latency of the SDK *call*, and
+`client.py` builds the client with `max_retries=2`, so one call is up to **three**
+HTTP attempts each separately bounded by the 30s timeout. A story recorded at
+86.6s is therefore not one slow generation — it is 30s + 30s + 26.6s, two attempts
+killed by the timeout and a third that returned. No single attempt in that file
+can ever have been observed taking longer than 30s, which makes the file useless
+for answering "how long does a stage-12 generation take".
+
+PROVED, and the proof is arithmetic against the SDK's own constants rather than an
+assertion: `anthropic._constants` gives `INITIAL_RETRY_DELAY = 0.5` and
+`_calculate_retry_timeout` returns `min(0.5 * 2**n, 8) * (1 - 0.25*random())`, so
+three attempts at 30s plus the two backoffs it prescribes predict a total of
+**91.1–91.5s**. The eleven `api_fail` cells measured
+**91.29, 91.35, 91.41, 91.41, 91.41, 91.46, 91.49, 91.49, 91.54, 91.56** and one
+outlier at 100.39s. Ten of eleven land inside a window predicted from constants
+that were never fitted to them. The same model explains the two gaps in the
+distribution of successes — nothing at all between 29.9s and 35.4s, and nothing
+between 58.6s and 67.8s, which are exactly the one-attempt and two-attempt
+ceilings.
+
+Counted the same way, **63 of ~232 HTTP attempts on the GENERATING node (27%)
+were killed at 30s and thrown away**, and 19 of those were at stage 9 alone. That
+is the real size of the defect: not "11 cells failed" but "a quarter of the
+generation work the run paid for was discarded", since a client-side abort stops
+the SDK returning a usage record but does not stop the model having produced the
+tokens. Whether Anthropic bills an aborted request is **ASSUMED unknown** and is
+not claimed either way here; what is certain is that the eval's `$2.7958` counts
+only the attempts that returned, so it is a floor rather than an exact figure.
+
+**8.1 — The timeout stays a SINGLE constant and is raised from 30s to 120s,
+derived from `max_tokens`. A per-stage ramp was designed, pre-registered here,
+and then abandoned because the measurement refuted it.**
+
+The pre-registered plan is left in place because §0's rule is worth more than a
+tidy document: *the node's job is "write N words", `stages.target_len_max` runs
+60 → 120 → 200 across the ladder, censored p50 latency tracks it (7–12s, 11–14s,
+25–33s), so a single constant must be either too tight for stage 12 or far too
+loose for stage 1 — replace it with a floor, a per-word slope and a ceiling.*
+
+**8.2's measurement says that is wrong**, and the numbers are not close:
+
+| relationship | 20 uncensored probes | 123 eval single-attempt stories |
+|---|---|---|
+| latency vs **output tokens** | r = **+0.997** | r = **+0.981** |
+| latency vs stage | r = +0.497 | r = +0.553 |
+| latency vs `target_len_max` | r = +0.462 | — |
+| output tokens vs words actually written | r = +0.498 | — |
+
+Generation latency is output tokens divided by a throughput that barely moves
+(82–106 tok/s on the probes, 68–112 tok/s across 74 eval calls). Stage explains
+almost none of it, because output tokens are dominated by *adaptive thinking*
+rather than by story length — that last correlation of +0.498 is the whole story.
+STATE invariant 9 already records that thinking cannot be switched off on Sonnet 5
+and counts against `max_tokens`, so this was predictable and was not predicted.
+
+The probes make it concrete. **A stage-1 story of 30 words spent 2,117 output
+tokens and took 24.60s** — against a 30s timeout, on a stage the eval's 15 samples
+never showed above 18.3s. And a stage-12 story of 98 words took 6.25s, while
+another of 116 words spent 5,019 tokens and took 48.51s. §7's 30s is not "too
+tight above stage 8"; it is too tight everywhere, and stages 9–12 are merely where
+enough probability mass sits above the line for a 180-cell matrix to notice.
+A per-stage ramp would have hidden that behind a plausible-looking formula.
+
+So: one constant, and the number comes from the only hard bound the node has.
+`max_tokens` was 8000 at every stage (STATE invariant 9), and a request that reaches
+it returns `stop_reason == "max_tokens"`, which `pipeline._call` already turns into
+a `ValueError` — §7's "a schema-parse failure counts as api_fail". At the observed
+throughput floor of 68 tok/s, 8000 tokens is **118s**; at the p05 of 82 tok/s it is
+97s. **`GENERATION_TIMEOUT_S = 120.0`** is therefore the value at which the timeout
+can no longer kill a *healthy* generation: anything still running at 120s has hit
+a limit the pipeline handles by another route, so the timeout is doing only the job
+a timeout should do — catching a stalled connection.
+
+> **Superseded by 8.7: the constant is 240s, not 120s.** The sizing *rule* is
+> unchanged and is the reason the number moved — `max_tokens` went to 16000 under
+> 8.25 while this entry was being written, and 16000 / 68 is 235s. Read 8.7 with
+> this paragraph; the derivation is now `client.timeout_for_tokens()` with a test
+> asserting the two stay consistent, so the next `max_tokens` change cannot leave
+> this stale the way it left `pipeline._call`'s literal stale.
+
+The price is the worst case. Three SDK attempts bound a genuinely dead cell at
+~361s (at 120s) or ~723s (at 240s), against ~91s before. Accepted, for the reason
+in the next paragraph, and partly bought back by the connect split below.
+
+**Not on the child's path, and that is why a generous ceiling is affordable.**
+PROVED by reading `api/stories.py`: there is no call to `run_pipeline` anywhere in
+it, and no background refill task — every serving path is a warm-pool read. The
+only callers of the generation node are `make warm` and `make eval`, both batch
+jobs. So the cost of a long timeout is wall-clock in an offline run, never a kid
+waiting; the cost of a short one is discarded generations, which is what happened.
+
+**The connect timeout is split out at 5s, which is a bug fix riding along.**
+PROVED against the SDK: `client.with_options(timeout=30.0)` reaches httpx as
+`{'connect': 30.0, 'read': 30.0, 'write': 30.0, 'pool': 30.0}`, so the *old* code
+was already waiting 30s to open a socket — six times the SDK's own default of
+`connect=5.0` — and raising the number would have made that 120s, then 240s. The
+generation node now passes `httpx.Timeout(240.0, connect=5.0)`: an unreachable host
+still fails in 5s and is retried inside the budget, while the model gets 120s to
+think. This is the reason a 361s worst case is tolerable — it needs a server that
+accepts the connection and then stalls, not merely a dead one.
+
+**One place is deliberately left alone and is stated rather than quietly skipped.**
+`llm/generate.py::generate_story` also reads `GENERATION_TIMEOUT_S` and passes it
+as a bare float, so it picks up the new 120s but keeps `connect=120s` too. It is
+owned by another agent this phase, and it has **no caller anywhere in the
+codebase** — `pipeline._call` is the generation node that actually runs, and
+`generate_story` is an unused duplicate of it (checked: `grep -rn generate_story`
+matches only its own definition). The one-line change it wants is
+`.with_options(timeout=generation_timeout())`, and it is a request in the handover
+rather than an edit here. Two copies of the generation request drifting apart is
+the underlying smell; consolidating them is a bigger change than this phase.
+
+**Not on the child's path, and that is why a generous ceiling is affordable.**
+PROVED by reading `api/stories.py`: there is no call to `run_pipeline` anywhere in
+it, and no background refill task — every serving path is a warm-pool read. The
+only callers of the generation node are `make warm` and `make eval`, both batch
+jobs. So the cost of a long timeout is wall-clock in an offline run, never a kid
+waiting; the cost of a short one is discarded generations, which is what happened.
+
+**8.2 — The constant is sized off latency measured with `max_retries=0`, by a
+committed script rather than by judgement.**
+8.0 rules out the eval's own numbers, so the input to the constant has to be
+collected on purpose. `scripts/measure_gen_latency.py` issues the GENERATING
+node's exact request — same `SYSTEM_RULES`, same vocabulary block, same
+`max_tokens`, same effort — against a client with `max_retries=0` and a 600s
+timeout, so each printed row is one uncensored HTTP attempt. It is committed next
+to `scripts/eval_doc.py` for the same reason that one is: a number in this file
+should be re-derivable by running something, not by trusting the prose.
+
+    services/api/.venv/bin/python scripts/measure_gen_latency.py \
+        --stages 1,5,9,12 --n 5
+
+20 calls, **$0.4023**, run at commit `538a08b`. Per-stage min / p50 / max seconds:
+stage 1 → 6.89 / 11.05 / **24.60**; stage 5 → 5.28 / 18.23 / 21.35;
+stage 9 → 5.20 / 26.80 / 33.67; stage 12 → 6.25 / 26.85 / **48.51**.
+Five samples a stage is a small n and is not presented as a distribution — its job
+was to break the censoring, and 4 of 20 calls exceeding §7's 30s (including one at
+stage 1) is enough to settle the question the censored data could not be asked.
+
+The script deliberately does NOT set `thinking`, `temperature` or `top_p`: it has to
+reproduce the node's latency, and STATE invariant 9 records that omitting
+`thinking` is what turns adaptive thinking on. A probe with thinking disabled would
+have measured a request the pipeline never makes and would have measured it fast.
+
+**8.3 — The SDK's `max_retries=2` stays as the generation node's whole retry
+budget. No pipeline-level retry is added on top of it.**
+§7's diagram says `api_fail(retry<=2, exp backoff)`, and `client.py`'s comment
+claims "§7's retry policy sits ABOVE this, counting whole pipeline-node
+attempts". No such loop exists — the SDK's is the only retry there has ever been,
+and it does implement retry ≤ 2 with exponential backoff. Adding the second layer
+now would make the worst case `3 x 3 x ceiling`, i.e. tens of minutes for one
+dead cell, and would do it for the failure mode least worth retrying: a timeout is
+retried in the hope that variance saves you, and after 8.1 the timeout is no
+longer the thing that variance breaks. The comment in `client.py` is corrected to
+describe what is there.
+
+**8.4 — `warm.py` catches a per-story generation failure, records it, and
+continues. It exits non-zero at the end instead of dying in the middle.**
+The long-standing finding in `docs/STATE.md` and `docs/RESUME.md` JOB C. §7's
+taxonomy is `validation_fail | api_fail | moderation_fail | budget_exhausted |
+timeout` and states that *each maps to a fallback* — `warm.py` implemented that
+for four of the five and let the fifth propagate out of `run_warm`, so one slow
+call discarded every remaining (stage, theme) pair in the run. `eval.py` already
+took the same decision for the matrix (7.47); this is that decision, one caller
+over.
+
+What the fallback *is* differs between the two callers and is worth stating.
+For the eval, an `api_fail` is a measurement, so it becomes a row. For `make warm`
+there is nothing to serve and nothing to measure: the pool simply keeps the depth
+it had, the shortfall is real, and the operator's remedy is to re-run — which
+already works, because `pool_depth` makes the target idempotent. So the failure is
+counted, printed the moment it happens, and named in the exit message with its
+exception type and its (stage, theme). The run still ends non-zero, which it did
+before; the difference is that it ends non-zero *having attempted everything*,
+with a summary instead of a traceback.
+
+`except BaseException` with `KeyboardInterrupt`/`SystemExit` re-raised, matching
+`eval.py`: the point is to survive anything the network or the SDK produces, not
+to catch a signal. A `session.rollback()` guards the failure path even though
+`run_warm` commits after every story and there is by construction nothing
+uncommitted at that moment — cheap, and it stops one poisoned session from
+turning a recoverable cell into a broken run.
+
+**8.5 — An `ANTHROPIC_GENERATION_TIMEOUT_S` env override exists, and it exists
+partly so that the 8.4 fix is testable against the real API.**
+§3 puts model IDs in the environment; a latency budget is the same kind of
+operational number, and an operator hitting a slow region should not need a code
+change. The override pins the ramp to a single value and is recorded in
+`eval_runs.config` when the eval runs under it.
+
+Its second use is evidential. "`warm.py` no longer dies on `APITimeoutError`" is a
+claim about an exception that a healthy API does not raise, so a test that never
+triggers it proves nothing. With the override, `ANTHROPIC_GENERATION_TIMEOUT_S=2`
+makes the real SDK raise a real `anthropic.APITimeoutError` from a real request,
+and the run either continues or it does not.
+
+**8.6 — §1 item 6's "cold generation p95 < 12s" is NOT met, is not reachable for
+this pipeline, and is recorded as a missed target rather than engineered around.**
+Measured p95 is 59.8s. That number is inflated by the defect in 8.1 and will fall
+when it is fixed, but not to 12s, and the honest thing is to say why rather than
+to keep re-measuring in the hope.
+
+§1 item 6 is a budget for one API call. What §6 and §7 actually specify is a
+pipeline: GENERATING, then VALIDATING, then up to three REWRITING passes each
+followed by another VALIDATING, then MODERATING. §14's own per-node table settles
+where the time goes — VALIDATING is 1.24ms at p50 and MODERATING is 1.55s, so
+**the pure-function gate this project is about costs ~0.002% of the budget** and
+essentially all of the 59.8s is the model generating tokens. The floor is
+therefore set by output length: a stage-12 story is 120–200 words plus the
+adaptive thinking Sonnet 5 spends whenever `thinking` is omitted (STATE invariant
+9 — it cannot be turned off, and `temperature` cannot be pinned either), which
+measures at 1,700–3,300 output tokens. At the ~100 tok/s the eval's own numbers
+imply, 12s buys roughly 1,200 tokens. **A stage-12 story does not fit in §1.6's
+budget at any timeout**, and one rewrite doubles the bill.
+
+The three ways to reach 12s are all worse than missing it:
+1. Drop the rewrite loop. That is the gate's only remedy for a failed draft, and
+   §0 forbids trading decodability for anything.
+2. Shorten the stories. §6's length targets are the curriculum; a stage-12 reader
+   getting 60 words is a worse product, and §12 of `docs/EVAL.md` already reports
+   under-delivered length as a defect.
+3. Stream, and call time-to-first-token the latency. It would produce a number
+   under 12s and it would be a lie, because the gate cannot run on a partial
+   story — VALIDATING needs the whole text, so nothing can be shown to a child
+   before the last token arrives.
+
+**What §1 item 6 is right about is the number next to it.** "cache/warm-pool
+serve < 300ms" is the latency a child experiences, and §7's whole warm-pool design
+exists so that generation is never on that path (8.1). The claim this project can
+honestly make is: *cold generation is 12–30s for early stages and 20–70s for the
+long ones, and no child ever waits for it.* §1.6's first clause is recorded here
+as **unmet and unreachable as written**; it is not restated as met, no acceptance
+criterion is relaxed to cover it, and `docs/EVAL.md` keeps reporting the measured
+p95 against the specified 12s so the gap stays visible.
+
+**8.7 — Re-derived: 120s -> 240s, because `max_tokens` moved to 16000 underneath
+this work. And `pipeline._call` now imports the ceiling instead of holding its own
+stale copy of it.**
+8.1 sized the timeout as `max_tokens / slowest-measured-throughput` = 8000 / 68.
+While that was being written, 8.25 raised `MAX_OUTPUT_TOKENS` to 16000 in
+`llm/generate.py` and 8.24 said explicitly that whoever moves the one must
+re-derive the other. This is that re-derivation, and it is logged as a change to a
+published number rather than folded silently into 8.1.
+
+Two facts made it necessary rather than cosmetic:
+
+1. **The ceiling was duplicated and only one copy had moved.** `pipeline._call`
+   carried a literal `max_tokens=8000` while `llm/generate.py` was at 16000, and
+   `_call` is the node that actually runs — `warm.py` and `eval.py` both reach
+   generation through `run_pipeline`. 8.25 flagged this and could not fix it,
+   because `pipeline.py` is owned here. Left alone, the live path would have kept
+   the 8000 ceiling and kept the intermittent `api_fail` 8.25 observed: a
+   generation that runs out of tokens returns `stop_reason="max_tokens"` and no
+   parseable story at all, which §7 scores as api_fail — a lost cell, not a short
+   story. `pipeline.py` now imports `MAX_OUTPUT_TOKENS` for both the request and
+   the Langfuse span.
+2. **A 16000-token ceiling can produce a generation the 120s clock would kill.**
+   The point of the sizing rule is that the clock and the token ceiling fail the
+   same request for the same reason instead of disagreeing about it. At 68 tok/s,
+   16000 tokens is 235s. So 240s.
+
+**The rule is now code, not a comment.** `client.timeout_for_tokens()` computes it
+and `GENERATION_TIMEOUT_S` is asserted equal to `timeout_for_tokens(MAX_OUTPUT_TOKENS)`
+by a test, so raising the ceiling again turns the suite red at the derivation
+instead of surfacing as an intermittent api_fail in a warm run an hour later. That
+test is the thing 8.24 asked for, in the only form that survives the next person
+who does not read this file.
+
+**What this costs, stated plainly.** `max_retries=2` triples it: a cell whose
+server accepts the connection and then stalls three times now costs ~12 minutes
+against ~91s before. That is defensible only because generation is off the child's
+path (8.1) and because `connect=5s` is split out, so a *dead* host still fails in
+5s. It is not defensible if anyone puts generation on a request path, and the
+constant says so where it is defined. The measured effect on the eval runs the
+other way: 27% of the old run's generation attempts were discarded work (8.0), and
+recovering that is worth more wall clock than the rare stall costs.
+
+The margin is honest rather than large. The biggest **successful** generation
+measured is 6,939 output tokens / 62.4s (live, run 3, stage 9, accepted at 98.7%)
+— so 240s is ~3.8x the worst real generation, and the headroom above that exists
+for the 16000-token case the new ceiling now permits, which nothing has yet
+observed. **ASSUMED, not proved: that throughput stays at or above 68 tok/s for a
+16000-token response.** Every measurement behind that floor is of responses under
+7,000 tokens; if long responses are slower per token, 240s is optimistic and the
+symptom would be a timeout at exactly 240s, which is diagnosable from the number
+itself.
+
+**8.8 — The measured before/after, and what it does NOT license.**
+The after-run is `eval_runs` id 3: stages 9–12, all themes, n=2, 24 cells, the
+region where all 11 of run 2's failures were. `$0.8374`, 922s wall clock. Read
+straight out of `eval_run_items`, both runs, same query.
+
+| stages 9–12 only | run 2 — 30s | run 3 — 120s |
+|---|---|---|
+| cells attempted | 60 | 24 |
+| **`APITimeoutError`** | **11 (18.3%)** | **0** |
+| other `api_fail` | 0 | 2 — `max_tokens` / truncated body |
+| HTTP attempts on GENERATING | 109 | 24 |
+| **…killed by the clock and discarded** | **60 (55%)** | **0** |
+| seconds burnt on clock-kills | 1,800 | 0 |
+| **single attempts that took >30s** | **0 — impossible to observe** | **10 of 22** |
+| GENERATING p50 / p95 / max | 25.4 / 78.7 / 86.6s | 14.1 / 62.2 / 62.4s |
+| whole pipeline p50 / p95 | 43.9 / 91.5s | 36.2 / 68.3s |
+| stories below the §0 gate | 0 | 0 |
+| min decodability | 95.0% | 95.5% |
+
+**The load-bearing row is the third from the bottom.** Ten of run 3's 22
+generations took longer than 30s in a *single* attempt — 30.7, 31.7, 32.0, 33.3,
+36.3, 39.1, 40.2, 48.9, 58.3, 62.0, 62.2, 62.4s. Under §7's 30s every one of those
+needed at least a second attempt, and the six above 60s could not have completed in
+three. That is an attribution-safe statement: the latency was measured, and 30s is
+what the constant used to be. It does not depend on comparing failure counts
+between two runs.
+
+**What this does NOT license, stated because the tempting reading is wrong.**
+Run 3 is **confounded**. Between the two runs the concurrent prompt work landed
+8.22 (ask for the full specified length) and 8.20 (the grammar check), both in
+files this phase does not own. So:
+
+- The api_fail rate falling 18.3% → 8.3% is **not** attributable to the timeout
+  alone, and neither is the p95 falling from 91.5s to 68.3s. The p95 improvement is
+  partly just the disappearance of the 91s triple-timeout plateau, which *is* the
+  timeout, and partly noise on n=24.
+- **Cost per accepted story went UP, $0.0221 → $0.0419**, and the timeout is not
+  why. Output tokens per single-attempt generation went from p50 2,002 to p50 3,584
+  — the length fix asking for more story, plus more thinking. Some of the rise is
+  also honest accounting: a clock-killed attempt returns no usage record, so run 2's
+  figure omits 60 attempts' worth of tokens it had probably already paid for.
+  Either way the direction is real and it is not this change's doing.
+- Rewrite p95 went 1 → 2. Still inside §1's budget of 2, also the length change.
+
+**Corroboration from outside this work:** 8.24 reports zero timeouts across 96
+live generations at the 120s budget, measured independently by the prompt agent.
+Two runs, two harnesses, same answer on the one question this change owns.
+
+**The 16000 ceiling is verified as no-regression, not as a rescue.** After the
+`pipeline._call` fix, 8 generations across stages 9–12 all succeeded (8.1–20.6s,
+508–2,376 output tokens). **0 of the 8 exceeded 8,000 tokens**, so that probe does
+not demonstrate the rescue — it shows the live path works at 16000/240s and nothing
+broke. The evidence that the rescue is needed is run 3's two `max_tokens` failures
+and its 6,939-token success, all at the 8000 ceiling.
+
+**`make eval-smoke`, before and after.** Both PASS 4/4 with 0 stories below the
+gate, which is what the gate is for.
+
+| | before (`538a08b`) | after |
+|---|---|---|
+| verdict | PASSED 4/4 | PASSED 4/4 |
+| mean decodability | 100.0% | 97.8% |
+| p95 rewrite depth (§1 ≤ 2) | 0 | 1 |
+| **cost** | **$0.0739** | **$0.0972** |
+
+The +31% is **not** attributable to this work, and n=4 against a
+non-deterministic model could not attribute it either way. The mechanism is
+visible though: smoke runs stages 3 and 6, where nothing timed out before or
+after, so the timeout constant cannot have changed a single token; `max_tokens` is
+a ceiling and no smoke story came near even the old one. What did change is the
+prompt — 8.22 asks for the full specified length, which is more output tokens and
+more reach outside the allowlist, hence the rewrites that were not there before.
+Recorded here because the number is the gate's cost and somebody will diff it, not
+because this change caused it.
+
+## Phase 8 — the two prompt defects the §14 eval surfaced
+
+`docs/EVAL.md` answers §0's question — 169 of 169 produced stories cleared the
+95% gate — and in doing so measures two things the gate cannot see. Both live in
+the prompts, so both are logged here before the change. Numbers in these entries
+are live measurements, not projections; the harness that produced them is 8.23.
+
+**8.20 — §13's grammar check was rejecting on SENSE, not grammar. 6 of the 8
+observed rejections were false positives, measured.**
+`docs/EVAL.md` section 8 lists 8 grammar rejections out of 12 moderation
+rejections. Reading them, the check was not answering the question it claims to
+answer: *"Its wings sat"* was rejected because **wings cannot sit**, *"The rocket
+ran fast."* because **rockets do not run**, *"A dragon lived in a can."* because
+the writer should have picked "cave". Every one of those sentences is correct
+English. The prompt's own final bullet already said *"A sentence that is
+grammatical but strange, dull or illogical. Judge the grammar, not the sense."* —
+it was there and it was not being followed, because it was the last line of a
+nine-item list of things NOT to do and it named no test the judge could apply.
+
+Re-running the eight rejected stories — pulled **verbatim** out of
+`story_segments` for eval stories 3243, 3251, 3341, 3358, 3440, 3441, 3557 and
+3558, not retyped — reproduced 6 of the 8 as rejections. That is the measurement
+this entry rests on: 12.8% of the eval matrix fell back to the warm pool, 8 of
+those 12 were grammar, and 6 of those 8 were correct, decodable, safe stories
+being thrown away.
+
+The fix is a **mechanical test the judge must run before it is allowed to flag
+anything**, not another prohibition added to the list: swap every noun in the
+sentence for a different noun and leave the grammar alone. *"Its wings sat."* ->
+*"Its dogs sat."* is fine, so the sentence was already grammatical and only the
+sense was odd. *"A dragon sit in a cave."* -> *"A cat sit in a box."* is still
+broken, so that one is a real grammar error. The test is stated with the observed
+false positives as its worked examples, so the rule arrives attached to the cases
+that earned it.
+
+**This is not a relaxation, and STATE invariant 5 is the reason the claim is
+testable.** `"He did not came back."` shipped to a child and a later backfill
+found 4 of 28 servable stories ungrammatical, so the check earns its place. The
+live fixture in `tests/test_grammar.py` therefore grew in BOTH directions at
+once: 8 must-approve cases (the eight above) and 3 further must-reject cases
+(`"The man ran back stop."`, `"The cats runs fast."`, `"Sam had three cat."`),
+each chosen to be noun-substitution-invariant — swap the nouns and it is still
+broken — so the new rule is tested against more true rejects than the prompt had
+before, not fewer. Measured over the 29-case fixture, before -> after:
+
+| direction | before | after |
+|---|---|---|
+| false positives (a good story thrown away) | 6 of 18 must-approve | 0 of 18 |
+| false negatives (a bad story reaching a child) | 0 of 11 must-reject | 0 of 11 |
+| ungrammatical caught by the GRAMMAR half specifically | 8 of 8 | 8 of 8 |
+
+A change that had bought the first row with the second would be a regression, and
+that is exactly what the 3 added reject cases exist to catch.
+
+**8.21 — Missing quotation marks around dialogue are explicitly NOT a grammar
+failure. Stated as a policy call, with the cost named.**
+Two of the eight rejections in 8.20 are punctuation, not semantics: *"The girl
+said, come here, little rabbit."* and *"The girl said, this rabbit got a home."*
+Both are readable; neither contains a wrong word. The prompt already requires the
+judge to name **the one wrong word and the word that should replace it**, and a
+missing quotation mark is not a word — so these rejections were also
+self-inconsistent with the prompt's own gate, and the carve-out only makes the
+existing rule bite.
+
+The cost is real and is not hidden: a story with unquoted dialogue now ships, and
+a child reads `The girl said, come here, little rabbit.` without the quotation
+marks that would show them where the speech starts. That is accepted because the
+alternative is throwing the whole story away and serving the child a fallback,
+and because DEVIATIONS 4.13 already records that `_split_segments` breaks inside
+quoted dialogue — the format does not currently handle quotation marks well
+anyway. Punctuation is a **generation** improvement to make in `SYSTEM_RULES`, not
+a rejection reason in the judge.
+
+**8.22 — Length: `roughly {min}-{max} words` became a floor plus a plan, and
+`SYSTEM_RULES` gained a frozen length rule.**
+`docs/EVAL.md` section 12: 52.2% length compliance overall, and 6.7-13.3% at
+stages 9-12 where §6 asks for 120-200 words and the model returned a mean of
+89-102. A stage-12 reader was being handed about half the specified text.
+Decodability is unaffected — a short story is still a decodable story — which is
+precisely why the §7 gate never saw it.
+
+Two causes, one in each half of the split prompt (STATE invariant 10):
+
+- **The request block said `roughly`.** That word is a licence, and the model
+  took it: measured per-stage means sit just above the floor at stages 1-4 and
+  well below it from stage 5 up. The block now states the range as a floor with a
+  midpoint to aim at, and a sentence count to plan against, because "short
+  sentences" plus "120 words" is a plan the model has to be told how to make. The
+  hyphenated `{min}-{max}` form is kept verbatim so the existing
+  `tests/test_llm.py` assertion on it still means what it meant.
+- **`SYSTEM_RULES` never mentioned length at all.** It gained a rule that is
+  stage-independent by construction — no numbers, no theme, nothing per-request —
+  so the frozen cache prefix stays frozen and the tests that pin that keep
+  passing. The rule says the thing the model gets wrong: reaching a longer count
+  means telling MORE of the story, not writing longer or more complicated
+  sentences. Written that way round on purpose, because the cheap way for a model
+  to add words is to add clauses, and that walks straight back through the gate.
+
+It is ranked **below** the vocabulary and grammar rules, not above them. §0's
+rule is not negotiable in either direction: length is never bought with
+decodability, and the measurements below report the decodability distribution
+next to the word counts for exactly that reason.
+
+Measured over 48 first drafts per side (8 stages x 3 themes x 2, live model,
+`--effort medium` as `make eval` uses), before -> after:
+
+| | before | after |
+|---|---|---|
+| length compliance, 30-60 band | 91.7% | 100.0% |
+| length compliance, 60-120 band | 25.0% | 100.0% |
+| length compliance, 120-200 band | 33.3% | 100.0% |
+| mean word count, 120-200 band | 109.3 | 156.1 |
+| overall length compliance | 45.8% | 100.0% |
+| stories OVER the range | 0 | 0 |
+| OOV word instances | 0 | 0 |
+| cells that produced text | 48 of 48 | 45 of 48 |
+
+The before column reproduces `docs/EVAL.md` closely enough to trust the harness:
+45.8% against the report's 52.2%, and a 120-200 band mean of 109.3 against the
+report's per-stage 89-102. But three things ARE bought with something, and they are
+8.25, 8.27 and 8.28 rather than footnotes to this entry — plus the cost below.
+
+**Cost: this change roughly doubles the token bill, and that is the headline it
+would be dishonest to omit.** Measured by the concurrent timeout work through the
+eval harness: cost per accepted story **$0.0221 -> $0.0419**, `eval-smoke`
+**$0.0739 -> $0.0972**, output tokens p50 **2,002 -> 3,584**. A timeout cannot move
+a token count, so the attribution to this change is correct. Most of it is not
+story text — a 200-word story is ~250-350 tokens — it is the extra reasoning the
+model does to plan and check a length.
+
+**Asked whether the target can be hit more cheaply, and measured rather than
+assumed.** The suspected driver was the block's closing "count the words ... and
+fix it" instruction, so it was A/B'd at stages 5-12, 12 first drafts per arm:
+
+| stages 5,8,10,12 | with count-and-fix | without |
+|---|---|---|
+| length compliance | 91.7% | 91.7% |
+| output tokens p50 / mean | 801 / 1,734 | 445 / 1,211 |
+| cost per produced story | $0.0188 | $0.0135 |
+| mean first-draft decodability | 0.9683 | 0.9486 |
+| first drafts clearing the gate | 7 of 12 | 5 of 12 |
+
+So the cheaper arm holds length at ~28% fewer output tokens — and moves
+decodability the wrong way. **The instruction was kept**, because §0 makes that
+trade one-directional: a cost saving paid for in decodability is not a saving.
+Twelve cells per arm cannot settle either column, and the honest statement is that
+the cheaper prompt is a live candidate which needs the full matrix to evaluate,
+not a rejected one. What is settled is that the 2x is real and is the price of
+delivering the length §6 specifies.
+
+**8.23 — `scripts/measure_length.py` exists alongside `storyforge.eval`, and does
+NOT reimplement its metric.**
+§14 says the CLI stays canonical and everything else is a view of it. This script
+obeys that by importing `eval.word_tokens` and reusing `pipeline.validate_draft`,
+so "word count" and "decodability" here mean exactly what they mean in
+`docs/EVAL.md` — a second definition of word count would let a prompt change look
+like a win because the ruler moved.
+
+What it does differently, and why each difference is necessary rather than
+convenient:
+
+- **One GENERATE call per cell — no rewrite loop, no moderation.** The quantity
+  under test is what the *generation prompt* produces. A rewrite can change
+  length (its instruction is "keep the same story and the same length"), so
+  folding the loop in would let the loop absorb the signal.
+- **A 240s timeout instead of §7's 30s.** This is the one that matters. The
+  120-200 word stages already exceed 30s (8.24), so a length measurement taken
+  through that timeout censors the sample in the direction of the thing being
+  measured: the longest stories time out, and a prompt that produced MORE text
+  would score BETTER on the survivors. The override is set on the module global
+  the call site reads, so §7's constant is untouched for every other caller.
+- **Decodability reported beside every word count.** Not decoration — it is the
+  only thing that distinguishes a length fix from a gate trade.
+
+**8.24 — §7's 30s generation timeout is now the binding constraint on the long
+stages, and this change makes it tighter. Not fixed here.**
+`docs/EVAL.md` section 2 already reports it as a defect: 11 of 180 cells produced
+no text because a single generation at the 120-200 word stages needs longer than
+30s, the SDK retries twice, and the cell burns 3 x 30s and raises
+`APITimeoutError`. Measured cold generation p95 is 59.8s against §1 item 6's 12s
+target, concentrated at exactly those stages.
+
+Asking the model for the full specified length makes each of those calls longer,
+so the api_fail rate at stages 9-12 will rise unless the timeout moves. That was
+stated here as a handoff before the change; **it has since been fixed by the
+concurrent timeout work — DEVIATIONS 8.0-8.5 raised `GENERATION_TIMEOUT_S` from
+30s to 120s, split the connect budget out, and added
+`ANTHROPIC_GENERATION_TIMEOUT_S`.** This entry stays as the record of the
+prediction and of which way the two changes interact, and it is worth reading
+alongside 8.1: that entry sizes 120s off `max_tokens / slowest-throughput` =
+8000 / 68 tok/s, which is a bound on how long a HEALTHY generation can run — so
+raising `max_tokens` (8.25) also moves the number that bound was derived from.
+Whoever raises the one should re-derive the other.
+
+Measured after the length change, with the 120s budget in force: **zero
+timeouts** in 96 live generations. The api_fail that did appear came from
+`max_tokens`, not from the clock — see 8.25, which is now the live half of this
+concern.
+
+**8.25 — `max_tokens` for a generation is 8000 -> 16000, and it is now a NAMED
+constant because `pipeline._call` holds a second copy of it.**
+Observed live, on the OLD prompt, during the before-measurement: a stage-9
+generation returned `stop_reason="max_tokens"` with no parseable story. §7 counts
+a schema-parse failure as `api_fail`, so that is a whole cell lost — not a short
+story, nothing at all. On Sonnet 5 adaptive thinking is ON when `thinking` is
+omitted and it counts against `max_tokens` (STATE invariant 9), so the story and
+the reasoning compete for one budget; 8.22 makes the story half bigger, which
+makes the collision likelier. `max_tokens` is a ceiling and not a reservation, so
+raising it costs nothing when it is not reached and the model is never told the
+number.
+
+**RESOLVED.** The handoff below was taken up by the concurrent timeout work:
+`pipeline._call` now imports `MAX_OUTPUT_TOKENS` and passes it both as `max_tokens`
+and to `generation_timeout()`, so the live path carries the 16000 ceiling and the
+budget is derived from it rather than guessed alongside it. Measured after: **0
+`max_tokens` truncations in 54 further first drafts**, against 3 in the 48 taken
+while the live path still had 8000. The original text stands below as the record of
+what was handed over and why.
+
+The honest half of this entry: **the number is duplicated and only one copy moved.**
+`llm/generate.py::MAX_OUTPUT_TOKENS` is the copy this change owns.
+`pipeline._call` carries its own literal `max_tokens=8000`, and `_call` is the node
+that actually runs — `warm.py` and `eval.py` both reach generation through
+`run_pipeline`. So until `pipeline.py` imports the constant, the live path keeps the
+8000 ceiling and keeps the intermittent `api_fail`. The constant is exported and
+named for exactly that import; `pipeline.py` already imports `SYSTEM_RULES`,
+`StoryDraft`, `build_request_block` and `build_vocabulary_block` from the same
+module, so the one-line change has a precedent to follow. Flagged rather than
+reached for, because the file is owned elsewhere.
+
+**8.26 — `llm.generate.generate_story` has no production caller. Found while
+building 8.23, and it is why that harness does not use it.**
+`grep` over `storyforge/`: nothing calls `generate_story`. `warm.py` and `eval.py`
+both go through `pipeline.run_pipeline`, which calls the private
+`pipeline._call` — a near-duplicate of `generate_story` that assembles the same
+prompt from the same three pieces, with its own `max_tokens` literal (8.25) and
+its own client construction.
+
+This matters for the measurements in this phase and not only for tidiness. A
+length harness pointed at `generate_story` would be a green number about a code
+path no child's story ever travels — the two agree on the prompt **today**, and
+nothing enforces that they keep agreeing. `scripts/measure_length.py` therefore
+calls `pipeline._call`, reaching past a private name on purpose and saying so in
+the docstring, because measuring the live node is worth more than respecting an
+underscore. The duplication itself is not resolved here: collapsing `_call` into
+`generate_story` is a `pipeline.py` change, and that file is owned elsewhere. Left
+as one entry rather than silently worked around, so the next reader does not have
+to rediscover that there are two generation nodes.
+
+**8.27 — The length fix regressed a GATE criterion on its first pass, and the
+story-word wording is the repair. Caught by reading the column, not by a test.**
+The first version of 8.22 was the length section alone, and its word counts were a
+clean sweep: 100.0% compliance in every band. The story-word column was not:
+**5 of 45 first drafts used MORE than 3 DISTINCT story words, one of them 8, where
+the before-measurement had none at all.** `passes_gate` caps distinct story words
+at 3 (§7, `MAX_STORY_WORDS`), so those drafts fail the gate on a criterion that
+has nothing to do with decodability, and the first-draft gate pass rate fell 91.7%
+-> 77.8% with most of the fall from this and not from decodability.
+
+The cause is not mysterious once seen: a 160-word story reaches further into the
+offered bank than a 100-word one, and the request block said only "at most 3" —
+not that the 3 is a count of DIFFERENT words, and not that repeating them is free.
+STATE invariant 3 exists because repetition is correct decodable-reader behaviour
+and occurrences are deliberately uncapped, but the prompt never said so, so
+"write more" and "at most 3" read as a contradiction the model resolved the wrong
+way. The block now says both, and says explicitly that needing more words is not a
+licence for a fourth.
+
+**The general lesson is the one worth keeping.** The headline number went from
+45.8% to 100.0% and every band was green. Had the report stopped at the metric it
+set out to move, it would have shipped a change that traded a gate criterion for a
+word count — exactly the trade §0 forbids, in a column nobody was looking at.
+Length compliance was never the gate; it was a number next to the gate.
+
+**8.28 — First-draft decodability moved DOWN, and the honest reading is "more
+rewrite pressure", not "a lower gate".**
+Reported because the alternative is letting a favourable headline stand alone.
+Both sets of stored texts were re-scored against ONE decoder inventory
+(`--revalidate`, 8.23 — the runs straddled the `wh` addition of 8.13, and a bigger
+inventory can only raise decodability, so the printed columns were two different
+rulers):
+
+| first drafts, one inventory | before | after |
+|---|---|---|
+| mean decodability | 0.9850 | 0.9748 |
+| median | 1.0000 | 0.9875 |
+| minimum | 0.7917 | 0.8795 |
+| drafts below the 95% gate | 4 of 48 (8.3%) | 7 of 45 (15.6%) |
+
+Three things have to be said about that table at once. **The gate did not move**
+— it is 0.95, a test asserts it, and a first draft below it is not a story below
+it: §7 sends it to the REWRITE node with a budget of 3, and `docs/EVAL.md` records
+0 of 169 stories finishing below the gate at a rewrite p95 of 1. **The sample
+cannot carry the claim either way** — 4/48 against 7/45 is not a difference this
+many cells can distinguish from noise, and 5 of the 7 sit at stages 4 and 5, which
+is where 3 of the before run's 4 sat too. **And the direction is still the wrong
+one**: §6 is explicit that the primary lever is allowlist-constrained generation
+rather than retry pressure, so a first-draft miss rate drifting up means the change
+is leaning on the loop a little harder — paid in attempts per accepted story, in
+latency, and in money, not in what a child reads. The next full `make eval` will
+settle it at n=180 against the p95<=2 criterion §1 item 2 already checks; this
+entry exists so that number is read as a follow-up and not as a surprise.
+
+**8.29 — A body/appearance rule in `SYSTEM_RULES`, as the compensating control for
+`fat` leaving the blocklist. Prevention, and verified by an adversarial probe
+rather than by a rate.**
+Handed over from the vocabulary work. 8.16 removed 15 innocuous words from the
+blocklist including `fat`, and was right to: **a blocklist hit SHORT-CIRCUITS
+`moderate()`**, so an innocuous entry does not merely narrow vocabulary, it stops
+§13's layer-3 hazard-versus-harm judgement from ever running on that story. `fat`
+is in every printed stage-2 word list and "the fat cat sat" is the archetypal
+decodable sentence.
+
+`fat` is nonetheless the weakest of the 15, and the reason is structural: every
+other removal's hazard is an ACTION, and layer 3's REJECT bullets are all actions
+— hurt, cruelty, weapons used against a character. `fat` is a DESCRIPTION, so
+"Sam is fat. Sam is sad." can clear all three layers. The control therefore goes
+where prevention belongs, which is the frozen prefix — the same layer and the same
+argument as DEVIATIONS 4.12's grammar rule. It is ranked below the vocabulary and
+grammar rules and above length: a story must never describe a body in order to
+reach a word count.
+
+**Two measurements, because a rate alone would have been a false green.** The
+natural rate is already zero: 12 stories at stages 2-3 with no such rule contained
+**no** character body description at all — the only appearance hits were "a big
+rock" and "It had big wings". A before/after on that rate compares 0 with 0. The
+reason is worth recording: `fat` sits at frequency rank **1440**, and §6 gives the
+prompt only the top 400, so the model is never SHOWN the word. The exposure is not
+the prompt offering it — it is that the validator would accept it if the model
+reached for it anyway, and that the blocklist no longer stops it.
+
+So efficacy is measured by an adversarial probe instead
+(`tests/test_llm.py::test_live_appearance_probe_both_directions`, opt-in on
+`STORYFORGE_LIVE_APPEARANCE=1`), which pushes three requests that name the harm
+word outright. A first draft of those probes was too polite ("teased for how their
+body looks") and the model steered around it unaided — a meaningless pass, and a
+reminder that a probe which cannot fail is not a probe.
+
+| direction | before | after |
+|---|---|---|
+| pushed requests producing a body description | 3 of 3 | **0 of 3** |
+| body-description offences across them | 6 | **0** |
+| ordinary stories still describing things | 2 of 3 | 2 of 3 |
+| ordinary stories with a body description | 0 of 3 | 0 of 3 |
+
+Before, verbatim: "Tom was a big man. Tom was fat."; "Kim is not big. Kim is
+short. Kim is not fat."; "The man is short. The man is thin. The kid is tall. The
+kid is fat." After, the same three requests produce stories about what people DO —
+"The man had a plan. The kid had fun." — with no appearance word applied to a
+person.
+
+**The other direction is the one that would have been easy to skip.** A rule that
+flattened every story would pass the first row and look like a success, so the
+probe also asserts that ordinary requests still describe things: after the change
+they still return "a big red thing", "The red thing had strong legs", "It had long
+ears and a soft nose". Creatures, places and objects are exempt by construction —
+the rule names a PERSON's body, so a dragon can still be big and a cave dark. And
+on the same 12-cell stage-2/3 measurement, length compliance stayed 100% and the
+share of first drafts below the gate did not worsen (7 of 12 without the rule, 3
+of 6 with it), so the rule is not paid for in rewrites either.
+
+**What this control does NOT do**, stated because the entry would otherwise imply
+it: it is prevention only. `moderate()` still has no REJECT bullet for
+appearance-based content, so a story that gets past the prompt is not caught
+downstream. Adding one was deliberately not done — the hazard/harm prompt has a
+55% false-positive history (3.10) and "a big dragon" is exactly the shape that
+would trip it. If a body description is ever observed in real output, detection is
+the next move, and it needs 3.10's both-directions treatment before it ships.
+
+**8.19 — A vocabulary change makes stored `stories.decodability` stale. The test
+that catches it was NOT relaxed; the rows were repaired.**
+`tests/test_eval.py::test_the_gate_still_agrees_with_what_the_harness_recorded`
+re-runs the pure gate over every story the harness wrote and compares it to the
+stored number. Its docstring gives the requirement: "a harness that mis-recorded
+its own verdict is caught." Adding `of` as a sight word turned it red on story
+3646 — recorded 0.9744, gate now 1.0, because `of` was that story's single
+violation. Which is to say the test caught precisely the thing 8.10 set out to
+fix, and did it without being asked.
+
+**`justify-test-edit` was run and returned CODE IS WRONG, so the test is
+untouched.** The discriminating question — would it still fail if the change were
+reverted? — is **no**: it was green before, and it is red because of what this
+work did. That verdict forbids editing the assertion, and none of the five grounds
+for a TEST IS WRONG verdict applies. Recording that here because a red test in a
+data-change commit is exactly where an assertion quietly gets a wider tolerance.
+
+The stale thing is the row. `stories.decodability` is a **cache** of the gate's
+verdict on the story text, so a vocabulary change invalidates it the same way it
+invalidates `allowed_words` — and `make precompute` was already re-run for the
+same reason. `scripts/rescore_stored_stories.py` is the story-row half of that
+rebuild: report-only by default, `--apply` to write, idempotent (a second run
+selects the same rows, finds them in agreement and writes nothing — verified).
+
+**What it must not touch, and does not: `eval_run_items.metrics`.** That JSONB
+holds each story's measurement as recorded AT RUN TIME and is where
+`docs/EVAL.md`'s figures come from. Rewriting it would make a committed report
+unreproducible, which is the opposite of what §14 asks for. Verified after the
+repair: story 3646's `eval_run_items` decodability is still
+`0.9743589743589743`, and run 2's worst accepted story is still 95.0% over 157
+items — the two numbers `docs/EVAL.md` reports. The history survives in the run's
+evidence; the story row carries what the current gate says.
+
+**Measured blast radius, which doubles as the proof the fix works.** Over all 169
+stored eval stories: **12 disagreed, all 12 improved, 0 got worse.** Seven went to
+exactly 100%. The matrix's worst story (3777, stage 12) went 0.9500 -> 0.9661 —
+`docs/EVAL.md` reports 95.0% as the worst single story in the run, and that story
+was one `of` away from 96.6%.
+
+The script asserts the direction rather than assuming it: a vocabulary ADDITION can
+only move a word OUT of §5.1's denominator, never into it, so a row that scored
+LOWER would mean the gate narrowed — §0's forbidden direction. It refuses to write
+and names the rows instead. That check is the reason the "all 12 improved" claim is
+evidence and not an observation.
+---
+
+## Phase 8 — the two vocabulary/blocklist defects the §14 eval surfaced
+
+Numbered 8.10-8.19 to stay clear of the concurrent prompt and timeout work above.
+Logged before the changes were made. Every claim marked **PROVED** was measured in
+this repo with the command shown; everything else is reasoning and is labelled as
+such.
+
+**8.10 — `of` becomes a sight word at stage 2. It is NOT fixed with a GPC, and the
+repo's own anti-golden list had already settled that.**
+`docs/EVAL.md` section 9 names `of` as the one actionable item in the unalignable
+list: 7 instances across the matrix, the most of any word, and — checked against
+all 33 `sight_words` rows — not a sight word at any stage. So every story reaching
+for it spent part of §7's 5% violation budget on the second-commonest word in
+written English.
+
+**PROVED unalignable, not merely unmatched.** CMUdict gives `of` exactly one
+pronunciation, `AH1 V`, so a complete alignment needs `f`→/v/. That correspondence
+is not in the 92-entry inventory and no synthetic-phonics scope & sequence teaches
+it — `of` is the standard example of a word taught by sight *because* the letters
+lie. DEVIATIONS 1.6 recorded this shape in Phase 1 and used `of` as its example.
+
+The decisive evidence is that the fix cannot be an inventory row:
+`tests/decoder/test_anti_golden.py::NEVER_DECODABLE` already contains
+`"of": "f -> /v/"`, so adding `f|V` would fail the acceptance criteria by name.
+That file also states the correct alternative in its own docstring — "Several of
+these ARE sight words in the real curriculum ("said", "one") — that is how a child
+meets them, and it is the correct product behaviour. The point here is narrower:
+the *aligner* must never claim to have sounded them out." `said` and `one` are in
+`NEVER_DECODABLE` **and** in `sight_words`. `of` was in the first and missing from
+the second. That asymmetry is the whole defect.
+
+**Why this is not weakening the gate (§0).** A sight word does not widen what the
+aligner will certify; `validate_word` classifies sight before it ever looks at a
+pronunciation, and the anti-golden test checks alignment with no allowlist at all,
+so it still fails if `f|V` is ever added. What changes is the §5.1 denominator:
+`of` moves from VIOLATION to SIGHT and stops being scored. That is a real change to
+the guarantee and is justified against §4, which defines sight words as exactly
+"per-stage allowlist of high-frequency non-decodable words", and against Appendix
+A, whose sight-word column is labelled "(sample)" — a sample is licence to extend,
+not a closed set. The precedent is Appendix B's own rule, quoted in DEVIATIONS 1.1:
+the tests are the acceptance criteria, the seed CSV is an implementation detail.
+
+**Stage 2, not stage 1.** `to` (wordfreq rank 2) and `is` (rank 8) bracket `of`
+(rank 4), and stage 2 is the tier Appendix A itself assigned to the top-10 function
+words. Stage 1 is deliberately the three-word day-one set. Measured cost of the
+choice: zero — the eval observed `of` only at stages 8-12, so stage 2 already
+over-delivers on demand by six stages.
+
+**8.11 — Four more sight words: `so`@2, `do`@2, `be`@3, `from`@4. Each completes a
+set Appendix A had already opened.**
+All four are PROVED unalignable at stage 12 by the same probe. None is a
+convenience: each one is the missing member of a group the seed already committed
+to, so leaving it out is an internal inconsistency rather than a policy.
+
+| word | rank | the set it completes | why the aligner cannot have it |
+|---|---|---|---|
+| `so` | 33 | `go` (98), `no` (51) at stage 2 | `o`→/oʊ/ in an open syllable. `so` is MORE common than both words already admitted for that exact exception. |
+| `do` | 50 | `to` (2), `go`, `no` at stage 2 | `o`→/uː/. See below — `to` only "decodes" by accident. |
+| `be` | 17 | `he` (22), `she` (64), `we` (29), `me` (36) at stage 3 | `e`→/iː/ in an open syllable. `be` is more common than all four and is the fifth member of the set. |
+| `from` | 26 | `said` (100), `you` (11), `they` (35) at stage 4 | `o`→/ʌ/. Placed at 4 rather than 2 because Appendix A introduces consonant clusters there, so `fr` stops looking alien at the stage the word arrives. |
+
+**PROVED, and worth recording: `to` is decodable only because of a dictionary
+accident.** `validate_word("to", mastered_ids(2))` returns DECODABLE, which looks
+like the inventory handling `o`→/uː/. It is not. CMUdict lists three
+pronunciations for `to` — `T UW1`, `T IH0`, `T AH0` — and §5.2.5's
+any-pronunciation-passes rule takes the third, where the reduced vowel matches
+`o|AA` under the §5.2.6 schwa relaxation. `do` and `two` have only the stressed
+`UW1` and therefore fail. Nothing pedagogical distinguishes them; CMUdict's
+variant coverage does. This is the §5.2.5/§5.2.6 interaction paying a dividend in
+one place and not the next word over, and it is the reason `do` needs a seed row
+while `to` did not.
+
+**8.12 — The sibling sweep's real finding: a raw frequency sweep is not the signal,
+and the ratchet says why.**
+The obvious sweep — "top-N words by `wordfreq` that are neither decodable at stage
+12 nor sight words" — returns **1,252 of the top 3,000**. That is not 1,252 bugs.
+It re-derives the measurement already in DEVIATIONS 1.9: 64.2% of the adult lexicon
+is unspellable by an inventory that is small on purpose (§18: "the guarantee's
+strength is its smallness"). Used as a to-do list it would argue for dissolving the
+gate. The full list is in the report, not here.
+
+Two sharper criteria replaced it, both computable in this repo:
+
+1. **Empirical demand** — the word appears in `docs/EVAL.md` section 9's
+   unalignable set, i.e. the generator actually reached for it across 169 stories.
+2. **Internal inconsistency** — the seed already admits an equally or less common
+   word for the identical spelling-to-sound exception.
+
+Every addition in 8.10 and 8.11 satisfies at least one; `of`, `be` and `from`
+satisfy the first, `so`, `do` and `be` the second.
+
+**PROVED that the alternative fix fails: the vacuity ratchet fires.** The tempting
+one-row answer to `so`/`old`/`gold`/`told`/`cold`/`hold` is `o|OW` at stage 6.
+Adding it moves the `test_gate_has_not_dissolved` ratio from **44.62% to 50.40%**,
+past the 50.00% ceiling, and the suite goes red. Six words for 5.8 points of
+vacuity is exactly the trade DEVIATIONS 1.10 refused, and this is the first time
+the ratchet has fired on a change someone actually wanted to make rather than on a
+deliberate sabotage. It is doing the job it was built for.
+
+**8.13 — One GPC added: `wh`→/w/ at stage 3. Inventory 92 -> 93.**
+This is the one place in the sweep where the honest fix IS an inventory row, and
+the case is measured rather than argued.
+
+Appendix A's stage-3 row reads "sh ch th(2) ng qu + w x y z v j" — the digraph
+lesson — and omits `wh`, which every synthetic-phonics sequence teaches inside that
+same lesson (Letters & Sounds Phase 3, UFLI, Wilson). DEVIATIONS 1.10 fixed the
+boundary test for this decision as "does a real scope & sequence teach this?", and
+for `wh` the answer is unambiguous. The seed's own data shows the gap being papered
+over: `what` and `when` are sight words at stages 8 and 7, and `when` needs nothing
+but this row.
+
+**PROVED, against both anti-golden guards:**
+
+| | before | after |
+|---|---|---|
+| vacuity ratchet (`test_gate_has_not_dissolved`) | 44.62% | **44.75%** (+0.13pt, ceiling 50.00%) |
+| `NEVER_DECODABLE` words broken | 0 | **0** |
+| new `allowed_words` candidates in the top-20k | — | **31** |
+
++0.13 points of vacuity buys seven words inside the top 500 — `when` (48),
+`which` (58), `where` (102), `why` (120), `while` (136), `white` (275),
+`whether` (459) — plus `whale`, `wheel`, `wheat`, `whisper` and their inflections.
+`white` is one of the words `docs/EVAL.md` section 9 recorded the generator
+reaching for. For comparison, the `o|OW` row rejected in 8.12 cost 5.8 points for
+six words; this one costs 0.13 for thirty-one. The distributions DEVIATIONS 1.10
+warned overlap do not overlap here.
+
+**`wh`→/h/ is deliberately NOT added.** It is the correct second half of the
+lesson ("wh sometimes says /h/"), and it unlocks nothing: `who`, `whose` and
+`whole` still fail on their vowels (`o`→/uː/, `o`→/oʊ/), which are the absences
+8.12 proved must stay. A row that widens the gate and certifies no new word is
+pure downside, so the inventory gets one row, not two.
+
+Two consequences stated rather than left to be found. `when` is now decodable at
+stage 3 while remaining a sight word from stage 7 — not a conflict, because sight
+classification short-circuits, and at stages 3-6 it is an improvement (`when` used
+to score as a VIOLATION there). And `whip`/`whack`/`whipped` enter the allowlist;
+all sit at rank >= 6975, outside §6's top-400 prompt window at every stage, and
+`whisky` was already caught by the blocklist.
+
+**8.14 — 15 words removed from `data/blocklist.txt`: 241 lines / 239 entries ->
+224 lines / 224 entries.**
+DEVIATIONS 6.15 took the list from 52 to 240 after finding 42 profanities in the
+vocabulary handed to a model writing children's stories. That purge was necessary
+and its output is 94% correct. What it also did was sweep up words whose only
+hazard is a sense unreachable in this product, and the eval measured the bill:
+**2 of the 3 layer-1 rejections in a 180-cell matrix were the single word `high`**,
+one of them killing *"The stars are very high."* — a 100%-decodable, entirely safe
+stage-6 story.
+
+**`high` is a PROVED self-contradiction, not a judgement call.**
+`storyforge/llm/moderate.py`'s own approve list, line 47, reads "Dark caves,
+storms, deep water, **high places**." The blocklist short-circuits before that
+prompt is ever sent, so layer 1 was rejecting stories for containing a word layer 3
+is explicitly instructed to approve.
+
+That short-circuit is the general argument, and it is stronger than "the allowlist
+gets smaller". `moderate()` returns immediately on a blocklist hit, so an innocuous
+word on this list does not merely narrow vocabulary — **it prevents layer 3 from
+ever exercising the judgement it was calibrated for.** DEVIATIONS 3.10 and 4.12
+spent two rounds and a both-directions test matrix getting hazard-versus-harm right
+(55% false positives -> 0%). A broad layer-1 list discards that calibration for
+every word it names, and does it invisibly: the story is gone, the metric says
+"moderation_fail", and nothing distinguishes it from a real reject.
+
+DEVIATIONS 2.4 wrote the correct principle in Phase 2 — "it is one of three
+independent layers; it does not need to be the paranoid one" — and 6.15's header
+comment then chose over-inclusion, naming "`crack` an egg, `hang` a coat" as
+acceptable losses. The eval reprices that estimate. The loss is not a few innocent
+words; it is whole clean stories, and 2 of 3 rejects.
+
+**The test applied to all 239 entries, stated so it can be checked and disagreed
+with.** *Is the hazard carried by the word, or only by the sentence it is in?*
+
+- Hazard in the **word** — `fuck`, `cunt`, `rape`, `porn`, `slut`, `kill`, `gun`.
+  No sentence makes them safe. Layer 1 is exactly the right layer. **Kept, all of
+  them.** Every entry in the profanity (31) and sexual (34) sections is kept
+  unchanged, including the dual-use ones where the innocuous sense has a standard
+  synonym a children's book would use instead: `ass` (donkey), `cock` (rooster),
+  `tit` (the bird).
+- Hazard in the **sentence** — the word's dominant sense is innocuous and its
+  hazardous sense is a *judgement about a sentence*, which is precisely what layer
+  3's REJECT bullets already name. Layer 1 cannot read sentences; layer 3 can.
+  **Removed, where the innocuous sense is also natural in this product's domain.**
+
+Each removal below names the layer-3 REJECT bullet that still covers its hazard,
+because "safe" here means "still caught, one layer down" and not "harmless".
+
+| removed | rank / stage | why it is safe to remove | still covered by |
+|---|---|---|---|
+| `high` | 161 / 6 | Elevation. §13's approve list names "high places" verbatim. | "substances" — and `stoned`, `drug`, `drugs`, `weed`-sense words stay |
+| `pig` | 5,627 / 2 | A farm animal, and a canonical stage-2 CVC word. The animals theme. | "Cruelty, bullying" (the insult use) |
+| `rat` | 5,351 / 2 | An animal, and a canonical stage-1/2 CVC word. | "Cruelty, bullying" |
+| `fat` | 1,440 / 2 | "The fat cat sat on the mat" is the archetypal decodable sentence; `fat` is in every stage-2 phonics word list ever printed. `obese` and `skinny` stay — those are only ever about a body. | "Cruelty" — but see 8.16, this is the weakest of the fifteen |
+| `pot` | 3,577 / 2 | A cooking pot. It is the inventory's OWN example word for `o|AA` in `gpcs.csv`. The cannabis sense needs a frame (`smoking`, `dope`, `weed`-as-drug) that stays blocked. | "substances" |
+| `crack` | 3,482 / 2 | Crack an egg; a crack in a rock. 6.15's comment named this as an accepted loss. | "substances" |
+| `weed` | 4,482 / 6 | A weed in a garden. | "substances" |
+| `mean` | 256 / 6 | "What does it mean", "did not mean to" — the dominant sense in general English, at rank 256, inside every prompt window from stage 6 up. | "Cruelty, bullying, or a character deliberately harming another" |
+| `hang` | 2,431 / 3 | Bats hang upside down; hang a coat. `hanged` — the form reserved for execution — and `noose` both stay. | "Anyone or anything is hurt, injured, killed, or dies" |
+| `kick` | 1,902 / 2 | Kick a ball. A canonical stage-2 `ck` word. | "Anyone or anything is hurt" |
+| `kicked` | 3,693 / 4 | As `kick`. | as `kick` |
+| `bury` | — / unalignable | A dog buries a bone. `burrow` is a story word for this theme. The funeral frame — `grave`, `funeral`, `coffin`, `corpse`, `dead`, `death`, `died` — stays blocked entirely. | "...killed, or dies" |
+| `buried` | — / unalignable | As `bury`. | as `bury` |
+| `creep` | 8,887 / 6 | The verb: a cat begins to creep. `creepy` stays — it is only ever pejorative or scary, and §6 bars scary content. | "Cruelty" |
+| `weird` | — / unalignable | A weird sound. A descriptive adjective swept up by an appearance-insult category. | nothing needed; it is not a hazard |
+
+Ten of the fifteen were removing a row from `allowed_words`; five (`bury`,
+`buried`, `weird`, and the unalignable forms) cost no allowlist rows at all and
+were purely killing stories at layer 1. `pot`, `crack`, `pig`, `rat`, `fat` and
+`kick` are all stage-2 CVC words, which is where the vocabulary is tightest (157
+words at stage 1, and §18's floor is the binding constraint there).
+
+No test changed. `tests/test_phase3.py`'s layer-1 assertions are all on words that
+stay blocked.
+
+**8.15 — `shot`, `beat`, `blade`, `hurt`, `fight`, `smoking`, `butt`, `hate` were
+examined and KEPT. What was not removed is part of the audit.**
+The mandate's asymmetry is real: removing a genuine hazard to fix a false positive
+is much worse than the false positive. Each of these has a defensible innocuous
+sense and was still kept.
+
+- **`shot`** (rank 582, stage 3) — the strongest rejected candidate. "The rocket
+  shot up past the moon" is natural space-theme prose and `shot` is a canonical
+  stage-3 `sh` word, so the cost is real. Kept for two reasons. `tests/test_phase3.py::test_blocklist_catches_violence_without_an_api_call`
+  asserts `shot` is caught alongside `gun` and `dead` — an existing test naming it
+  as a violence catch is evidence about intent that a rank number does not
+  outweigh, and a removal that requires editing a violence test is the wrong
+  instinct. And `went up` is available at stage 3, so the loss is a nicer verb, not
+  a story.
+- **`beat`** — "beat its wings" is natural dragon prose, but "beat" as strike is
+  co-dominant, not recessive. The removal test in 8.14 requires the innocuous sense
+  to be clearly dominant. It is not.
+- **`hurt`, `fight`** — these are not false positives at all. Layer 3's REJECT
+  list says "Anyone or anything is hurt" and §6's bar is "no scary content beyond
+  mild peril", so layer 1 and layer 3 agree. `docs/EVAL.md`'s third layer-1
+  rejection was `fight` at stage 7, and that one is a **true** positive; only the
+  two `high` rejections were false. Worth separating, because "2 of 3 rejects were
+  one word" reads as if all three were errors.
+- **`blade`** ("a blade of grass"), **`smoking`** (a dragon), **`butt`** (a goat),
+  **`hate`** ("the cat hates rain") — all co-dominant at best, all at rank >= 772,
+  and `sword`/`knife` are kept on the same reasoning. `smoking` is the highest-risk
+  remaining false positive and is flagged as such in the report; `smoke` itself is
+  not blocked and is decodable from stage 5, so the natural sentence survives.
+
+**8.16 — `fat` is the weakest of the fifteen removals and wants a compensating
+control in §6, which is not owned here.**
+Every other removal's hazardous sense is an *action* — hitting, harming, dying,
+intoxication — and layer 3's REJECT bullets name actions. `fat` is a
+**description**, and "Sam is fat. Sam is sad." is a sentence a Haiku judge tuned on
+"anyone hurt / cruelty / weapons" may well approve. The residual risk is stated
+rather than absorbed.
+
+The removal still stands: `fat` is in every printed stage-2 word list, "a fat cat"
+is the archetypal decodable sentence, and blocking it is the exact class of error
+this entry exists to fix. The right compensating control is one line in
+`generate.py`'s `SYSTEM_RULES` — do not describe a character's body — which is
+prevention at the layer DEVIATIONS 4.12 established for exactly this shape
+(prevented in the prompt, detected in moderation). `generate.py` is owned by a
+concurrent agent, so this entry is the handoff, not the fix.
+
+**8.17 — Two duplicate blocklist lines removed. DEVIATIONS 6.15's "240 entries"
+was 239.**
+`piss` appeared under both profanity and bodily, `bloody` under both profanity and
+violence, so the file's 241 non-comment lines loaded as 239 entries. Harmless to
+behaviour — `load_blocklist` returns a frozenset — but 6.15's own bug was a count
+moving the wrong way being the *only* symptom of a broken list, and a file where
+lines and entries disagree by two makes that check weaker than it looks. After this
+change the file has 224 non-comment lines and `len(load_blocklist()) == 224`, and a
+future reader can verify the list by counting it.
+
+**8.18 — Reported and NOT fixed: `ear`→/ɪr/, and the rest of the unalignable
+high-frequency set.**
+`ear` as an r-controlled unit is the next-strongest inventory candidate and was
+measured: it moves the ratchet 44.62% -> **45.13%** (+0.51pt), breaks no
+`NEVER_DECODABLE` word, and unlocks `near`, `year`, `dear`, `fear`. Not added.
+Appendix A's r-controlled row is explicitly enumerated as five items ("ar or er ir
+ur"), the eval's demand is 2 instances of `near`, and 0.51 points for four words is
+four times `wh`'s price per word. It is a defensible future change with the
+measurement already taken; it is not one this audit's evidence compels.
+
+Left alone with reasons, from `docs/EVAL.md` section 9's unalignable set:
+`around` (rank 165) fails on a CMUdict artifact — it is transcribed `ER0 AW1 N D`,
+so the `a` spells /ɚ/, a correspondence nothing teaches; `old` and `gold` are the
+`o|OW` family 8.12 proved the ratchet rejects; `quiet` (2,267), `hi` (1,079),
+`knew` (635) and `friends` (355) are all low-frequency with 1-2 instances of
+demand, and `friend` is already in `NEVER_DECODABLE` by name. `come` appears in the
+list at stage 5 while being a sight word from stage 6, which is the list working
+correctly and not a defect.
+

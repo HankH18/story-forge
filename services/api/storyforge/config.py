@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     anthropic_model_generate: str | None = None
     anthropic_model_fast: str | None = None
 
+    # Overrides `llm.client.GENERATION_TIMEOUT_S` (DEVIATIONS 8.6). A latency
+    # budget is the same kind of operational number as the model IDs above it:
+    # an operator on a slow path should not need a code change, and pinning it
+    # low (`ANTHROPIC_GENERATION_TIMEOUT_S=2`) is how the §7 timeout fallback is
+    # exercised against the real API rather than against a mock.
+    anthropic_generation_timeout_s: float | None = None
+
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
     # Langfuse's own docs and console use LANGFUSE_HOST in some places and

@@ -14,6 +14,19 @@ render order is tools -> system -> messages, so the STABLE material goes in
 
 Generating N stories for one stage therefore pays the vocabulary cost once.
 
+**Rule 7 is a child-safety control, and it sits in the prompt because that is the
+layer that can hold it** (DEVIATIONS 8.29). The vocabulary work removed `fat` from
+the blocklist (8.16) and was right to: a blocklist hit SHORT-CIRCUITS
+`moderate()`, so an innocuous entry does not merely narrow vocabulary, it stops
+§13's hazard-versus-harm judgement from ever running on that story. But `fat` is
+the one removal whose hazard is a DESCRIPTION rather than an action, and layer 3's
+REJECT list is all actions — hurt, cruelty, weapons used against a character. So
+"Sam is fat. Sam is sad." can clear all three layers. Prevention here is the
+compensating control, on the same argument DEVIATIONS 4.12 made for grammar.
+
+Ranked BELOW the vocabulary and grammar rules and ABOVE length: a story must never
+describe a body in order to reach a word count.
+
 **The story also has to contain the material the stage teaches** (DEVIATIONS
 5.17). §8 promotes on accuracy over the GPCs introduced AT the child's stage,
 and the only evidence source is a tap-a-word question — which can only ask about
@@ -31,7 +44,7 @@ from functools import lru_cache
 from pydantic import BaseModel, Field
 
 from storyforge.decoder import WordVerdict, load_gpcs, mastered_ids, validate_word
-from storyforge.llm.client import GENERATION_TIMEOUT_S, generation_model, get_client
+from storyforge.llm.client import generation_model, generation_timeout, get_client
 from storyforge.llm.pricing import Usage, usage_from_response
 
 # Imported, never reimplemented: the prompt must point at the words the GRADER
@@ -69,6 +82,20 @@ Rules, in priority order:
 6. This register sounds simple by design. "Sam sat. A cat sat on Sam." is
    correct output, not a first draft to improve on. Simple is not the same as
    broken: keep it plain AND grammatical.
+7. Never describe what a person's body or looks are like. Do not write that
+   someone is fat, thin, big, small, tall or short, and never compare one
+   person's body with another's. A word list this small turns such a sentence
+   into a verdict, and a child reading it may take it as one about themselves.
+   Write what a person DOES and how they FEEL instead. Creatures, places and
+   objects can still be described freely: a cave can be dark, a rock can be big,
+   a wing can be wide.
+8. Meet the length the request gives you. That word count is a requirement, not
+   an approximation, and finishing under it is a failed answer however well the
+   sentences read. Get to a longer count by telling MORE of the story — more
+   happens, in more small steps — and never by writing longer or more elaborate
+   sentences, which is the one way length can cost a child their story. If the
+   story ends before the count does, give a character something else to do.
+   Count the words you have written before you answer.
 
 Read every sentence back before you finish. Write the story and nothing else."""
 
@@ -115,6 +142,22 @@ PRACTICE_SATURATION = 0.5
 #: The section header. Named because the request block does not know the stage
 #: and so cannot reference it; the ask travels with the list instead.
 PRACTICE_HEADER = "NEW SOUNDS AT THIS STAGE"
+
+#: Output-token ceiling for a generation. Named rather than inlined because
+#: `pipeline._call` — the node that actually runs in `warm` and `eval` — carries
+#: its own copy of this number, and the two must not drift (DEVIATIONS 8.25).
+#:
+#: Raised from 8000. On Sonnet 5 adaptive thinking is ON when `thinking` is
+#: omitted (STATE invariant 9) and thinking counts against `max_tokens`, so the
+#: story competes with the reasoning for the same budget. A stage-9 generation in
+#: the before-measurement returned `stop_reason="max_tokens"` and no parseable
+#: story at all — §7 counts that as `api_fail`, so it is a whole cell lost, not a
+#: short story. Asking for the full specified length makes the story half of that
+#: budget larger, which makes the collision likelier, so the ceiling moves with
+#: it. 16000 is the largest value that stays comfortably inside a non-streaming
+#: request; `max_tokens` is a cap, not a reservation, so an unused ceiling costs
+#: nothing and the model is never told the number.
+MAX_OUTPUT_TOKENS = 16000
 
 
 @lru_cache(maxsize=16)
@@ -258,20 +301,89 @@ def build_vocabulary_block(
     )
 
 
+#: Words per sentence to plan against. Decodable-reader sentences are short by
+#: construction, so a word target has to be translated into a number of THINGS
+#: THAT HAPPEN before the model can plan for it — "120 words in short sentences"
+#: is not a plan, "about 20 short sentences" is. Eight is the middle of the
+#: observed register: `docs/EVAL.md`'s stage-1 output runs 5-7 words a sentence
+#: and stage-12 runs nearer 10.
+WORDS_PER_SENTENCE = 8
+
+
 def build_request_block(
     theme: str,
     story_words: dict[str, str],
     target_min: int,
     target_max: int,
 ) -> str:
+    """The per-request half of the prompt. After the cache breakpoint, by design.
+
+    The length section is the fix for `docs/EVAL.md` section 12 (DEVIATIONS 8.22):
+    52.2% length compliance overall and 6.7-13.3% at the 120-200 word stages, where
+    the measured mean was 89-102. The old wording was "a story of roughly
+    {min}-{max} words", and "roughly" was read as a licence — per-stage means sat
+    just above the floor at stages 1-4 and below it from stage 5 up.
+
+    Three things changed, each aimed at an observed behaviour rather than at the
+    abstraction "be longer":
+
+    * the floor is named as a floor and a midpoint is given to aim at, because a
+      range invites its cheapest end;
+    * the count is restated as a number of short sentences, because "short
+      sentences" and "120 words" are instructions the model has to reconcile and
+      it was resolving the conflict by stopping early;
+    * the ceiling is named too. Over-length is also non-compliant, and one
+      stage-4 draft in the before-measurement came back at 67 words against a
+      30-60 target, so pressure in one direction only would trade one miss for
+      the other.
+
+    The `{min}-{max}` hyphenated form is preserved verbatim: `tests/test_llm.py`
+    asserts on it, and that assertion is about the range reaching the model.
+
+    **The story-word line is part of the same fix, because the first version of the
+    length section regressed a GATE criterion.** Measured: with the length section
+    alone, 5 of 45 first drafts used MORE than 3 distinct story words — one
+    stage-8 draft used 8 — where the before-measurement had none at all. A longer
+    story reaches further into the offered bank. `passes_gate` caps DISTINCT story
+    words and leaves occurrences uncapped (STATE invariant 3); the old line said
+    "at most 3" without saying "different" or that repeating is free, so "write
+    more" and "at most 3" read as a contradiction and the model resolved it the
+    wrong way.
+
+    **The SECOND version overshot, and the ordering below is what fixes that.**
+    Stating the repetition allowance as its own permissive paragraph AFTER the
+    length block took the 120-200 band to a mean of 193.5 words with 7 of 11 drafts
+    OVER 200 — compliance 36.4%, worse than the 33.3% it started at. Two lessons,
+    both encoded here rather than described: a permission is read as an
+    instruction, so the allowance is now one clause on the cap and not a paragraph
+    of its own; and the LAST thing in the block is what the model weights most, so
+    the length bounds go last and name both ends symmetrically. Over-length is a
+    miss exactly as under-length is, and only the second version made that visible.
+    """
     offered = (
         "\n".join(f"- {w}: {gloss}" for w, gloss in sorted(story_words.items()))
         or "- (none)"
     )
+    aim = (target_min + target_max) // 2
+    sentences = max(4, round(aim / WORDS_PER_SENTENCE))
     return (
-        f"Write a {theme} story of roughly {target_min}-{target_max} words.\n\n"
-        f"STORY WORDS you may use (at most 3, only from this list):\n{offered}\n\n"
-        "Every other word must come from the permitted or sight lists above."
+        f"Write a {theme} story.\n\n"
+        f"STORY WORDS — at most 3 DIFFERENT ones, only from this list:\n{offered}\n\n"
+        "Repeat those freely; only the number of DIFFERENT ones is capped, never how "
+        "often each appears. Needing more words is never a reason to reach for a "
+        "fourth.\n\n"
+        "Every other word must come from the permitted or sight lists above.\n\n"
+        f"LENGTH — {target_min}-{target_max} words. Both ends are real:\n"
+        f"- Under {target_min} does not count. {target_min} is the FLOOR, not the goal.\n"
+        f"- Over {target_max} does not count either. Do not run past {target_max}.\n"
+        f"- Aim at about {aim} words, which in this register is roughly {sentences} "
+        f"short sentences. Decide that many things to happen BEFORE you start "
+        f"writing, so you neither stop early nor pad late.\n"
+        f"- Count the words in the finished story before you answer, and fix it if "
+        f"the total is outside {target_min}-{target_max}.\n"
+        f"- Every one of those words still has to come from the lists above. A "
+        f"longer story is not a licence to reach outside them: if you cannot say "
+        f"the next thing with the words you have, say a different next thing."
     )
 
 
@@ -292,7 +404,14 @@ async def generate_story(
     generation and validation separate is the whole architecture: the model is an
     untrusted generator, the validator is the gate (§0).
     """
-    client = get_client().with_options(timeout=GENERATION_TIMEOUT_S)
+    # `generation_timeout` returns an `httpx.Timeout` with `connect` split out
+    # (DEVIATIONS 8.2). Passing the bare float instead reaches httpx as
+    # connect == read, so a 240s read budget would also spend 240s trying to open
+    # a socket — six times the SDK default, on a host that is simply unreachable.
+    # It takes `MAX_OUTPUT_TOKENS` because the budget is derived from it: raising
+    # the ceiling (8.25) must raise the time allowed to fill it, or the two
+    # changes fight.
+    client = get_client().with_options(timeout=generation_timeout(MAX_OUTPUT_TOKENS))
     model = generation_model()
 
     response = await client.messages.parse(
@@ -301,8 +420,8 @@ async def generate_story(
         # omitted, and thinking counts against max_tokens. A tight budget here
         # yields a response that is mostly thinking plus a truncated story
         # (stop_reason "max_tokens"), which looks like a bad model rather than a
-        # bad parameter.
-        max_tokens=8000,
+        # bad parameter. Observed live at stage 9 — see MAX_OUTPUT_TOKENS.
+        max_tokens=MAX_OUTPUT_TOKENS,
         output_config={"effort": effort},
         system=[
             {"type": "text", "text": SYSTEM_RULES},

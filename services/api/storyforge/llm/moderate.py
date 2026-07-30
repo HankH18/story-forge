@@ -66,9 +66,24 @@ SEPARATELY, judge whether the story is WELL-FORMED ENGLISH (docs/DEVIATIONS.md \
 fits the sounds but breaks the sentence. This is a different question from \
 safety: answer it independently in `well_formed`.
 
+This is a question about GRAMMAR ONLY. It is not about whether the sentence makes \
+sense, whether the word chosen was the best available one, or whether the \
+punctuation is conventional. Before you flag any sentence, run the SUBSTITUTION \
+TEST on it: swap every noun in the sentence for some other noun and change \
+nothing else. If the result is correct English, then the grammar was already \
+correct and the only thing wrong was the sense — set well_formed = true and move \
+on. Only a sentence that is STILL broken after the swap is a grammar error.
+
+  "Its wings sat."           -> "Its dogs sat."            correct  => true
+  "The rocket ran fast."     -> "The dog ran fast."        correct  => true
+  "A dragon lived in a can." -> "A dragon lived in a box." correct  => true
+  "It had a big lot."        -> "It had a big dog."        correct  => true
+  "A dragon sit in a cave."  -> "A cat sit in a box."      broken   => false
+  "The man ran back stop."   -> "The dog ran back stop."   broken   => false
+
 Judge each sentence ON ITS OWN. Set well_formed = false only when a single \
-sentence is unmistakably broken AND you can name the one wrong word and the \
-word that should replace it:
+sentence survives the substitution test still broken AND you can name the one \
+wrong word and the word that should replace it:
 - Wrong verb form after a helper: "He did not came back."   (came -> come)
 - Subject and verb disagree:      "A dragon sit in a cave."  (sit -> sits)
 - A stray or missing word, so the sentence cannot parse: \
@@ -96,14 +111,26 @@ verb often does not exist in the word list and the writer MUST use the present. 
 "can", "will", "may" — is always correct as written; never ask for "could", \
 "would" or "might". \
 (Inside ONE sentence, verbs joined by "and" must still match: "Dan sat and \
-admits it." is wrong.)
+admits it." is wrong. But two verbs in the SAME form always match, whatever their \
+subjects are and however odd the result sounds: "Sam sat and it sat past the \
+moon." is well-formed English — both verbs are "sat".)
 - Reported speech that is not backshifted: "He said he will go." is fine.
 - A sentence that is grammatical but strange, dull or illogical. Judge the \
 grammar, not the sense.
+- An impossible or silly thing happening. A rocket that runs, wings that sit, a \
+character who lives in a can, something that "had a big lot" — every one of those \
+is correct English and must be approved. The word list is tiny and frequently \
+holds no better word; using the only available word is the format working, and \
+"the writer should have picked a different word" is never a grammar error.
+- Punctuation and capitalisation, including speech written without quotation \
+marks: "The girl said, come here, little rabbit." is well-formed. A missing comma \
+or quotation mark is not a wrong WORD, so it can never satisfy the rule above.
 
 If you cannot quote the broken sentence and give the exact replacement word, \
-the story is well-formed. When in doubt, well_formed = true: a wrongly rejected \
-story is thrown away and the child gets nothing in its place."""
+the story is well-formed. A replacement is one WORD swapped for another word in \
+the same sentence — never a rewrite of the sentence, a better-sounding synonym, \
+or a different thing for the story to say. When in doubt, well_formed = true: a \
+wrongly rejected story is thrown away and the child gets nothing in its place."""
 
 
 #: What `moderate()` prefixes a reason with when the story was judged SAFE and

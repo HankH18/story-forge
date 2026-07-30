@@ -25,8 +25,9 @@ from sqlalchemy import text
 
 from storyforge import obs
 from storyforge.decoder import TextReport, mastered_ids, validate_text
-from storyforge.llm.client import GENERATION_TIMEOUT_S, generation_model, get_client
+from storyforge.llm.client import generation_model, generation_timeout, get_client
 from storyforge.llm.generate import (
+    MAX_OUTPUT_TOKENS,
     SYSTEM_RULES,
     StoryDraft,
     build_request_block,
@@ -244,11 +245,18 @@ def build_rewrite_block(report: TextReport, vocab: Vocabulary, body: str) -> str
 
 
 async def _call(vocab: Vocabulary, theme: str, user_block: str, effort: str):
-    client = get_client().with_options(timeout=GENERATION_TIMEOUT_S)
+    # The token ceiling and the clock are the SAME bound expressed two ways
+    # (DEVIATIONS 8.7), so they are derived from one number rather than chosen
+    # independently — `max_tokens=8000` here versus 16000 in `llm/generate.py` was
+    # the drift DEVIATIONS 8.25 flagged, and it cost live cells: a generation that
+    # runs out of tokens returns `stop_reason="max_tokens"`, no parseable story,
+    # and §7 scores that as api_fail. Read per call so
+    # `ANTHROPIC_GENERATION_TIMEOUT_S` is live rather than frozen at import.
+    client = get_client().with_options(timeout=generation_timeout(MAX_OUTPUT_TOKENS))
     model = generation_model()
     response = await client.messages.parse(
         model=model,
-        max_tokens=8000,
+        max_tokens=MAX_OUTPUT_TOKENS,
         output_config={"effort": effort},
         system=[
             {"type": "text", "text": SYSTEM_RULES},
@@ -329,7 +337,7 @@ async def run_pipeline(
                 "GENERATING" if kind == "generate" else "REWRITING",
                 input=user_block,
                 model=generation_model(),
-                model_parameters={"max_tokens": 8000, "effort": effort},
+                model_parameters={"max_tokens": MAX_OUTPUT_TOKENS, "effort": effort},
                 metadata={"attempt": n, "stage_id": stage_id, "theme": theme_slug},
             ) as gen_span:
                 t_node = time.perf_counter()

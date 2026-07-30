@@ -620,22 +620,28 @@ else:
     W(
         "**No unalignable word appeared in any story.** §18's \"the inventory is too"
         " small\" alarm is quiet across all 12 stages: the allowlist-constrained"
-        " prompt never induced the model to reach for a word the 92-GPC inventory"
+        " prompt never induced the model to reach for a word the GPC inventory"
         " cannot spell."
     )
 W("")
 W(
-    "**The one actionable item in that list is `of`.** It is among the most"
-    " frequent words in English, the 92-GPC inventory cannot spell it at any"
-    " stage, and \u2014 checked directly against the `sight_words` table, all 33"
-    " rows \u2014 it is **not a sight word at any stage**. So every story that"
-    " reaches for it spends part of its 5% violation budget on a word a child"
-    " will meet constantly. Of the words above, only `come` is a sight word"
-    " (stage 6), and it appears here at stage 5, before it unlocks, which is the"
-    " list working correctly. Appendix A\u2019s sight-word list looks like the"
-    " place to fix this; the fix is data, not code, and is not made here because"
-    " a sight-word addition changes what every stage\u2019s precompute admits and"
-    " belongs with a re-run of `make precompute` and the \u00a75.7 goldens."
+    "**The actionable item in that list was `of`, and it has since been fixed.**"
+    " It is among the most frequent words in English and the GPC inventory cannot"
+    " spell it at any stage \u2014 CMUdict gives it one pronunciation, `AH1 V`, so"
+    " an alignment needs `f`\u2192/v/, which no scope & sequence teaches and which"
+    " `tests/decoder/test_anti_golden.py::NEVER_DECODABLE` forbids by name. At the"
+    " time of this matrix it was **not a sight word at any stage** either, so"
+    " every story reaching for it spent part of its 5% violation budget on a word"
+    " a child meets constantly. `of` is now a stage-2 sight word, together with"
+    " `so`, `do`, `be` and `from`, and `wh`\u2192/w/ was added to the inventory"
+    " (docs/DEVIATIONS.md 8.10\u20138.13). Re-scoring this run\u2019s 169 stored"
+    " stories against the corrected vocabulary improved 12 of them and made none"
+    " worse; the figures ABOVE are the measurements as recorded at run time and"
+    " are deliberately not restated. A future matrix should show `of` gone from"
+    " this list."
+    "\n\nOf the other words above, only `come` is a sight word (stage 6), and it"
+    " appears here at stage 5, before it unlocks, which is the list working"
+    " correctly."
 )
 W("")
 W("### Per stage")

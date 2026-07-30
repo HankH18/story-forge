@@ -6,6 +6,11 @@ pipeline and marks them `status='warm'`. Two things fall out of that:
 - **The kid never sees an error.** Every §7 failure path — validation_fail,
   api_fail, moderation_fail, budget_exhausted, timeout — terminates in a
   warm-pool serve rather than an error screen.
+  `run_warm` itself is subject to the same rule, and for five phases it was not:
+  an `anthropic.APITimeoutError` out of the GENERATING node propagated straight
+  out of the loop and discarded every remaining (stage, theme) pair in the run.
+  It is now a per-story outcome — recorded, printed, named in the non-zero exit
+  and survived (DEVIATIONS 8.4). A *signal* still terminates the run.
 - **The demo is decoupled from live API health** (§18). Latency at demo time is
   a database read; cold generation stays honestly demonstrable from the admin
   portal.
@@ -740,19 +745,51 @@ def _report_enrichment(story_id: int, meta: dict) -> list[str]:
     return problems
 
 
-def _finish(summary: str, failures: dict) -> None:
-    """The one exit point that decides whether the run succeeded."""
+def _finish(
+    summary: str,
+    failures: dict,
+    api_failures: Sequence[tuple[int, str, str]] = (),
+) -> None:
+    """The one exit point that decides whether the run succeeded.
+
+    Two kinds of failure, kept on separate lines because they have different
+    remedies (DEVIATIONS 8.4). `failures` is a story that reached the pool
+    unenriched — the fix is `--backfill`. `api_failures` is a cell that produced
+    no story at all, usually `anthropic.APITimeoutError`; nothing is wrong with
+    the pool, it is just shallower than the target, and the fix is to re-run
+    `make warm`, which `pool_depth` already makes idempotent.
+    """
     print(f"\n{summary}")
+    if api_failures:
+        print(
+            f"\n{len(api_failures)} generation(s) never produced a story "
+            "(§7 api_fail — the pool keeps its current depth):"
+        )
+        for stage, theme, why in api_failures:
+            print(f"  stage {stage} / {theme}: {why}")
+
+    if not failures and not api_failures:
+        return
+
+    parts = []
     if failures:
         lines = "\n".join(
             f"  #{sid}: {'; '.join(why)}" for sid, why in sorted(failures.items())
         )
-        # Loud and non-zero. The whole point of Phase 4's audit: a run that
-        # printed success with both enrichment nodes gutted.
-        raise SystemExit(
+        parts.append(
             f"{len(failures)} story/stories reached the pool unenriched:\n{lines}\n"
             "Re-run with --backfill once the cause is fixed."
         )
+    if api_failures:
+        lines = "\n".join(f"  stage {s} / {t}: {why}" for s, t, why in api_failures)
+        parts.append(
+            f"{len(api_failures)} generation(s) failed outright, so those "
+            f"(stage, theme) pairs are below target:\n{lines}\n"
+            "Re-run `make warm` — it fills only the shortfall."
+        )
+    # Loud and non-zero. The whole point of Phase 4's audit: a run that
+    # printed success with both enrichment nodes gutted.
+    raise SystemExit("\n\n".join(parts))
 
 
 async def run_warm(stages: list[int], themes: list[str], target: int, effort: str):
@@ -760,6 +797,9 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
     made = skipped = rejected = 0
     total_cost = 0.0
     failures: dict[int, list[str]] = {}
+    # DEVIATIONS 8.4: (stage, theme, "ExcType: message") per generation that
+    # produced no story at all. Was an uncaught exception out of `run_warm`.
+    api_failures: list[tuple[int, str, str]] = []
 
     async with SessionLocal() as session:
         theme_ids = {
@@ -781,7 +821,25 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
 
                 print(f"  stage {stage} / {theme}: have {have}, generating {need}")
                 for _ in range(need):
-                    result = await run_pipeline(session, stage, theme, effort=effort)
+                    # §7: `api_fail` and `timeout` each map to a fallback like
+                    # any other failure in the taxonomy, and this was the one
+                    # caller that let them out (DEVIATIONS 8.4). One slow
+                    # `anthropic.APITimeoutError` used to discard every
+                    # remaining (stage, theme) pair in the run.
+                    try:
+                        result = await run_pipeline(session, stage, theme, effort=effort)
+                    except BaseException as exc:  # noqa: BLE001 — a dead cell is not a dead run
+                        # A signal is not an api_fail; let it out (as eval.py does).
+                        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                            raise
+                        # Nothing is uncommitted here — the loop commits per
+                        # story — so this is defence against a poisoned session
+                        # turning one recoverable cell into a broken run.
+                        await session.rollback()
+                        why = f"{type(exc).__name__}: {exc}"
+                        api_failures.append((stage, theme, why))
+                        print(f"    API FAIL stage {stage} / {theme} — {why}", flush=True)
+                        continue
                     story = await persist(session, result, tid, today)
                     story_cost = result.total_cost_usd(today)
                     meta = None
@@ -822,11 +880,21 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
                         print(f"    REJECT #{story.id} — {why}")
 
     if made == 0 and skipped == 0:
-        raise SystemExit("make warm produced no warm stories")
+        # Still the first thing checked, and now it names the reason when the
+        # reason is that every generation failed rather than that every story
+        # was rejected — two very different operator problems.
+        detail = ""
+        if api_failures:
+            detail = (
+                f" — {len(api_failures)} generation(s) failed outright, "
+                f"first: {api_failures[0][2]}"
+            )
+        raise SystemExit(f"make warm produced no warm stories{detail}")
     _finish(
-        f"{made} warm, {rejected} rejected, {skipped} pair(s) already full. "
-        f"Cost ${total_cost:.4f}",
+        f"{made} warm, {rejected} rejected, {len(api_failures)} api_fail, "
+        f"{skipped} pair(s) already full. Cost ${total_cost:.4f}",
         failures,
+        api_failures,
     )
 
 

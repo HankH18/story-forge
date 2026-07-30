@@ -163,6 +163,73 @@ def test_moderation_prompt_carves_out_the_observed_false_positives():
     assert 'never ask for "could"' in grammar_half
 
 
+def test_moderation_prompt_makes_the_semantics_carve_out_a_test_not_a_plea():
+    """DEVIATIONS 8.20 — the defect the §14 eval measured. The prompt ALREADY said
+    "Judge the grammar, not the sense", and 6 of its 8 grammar rejections were
+    rejections on sense anyway. A prohibition at the end of a nine-item list is
+    not a rule the judge can apply; a substitution test is."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert "substitution test" in low
+    assert "swap every noun" in low
+    # The instruction has to say what to CONCLUDE, not just what to check.
+    assert "the only thing wrong was the sense" in low
+    # And it has to run BEFORE the flag, or it is advice rather than a gate.
+    assert low.index("substitution test") < low.index("set well_formed = false only when")
+
+
+def test_moderation_prompt_carries_the_observed_false_positives_as_worked_examples():
+    """Every line here is a story the eval actually threw away (docs/EVAL.md
+    section 8). Deleting one re-opens a false positive that has happened."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    for observed in (
+        '"Its wings sat."',  # eval story 3243 — wings cannot sit
+        '"The rocket ran fast."',  # eval story 3341 — rockets do not run
+        '"A dragon lived in a can."',  # eval story 3440 — should have been "cave"
+        '"It had a big lot."',  # eval story 3441 — "incomplete"
+    ):
+        assert observed in grammar_half, observed
+    # ...and the test must be shown FAILING too, or it reads as "approve
+    # everything". Both worked examples that stay broken are real rejects.
+    assert '"A dragon sit in a cave."  -> "A cat sit in a box."' in grammar_half
+    assert '"The man ran back stop."   -> "The dog ran back stop."' in grammar_half
+
+
+def test_the_coordination_rule_does_not_swallow_two_identical_verbs():
+    """The one residual false positive after 8.20's first pass, in 1 of 3 live
+    runs: "Sam sat and it sat past the moon." was flagged as a coordination error
+    on the ground that "two subjects joined by 'and' need matching verbs" — when
+    both verbs are literally "sat". The coordination rule is REAL (Dan sat and
+    admits it) and must not be removed, so the fix is to say what matching means
+    rather than to soften the rule."""
+    low = MODERATION_SYSTEM.split("SEPARATELY", 1)[1].lower()
+    assert "dan sat and admits it." in low, "the coordination rule itself must survive"
+    assert "two verbs in the same form always match" in low
+    assert "sam sat and it sat past the moon." in low
+
+
+def test_moderation_prompt_excludes_punctuation_from_the_grammar_verdict():
+    """DEVIATIONS 8.21. The other two of the eight rejections were missing
+    quotation marks. The prompt already required a wrong WORD with a replacement
+    word, and a missing comma is not one — so the carve-out makes the existing
+    rule bite rather than loosening it."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert "punctuation and capitalisation" in low
+    assert "without quotation marks" in low
+    assert "the girl said, come here, little rabbit." in low
+
+
+def test_moderation_prompt_forbids_word_choice_as_a_grammar_reason():
+    """The failure mode in one sentence: the judge kept proposing a BETTER word
+    rather than a CORRECT one, and scored the difference as a grammar error."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert "is never a grammar error" in low
+    assert "better-sounding synonym" in low
+    assert "the only available word is the format working" in low
+
+
 def test_moderation_prompt_requires_a_nameable_correction():
     """The self-contradictory notes ("should be 'It did nap' or 'It napped'")
     were the tell that the judge was flagging without a correction in hand.
@@ -631,6 +698,78 @@ FIXTURE: list[tuple[str, bool, str]] = [
         "Sam sat in a rocket. Sam and Bob go up fast. Up, up, to the moon. The moon is big. "
         "Sam ran on the moon. Bob got a rock. Back to a planet. Sam is glad.",
     ),
+    # --- the §14 eval's eight grammar rejections, VERBATIM from the run that
+    # produced docs/EVAL.md (stories 3243, 3251, 3341, 3358, 3440, 3441, 3557,
+    # 3558 — pulled out of `story_segments`, not retyped). Every one of them is
+    # grammatical English. Six were rejected for SENSE (a rocket that runs, wings
+    # that sit, a dragon in a can) and two for missing quotation marks. The
+    # prompt's own instruction already said "Judge the grammar, not the sense" —
+    # these are the cases that prove it was not being followed (DEVIATIONS 8.20).
+    (
+        "approve/semantics-wings-that-sat",  # eval story 3243, stage 1 dragons
+        True,
+        "A dragon sat in a cave. Its wings sat. A cat sat at the cave. The cat did panic. "
+        "The dragon did stand. Its wings did spin. The cat did spin and sit. "
+        "The dragon did nap.",
+    ),
+    (
+        "approve/semantics-sat-past-the-moon",  # eval story 3251, stage 1 space
+        True,
+        "Sam sat in a rocket. The rocket did spin. It sat amid the stars. Sam did nap. "
+        "Sam sat and it sat past the moon.",
+    ),
+    (
+        "approve/semantics-rocket-that-ran",  # eval story 3341, stage 2 space
+        True,
+        "A rocket sat on the sand. Sam got in. The rocket ran fast. It ran up. "
+        "Sam sat and did not stop. The rocket hit the moon. Sam had fun. Sam got a flag. "
+        "Sam left the moon. The rocket ran back. Sam felt glad.",
+    ),
+    (
+        # The weakest of the eight: "went back off" is a collocation the judge
+        # disliked, not a syntax error. Kept because the judge's own correction
+        # ("should be 'back out'") is a word-choice note, and word choice is the
+        # thing this half of the verdict is not supposed to police.
+        "approve/semantics-went-back-off",  # eval story 3358, stage 4 animals
+        True,
+        "The rabbit lived in the forest. It had a burrow. The rabbit ran to its burrow "
+        "often. A dog ran up. The rabbit ran fast. It went into its burrow. "
+        "The dog can not get in. The dog left. The rabbit was glad. "
+        "It went back off and ran in the forest.",
+    ),
+    (
+        "approve/semantics-dragon-in-a-can",  # eval story 3440, stage 4 dragons
+        True,
+        "A dragon lived in a can. It had much treasure. A man went to the can. "
+        "He asked for the treasure. The dragon said no. The man went back. "
+        "The dragon still had its treasure. It was glad.",
+    ),
+    (
+        "approve/semantics-a-big-lot",  # eval story 3441, stage 4 dragons
+        True,
+        "A dragon lived in a cave. It had a big lot. A man asked for it. "
+        "The dragon said no. The man went back. The dragon still had its stuff.",
+    ),
+    (
+        "approve/unquoted-dialogue-statement",  # eval story 3557, stage 7 animals
+        True,
+        "A little rabbit ran in the forest. She wanted a home. She started to dig. "
+        "The rabbit dug hard, and made a burrow. A girl came to the forest. "
+        "She did see the burrow. The girl did not go in. She let the rabbit rest. "
+        "Then the rabbit went into the burrow. She was safe. It was her home. "
+        "The girl said, this rabbit got a home. Then she went back home.",
+    ),
+    (
+        "approve/unquoted-dialogue-imperative",  # eval story 3558, stage 7 animals
+        True,
+        "A little rabbit had a burrow in the yard. She started to run far and fast. "
+        "The rabbit went to the park. Her burrow was near a big tree. During the day, "
+        "the rabbit did not want to stay in the burrow. She wanted to play. "
+        "She met a girl in the yard. The girl was happy to see her. "
+        "The girl said, come here, little rabbit. The rabbit ran to her hand. "
+        "It started to turn dark. The rabbit went back to her burrow fast. "
+        "She felt safe in her burrow. The girl said, I will come back.",
+    ),
     # --- genuinely broken. All three are VERBATIM live output (DEVIATIONS 4.12).
     (
         "reject/ungrammatical-verb-form",
@@ -665,6 +804,32 @@ FIXTURE: list[tuple[str, bool, str]] = [
         "A dragon sat in a cave. It did nap. Dan can stand and tap. "
         "The dragon did spit fire. Dan sat and admits it acts mad. Dan pats the dragon. "
         "It acts sad.",
+    ),
+    # --- three further ungrammatical shapes, added with DEVIATIONS 8.20 so that
+    # the semantics carve-out below is tested against MORE true rejects than it
+    # started with, not fewer. Each is noun-substitution-invariant: swap every
+    # noun for any other noun and the sentence is still broken, which is exactly
+    # what the new rule asks the judge to check.
+    (
+        "reject/ungrammatical-stray-verb",
+        False,
+        "The man went up the hill. He met a big dog. The man ran back stop. "
+        "The dog sat down. The man was glad. The end.",
+    ),
+    (
+        "reject/ungrammatical-plural-subject-singular-verb",
+        False,
+        "The cats sat on the mat. The cats runs fast. One cat got a fish. "
+        "The cats had fun in the sun. The end.",
+    ),
+    (
+        # The tiny word list is the cause: "cats" does not unlock until the stage
+        # that teaches the -s ending, so a low-stage story reaching for a plural
+        # has only the singular available.
+        "reject/ungrammatical-number-agreement",
+        False,
+        "Sam went to the shop. Sam had three cat. The cat sat on Sam. "
+        "Sam did pat the cat. Sam was glad. The end.",
     ),
     (
         "reject/unsafe-cruelty",

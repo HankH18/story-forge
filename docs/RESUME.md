@@ -133,8 +133,11 @@ verdict at the edit site.
   `PORT`, `K_SERVICE`, and `ENVIRONMENT=prod-us`.
 - The 403 branch (DEVIATIONS 6.20) is unreachable — no web route calls an admin
   route.
-- `warm.py` still aborts the whole run on `anthropic.APITimeoutError` instead of
-  taking the §7 fallback.
+- ~~`warm.py` still aborts the whole run on `anthropic.APITimeoutError` instead of
+  taking the §7 fallback.~~ **FIXED** — DEVIATIONS 8.4. Proved live against the
+  real API, not with a mock: a real `APITimeoutError` on the first generation, a
+  real stage-12 story at 97.7% on the second, one non-zero exit at the end naming
+  the failed cell. The two guarding tests go red when the `try/except` is removed.
 - DEVIATIONS 6.14: `test_stories_api.py::_pool` filters `status='warm'` while
   `_SERVE_SQL` serves `warm|complete`.
 
@@ -151,9 +154,20 @@ enrichment. Deviations 7.40-7.51.
 180 cells never produced text because §7's 30s generation timeout is too tight at
 the 120-200 word stages. Four findings worth acting on, all in `docs/EVAL.md`:
 
-1. **The 30s generation timeout (§7) fails ~7% of cells at stages 9-12** and
+1. ~~**The 30s generation timeout (§7) fails ~7% of cells at stages 9-12** and
    pushes cold p95 to 59.8s against §1.6's 12s. Successes there are landing on
-   SDK retry. `warm.py` still dies outright on the same exception (below).
+   SDK retry. `warm.py` still dies outright on the same exception (below).~~
+   **FIXED — DEVIATIONS 8.0-8.2, and the diagnosis above is half wrong.** Those
+   latencies are *censored*: `max_retries=2` makes one SDK call up to three
+   30s attempts, so 27% of all generation attempts the run paid for were killed
+   and discarded, not 7% of cells. And the defect is not specific to stages 9-12
+   — measured with `max_retries=0`, a **30-word stage-1 story took 24.60s**
+   against the 30s budget. Latency tracks output tokens (r = +0.997), not stage
+   (r = +0.50), because adaptive thinking is what the tokens go on. Timeout is now
+   one constant, 120s = `max_tokens` / slowest measured throughput.
+   §1.6's 12s target is separately recorded as **unmet and unreachable as
+   written** (DEVIATIONS 8.6) — it budgets one API call for what §6/§7 specify as
+   a multi-node pipeline with rewrites.
 2. **`of` is neither decodable nor a sight word at any stage.** One of the
    commonest words in English costs every story that uses it part of its 5%
    violation budget. Appendix A's 33-row sight-word list is the fix; it needs

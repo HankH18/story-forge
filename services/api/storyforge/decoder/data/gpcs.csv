@@ -48,6 +48,14 @@ rr,R,double,any,2,0,carrot
 x,K S,multi_phoneme,any,2,0,fox
 sh,SH,digraph,any,3,0,ship
 ch,CH,digraph,any,3,0,chip
+# Appendix A's stage-3 row is the digraph lesson ("sh ch th(2) ng qu") and omits
+# `wh`, which every synthetic-phonics sequence teaches inside that same lesson.
+# Measured BEFORE adding (docs/DEVIATIONS.md 8.13): the vacuity ratchet moves
+# 44.62% -> 44.75% against a 50.00% ceiling, 0 NEVER_DECODABLE words break, and
+# 31 words enter the allowlist — when, which, where, why, while, white, whether
+# and their inflections. `wh`->/h/ is deliberately NOT added: who/whose/whole
+# still fail on their vowels, so it would widen the gate and certify nothing.
+wh,W,digraph,any,3,0,when
 th,TH,digraph,any,3,0,thin
 th,DH,digraph,any,3,0,this
 ng,NG,digraph,any,3,0,sing

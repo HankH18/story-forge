@@ -589,6 +589,195 @@ async def test_run_warm_is_silent_about_problems_when_there_are_none(monkeypatch
             await s.commit()
 
 
+# --- run_warm: §7's api_fail / timeout fallback (DEVIATIONS 8.4) -------------
+# The standing finding in docs/STATE.md and docs/RESUME.md JOB C: one
+# `anthropic.APITimeoutError` out of the GENERATING node aborted the entire run
+# and discarded every remaining (stage, theme) pair. §7 maps `timeout` to a
+# fallback like every other member of its taxonomy.
+#
+# These tests raise the REAL exception class, not a stand-in, because the whole
+# question is whether that specific class escapes the loop. The discriminator
+# is `len(made) == 1`: before the fix the exception propagated out of the first
+# iteration, so no second story could exist.
+def _good_result(stage, theme):
+    from storyforge.decoder import mastered_ids, validate_text
+    from storyforge.pipeline import Attempt, PipelineResult
+
+    body = " ".join(BODIES)
+    report = validate_text(body, mastered_ids(stage), frozenset(["the", "and"]), frozenset())
+    return PipelineResult(
+        stage_id=stage,
+        theme=theme,
+        passed=True,
+        attempts=[
+            Attempt(
+                n=0,
+                kind="generate",
+                text=body,
+                decodability=1.0,
+                violations=[],
+                usage=Usage(model="claude-sonnet-5", input_tokens=100, output_tokens=50),
+            )
+        ],
+        final_text=body,
+        final_report=report,
+        title="Sam And The Cat",
+        story_words=[],
+        moderation=ModerationResult(approved=True, reason="ok", layer="model"),
+    )
+
+
+def _timeout() -> Exception:
+    import httpx
+    from anthropic import APITimeoutError
+
+    return APITimeoutError(
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+
+
+async def test_a_generation_timeout_does_not_abort_the_rest_of_the_warm_run(
+    monkeypatch, nodes, capsys
+):
+    """The fix, stated as the thing that used to be impossible: a story generated
+    AFTER a timeout in the same run."""
+    calls = []
+
+    async def flaky_pipeline(session, stage_id, theme_slug, effort="medium"):
+        calls.append((stage_id, theme_slug))
+        if len(calls) == 1:
+            raise _timeout()
+        return _good_result(stage_id, theme_slug)
+
+    async def empty_pool(session, stage_id, theme_id):
+        return 0
+
+    monkeypatch.setattr(warm, "run_pipeline", flaky_pipeline)
+    monkeypatch.setattr(warm, "pool_depth", empty_pool)
+
+    async with SessionLocal() as s:
+        before = (await s.execute(text("SELECT coalesce(max(id), 0) FROM stories"))).scalar_one()
+    try:
+        # Non-zero, because a pair below target IS a failed warm run — but at the
+        # END, having attempted everything, not from inside the first iteration.
+        with pytest.raises(SystemExit) as exit_info:
+            await warm.run_warm([STAGE], [THEME], 2, "medium")
+
+        # THE discriminator, and it is process-local so no amount of concurrent
+        # database traffic can move it: the loop reached its second iteration.
+        # Before the fix the exception left `run_warm` from the first one.
+        assert len(calls) == 2, "the run stopped at the timeout instead of continuing"
+
+        # And the second iteration really persisted a story. Matched on the
+        # fixture's own title rather than on `id > max(id)`: this suite shares a
+        # live database with concurrent `make warm` runs, and a bare id window
+        # counts their stories too.
+        async with SessionLocal() as s:
+            made = (
+                await s.execute(
+                    text("SELECT id FROM stories WHERE id > :i AND title = :t"),
+                    {"i": before, "t": "Sam And The Cat"},
+                )
+            ).scalars().all()
+        assert len(made) == 1, "the story after the timeout was never written"
+
+        # The exit names the failure, its type and where it happened, and points
+        # at the remedy that actually works (`pool_depth` makes warm idempotent).
+        message = str(exit_info.value)
+        assert "APITimeoutError" in message
+        assert f"stage {STAGE}" in message and THEME in message
+        assert "below target" in message and "make warm" in message
+
+        out = capsys.readouterr().out
+        # Visible as it happens, not only in the exit code.
+        assert "API FAIL" in out and "APITimeoutError" in out
+        # And counted in the one-line summary next to the other outcomes.
+        assert "1 warm, 0 rejected, 1 api_fail" in out
+    finally:
+        # Only this test's own rows — a concurrent `make warm` is writing to the
+        # same table and its stories are not ours to delete.
+        async with SessionLocal() as s:
+            await s.execute(
+                text("DELETE FROM stories WHERE id > :i AND title = :t"),
+                {"i": before, "t": "Sam And The Cat"},
+            )
+            await s.commit()
+
+
+async def test_a_timeout_on_one_pair_does_not_stop_the_next_pair(monkeypatch, nodes, capsys):
+    """The expensive half of the old behaviour: `make warm` walks stages x themes,
+    so aborting on the first pair threw away every pair after it."""
+    seen = []
+
+    async def always_timeout(session, stage_id, theme_slug, effort="medium"):
+        seen.append((stage_id, theme_slug))
+        raise _timeout()
+
+    async def empty_pool(session, stage_id, theme_id):
+        return 0
+
+    monkeypatch.setattr(warm, "run_pipeline", always_timeout)
+    monkeypatch.setattr(warm, "pool_depth", empty_pool)
+
+    with pytest.raises(SystemExit) as exit_info:
+        await warm.run_warm([STAGE], ["animals", "dragons", "space"], 1, "medium")
+
+    # Every pair was tried. Before the fix this list had one entry.
+    assert [t for _, t in seen] == ["animals", "dragons", "space"]
+    # Nothing was made, and the message says WHY rather than just "no stories".
+    assert "produced no warm stories" in str(exit_info.value)
+    assert "APITimeoutError" in str(exit_info.value)
+    assert capsys.readouterr().out.count("API FAIL") == 3
+
+
+async def test_a_keyboard_interrupt_still_stops_the_warm_run(monkeypatch, nodes):
+    """The other direction. `except BaseException` is broad on purpose, so the
+    exclusion has to be tested or the run becomes uninterruptible — and a warm
+    run is a long-running job someone will ctrl-C."""
+    seen = []
+
+    async def interrupted(session, stage_id, theme_slug, effort="medium"):
+        seen.append(theme_slug)
+        raise KeyboardInterrupt
+
+    async def empty_pool(session, stage_id, theme_id):
+        return 0
+
+    monkeypatch.setattr(warm, "run_pipeline", interrupted)
+    monkeypatch.setattr(warm, "pool_depth", empty_pool)
+
+    with pytest.raises(KeyboardInterrupt):
+        await warm.run_warm([STAGE], ["animals", "dragons"], 1, "medium")
+    assert seen == ["animals"], "a signal must not be swallowed as an api_fail"
+
+
+async def test_a_clean_run_reports_zero_api_failures_and_exits_zero(monkeypatch, nodes, capsys):
+    """DEVIATIONS 8.4 adds a second non-zero exit path; a green run must stay
+    green or the new exit code is just a broken build."""
+
+    async def good_pipeline(session, stage_id, theme_slug, effort="medium"):
+        return _good_result(stage_id, theme_slug)
+
+    async def empty_pool(session, stage_id, theme_id):
+        return 0
+
+    monkeypatch.setattr(warm, "run_pipeline", good_pipeline)
+    monkeypatch.setattr(warm, "pool_depth", empty_pool)
+
+    async with SessionLocal() as s:
+        before = (await s.execute(text("SELECT coalesce(max(id), 0) FROM stories"))).scalar_one()
+    try:
+        await warm.run_warm([STAGE], [THEME], 1, "medium")
+        out = capsys.readouterr().out
+        assert "1 warm, 0 rejected, 0 api_fail" in out
+        assert "API FAIL" not in out
+        assert "never produced a story" not in out
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(text("DELETE FROM stories WHERE id > :i"), {"i": before})
+            await s.commit()
+
+
 # --- the backfill ------------------------------------------------------------
 async def test_backfill_enriches_a_servable_story_that_has_no_questions(
     session, story, nodes, capsys

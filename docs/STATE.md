@@ -10,8 +10,8 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 | Phase | State |
 |---|---|
 | 0 scaffold | `make dev` boots PG16 + FastAPI + Vite. Style-guide tokens confirmed in a real browser (computed styles, not just a 200). |
-| 1 decoder | Pure validator, 92-GPC inventory, vendored SHA-pinned CMUdict. 18/18 §5.7 goldens. Anti-golden suite + vacuity ratchet (44.6%, ceiling 50%) — both sabotage-tested. |
-| 2 precompute | `make seed` idempotent; `make precompute` → 64,841 rows / 12 stages in 1.6s. `POST /api/validate` reproduces the §17 demo sentence exactly. |
+| 1 decoder | Pure validator, **93**-GPC inventory, vendored SHA-pinned CMUdict. 18/18 §5.7 goldens. Anti-golden suite + vacuity ratchet (**44.75%**, ceiling 50%) — both sabotage-tested, and the ratchet has now refused a real proposed row (DEVIATIONS 8.12). `wh`→/w/ added at stage 3 (8.13). |
+| 2 precompute | `make seed` idempotent; `make precompute` → **64,290** rows / 12 stages in 1.5s (stage 1 = 157, the tightest, above §18's 150 floor). `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **224** entries, **38** sight words (DEVIATIONS 8.10–8.17). |
 | 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` fills ≥3 per (stage,theme), idempotent. Moderation = free blocklist + Haiku judge. |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
 
@@ -91,11 +91,40 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
   **Lesson worth keeping: a metric measured in the harness is not evidence about
   production data.** Prevention is real (`SYSTEM_RULES`, 0 false positives);
   the claim that the pool was clean was never tested until it was.
+- **The generation timeout and `warm.py`'s reaction to it** (DEVIATIONS 8.0–8.6).
+  Two defects, one root. §7's 30s generation timeout was the cause of all 11
+  `api_fail` cells in the §14 run, and `warm.py` treated the same exception as
+  fatal to a whole run.
+  - **The eval's latency numbers were censored and nobody noticed.** `max_retries=2`
+    means one SDK call is up to three attempts, so a story recorded at 86.6s was
+    30 + 30 + 26.6, and **27% of all generation attempts the run paid for were
+    killed at 30s and discarded**. The 11 failures at 91.3–91.6s match the SDK's
+    own backoff constants exactly, which is what proves it.
+  - **Latency is driven by output tokens (r = +0.997), not by stage (r = +0.50).**
+    Adaptive thinking, not story length, is what the tokens go on. So the planned
+    per-stage ramp was abandoned: measured with `max_retries=0`, a **30-word
+    stage-1 story took 24.60s** against the 30s budget. §7's number was too tight
+    everywhere; stages 9–12 were only where it showed.
+  - Timeout is now a single **240s**, and it is *derived*, not chosen:
+    `client.timeout_for_tokens(MAX_OUTPUT_TOKENS)` = 16000 / 68 tok/s. A test
+    asserts the two stay consistent, so raising the token ceiling again turns the
+    suite red instead of surfacing as an intermittent api_fail. `connect=5s` is
+    split out — a float timeout was setting the *connect* budget to 30s too, six
+    times the SDK's own default.
+  - **`pipeline._call` held a stale `max_tokens=8000`** while `llm/generate.py` had
+    moved to 16000 (DEVIATIONS 8.25 flagged it, 8.7 fixed it). `_call` is the node
+    that actually runs, so the live path kept the old ceiling — and both api_fails
+    in the 24-cell after-run were that, not the clock: `stop_reason=max_tokens`
+    and a truncated JSON body.
+  - `warm.py` records an api_fail per story, continues, and exits non-zero at the
+    END naming the cell. **Proved live**, not with a mock: a real
+    `APITimeoutError` on generation 1, then a real stage-12 story at 97.7%
+    persisted on generation 2 of the same run. The two guarding tests were
+    sabotage-checked — both go red when the `try/except` is removed.
+  - **`of` is still unfixed** and is still the one actionable item in `docs/EVAL.md`
+    §9; it is data + a `make precompute` re-run, untouched here.
 
 ## Also outstanding
-- **`warm.py` aborts the whole run on `anthropic.APITimeoutError`** instead of
-  falling through. §7 maps `timeout` to a fallback like any other failure. Hit
-  once live on a stage-5 generation. Pre-existing; not yet fixed.
 - **Outside-voice / cross-model review never completed** (content-filter error on
   the subagent). Phases 2–4 shipped on single-model review.
 - **No git remote pushed** — GitLab project not created. `origin` is configured

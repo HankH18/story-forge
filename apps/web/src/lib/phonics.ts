@@ -135,6 +135,10 @@ const EXAMPLE: Record<string, string> = {
   'n|NG': 'finger',
   'qu|K W': 'quick',
   'w|W': 'win',
+  // `wh` shares /w/ with `w` but is a distinct GPC and a distinct lesson
+  // (DEVIATIONS 8.13), so it needs its own example — a parent shown `win` for
+  // the `wh` row would be told their child had practised the wrong grapheme.
+  'wh|W': 'when',
   'y|Y': 'yes',
   'z|Z': 'zip',
   'v|V': 'van',

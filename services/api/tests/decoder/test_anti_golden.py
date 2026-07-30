@@ -92,7 +92,12 @@ def test_common_early_reader_words_are_decodable(word, stage):
 
 # --- the vacuity metric ------------------------------------------------------
 # Fraction of an adult dictionary the inventory can spell with EVERYTHING
-# unlocked. Currently 44.6% at 92 GPCs.
+# unlocked. Currently 44.75% at 93 GPCs — was 44.62% at 92 before `wh`->/w/ was
+# added (docs/DEVIATIONS.md 8.13 records the +0.13pt as the price of 31 words).
+# COMMENT ONLY: the SEED, SAMPLE SIZE, FLOOR and CEILING below are untouched.
+# The ratchet has now fired on a change someone actually wanted rather than on a
+# sabotage — an `o`->/oʊ/ row to rescue `so`/`old`/`gold` lands at 50.4% and is
+# refused (8.12). That is this guard doing its job, not a nuisance.
 #
 # This is a RATCHET, not a wide band. The ceiling sits ~5 points above the
 # measured value, which is deliberate: raising it must be a conscious act with a

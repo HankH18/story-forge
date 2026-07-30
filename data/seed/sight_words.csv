@@ -1,5 +1,18 @@
 # Per-stage sight words (§4, Appendix A) — high-frequency non-decodable words.
 # Cumulative: a kid at stage N has every word with stage <= N.
+#
+# Appendix A labels its sight-word column "(sample)", so this list extends it.
+# Five rows were added in Phase 8 (docs/DEVIATIONS.md 8.10, 8.11) after the §14
+# eval found `of` — the second-commonest word in written English — spending part
+# of every story's 5% violation budget. Each addition is PROVED unalignable at
+# stage 12 by the 93-GPC inventory, so a GPC could not fix it: `of` is in
+# tests/decoder/test_anti_golden.py::NEVER_DECODABLE by name, and the `o`->/oʊ/
+# row that would rescue `so` trips the vacuity ratchet at 50.4%.
+#
+# A sight word does NOT widen what the aligner certifies (validate_word
+# classifies sight before it looks at a pronunciation). It changes the §5.1
+# denominator, which is a real change to the guarantee — hence one justification
+# per row rather than a batch.
 stage,word
 1,the
 1,a
@@ -8,14 +21,24 @@ stage,word
 2,to
 2,no
 2,go
+# `of` rank 4, bracketed by `to` (2) and `is` (8). Needs f->/v/; taught to nobody.
+2,of
+# `so` rank 33 — more common than `no` (51) and `go` (98), same o->/oʊ/ exception.
+2,so
+# `do` rank 50 — o->/uː/. `to` only aligns via a CMUdict schwa variant (8.11).
+2,do
 3,he
 3,she
 3,we
 3,me
 3,was
+# `be` rank 17 — the fifth member of he/she/we/me, and commoner than all four.
+3,be
 4,said
 4,you
 4,they
+# `from` rank 26 — o->/ʌ/. At 4, where Appendix A introduces consonant clusters.
+4,from
 5,are
 5,her
 5,all
