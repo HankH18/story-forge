@@ -34,14 +34,26 @@
 #                      innocuous sense is also rare in this product's domain.
 # When removing, name the layer-3 bullet that still covers the hazard.
 #
-# `shot`, `beat`, `blade`, `hurt`, `fight`, `hate`, `butt` and `smoking` were all
-# examined under that test and KEPT — see 8.15. Removing a genuine hazard to fix a
-# false positive is much worse than the false positive.
+# `shot`, `beat`, `blade`, `fight`, `hate`, `butt` and `smoking` were examined
+# under that test and KEPT — see 8.15 and the re-examination in 8.74. Removing a
+# genuine hazard to fix a false positive is much worse than the false positive, and
+# none of those seven has any measured cost: 60 live warm stories produced zero
+# rejects on any of them.
+#
+# `hurt` was on that kept list and is now REMOVED (8.73). It caused 3 of the 9
+# rejects in one 60-story warm run, at stages 7, 8 and 11, and all three were the
+# same construction — "did not want to hurt" — a sentence whose meaning is the
+# explicit ABSENCE of harm. Layer 3's REJECT list still says "Anyone or anything is
+# hurt, injured, killed, or dies" and now actually gets to read the sentence; the
+# same run proves it works, rejecting "The dragon did nip a cat" for deliberate
+# harm with no blocklist word in the story at all. Note also that `hurts` and
+# `hurting` were never on this list, so blocking the bare form alone was never the
+# hazard control it looked like.
 #
 # INVARIANT: `load_blocklist()` reads ONE WORD PER LINE. A space-separated
 # rewrite once loaded 22 words instead of 240 and the only symptom was a row count
 # moving the wrong way (6.15). Lines and entries are kept equal so the list can be
-# verified by counting it: 224 non-comment lines, 224 entries.
+# verified by counting it: 223 non-comment lines, 223 entries.
 
 # --- profanity ---
 fuck
@@ -193,7 +205,6 @@ wound
 wounded
 injure
 injured
-hurt
 beat
 beaten
 punch

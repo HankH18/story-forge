@@ -26,6 +26,8 @@ rest is pure functions and one SQL query.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from sqlalchemy import text
 
@@ -144,7 +146,29 @@ def test_the_coverage_gate_counts_what_the_serving_path_serves():
     # NO stories has to come back as a row with 0 — a WHERE would drop exactly the
     # rows the gate exists to find.
     assert "LEFT JOIN" in async_sql
-    assert "WHERE" not in async_sql
+    # This assertion was `assert "WHERE" not in async_sql`, and that substring was
+    # a PROXY for the requirement in the comment above rather than the requirement
+    # itself. `ANSWERABLE_SQL` (DEVIATIONS 8.50/8.51) joined the same ON clause as
+    # a correlated `EXISTS (SELECT 1 ... WHERE q.story_id = s.id)` — which
+    # satisfies the requirement, because the filter is still in the ON clause,
+    # while containing the word. So the proxy over-approximated and is replaced by
+    # one that tests PLACEMENT, which is what the comment always claimed.
+    # Subqueries are stripped innermost-first; what remains is the statement's own
+    # top level.
+    top_level = async_sql
+    while "(" in top_level:
+        collapsed = re.sub(r"\([^()]*\)", " ", top_level)
+        if collapsed == top_level:  # unbalanced parentheses — stop, do not loop
+            break
+        top_level = collapsed
+    assert "WHERE" not in top_level, (
+        "the coverage gate grew a top-level WHERE, which drops exactly the empty "
+        f"pairs it exists to find:\n{top_level}"
+    )
+    # The behavioural half of the same requirement, which no string check can stand
+    # in for, is `test_dead_end_stories.py::
+    # test_the_coverage_gate_ignores_a_story_that_cannot_be_served`: a pair whose
+    # only story fails the ON clause comes back as a row with 0, not as no row.
 
 
 def test_the_coverage_gate_refuses_to_pass_vacuously_on_an_unseeded_matrix():

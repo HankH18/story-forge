@@ -106,7 +106,22 @@ async def _kid(client, headers, stage_id: int, name: str = "Ana") -> dict:
 
 
 async def _insert_story(session, sandbox, *, stage_id: int, body: str, theme=DRAGONS) -> int:
-    """A servable story with `last_served_at IS NULL`, so the ladder prefers it."""
+    """A servable story with `last_served_at IS NULL`, so the ladder prefers it.
+
+    **It carries a question, and that is load-bearing rather than tidy**
+    (DEVIATIONS 8.50). A story with no `questions` row is no longer servable at
+    all, so a fixture without one is excluded by `_SERVE_SQL` before any of the
+    gates these tests are about ever runs — which would have made
+    `test_an_undecodable_story_in_the_pool_is_never_served` pass VACUOUSLY: green,
+    still carrying its sabotage note, and proving nothing. That is the exact shape
+    of the defect its own docstring is about. Verified rather than assumed: with
+    this row present, deleting the `_is_decodable_for` branch in `api/stories.py`
+    turns that test red again; without it, the test stays green.
+
+    The question is deliberately minimal — these tests are about the stage and
+    decodability boundaries, not §11.3 — but it is a real `tap_word` row shaped
+    the way the node writes one.
+    """
     theme_id = (
         await session.execute(text("SELECT id FROM themes WHERE slug = :s"), {"s": theme})
     ).scalar_one()
@@ -127,6 +142,17 @@ async def _insert_story(session, sandbox, *, stage_id: int, body: str, theme=DRA
             "VALUES (:id, 0, :body, CAST('{}' AS text[]))"
         ),
         {"id": story_id, "body": body},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+            "VALUES (:id, 0, 'tap_word', 'Tap: sit.', CAST(:p AS jsonb), CAST(:a AS jsonb))"
+        ),
+        {
+            "id": story_id,
+            "p": '{"options": ["sat", "did", "nap"], "cue_word": "sit"}',
+            "a": '{"correct": "sat", "index": 0, "target_grapheme": "s"}',
+        },
     )
     await session.commit()
     return story_id

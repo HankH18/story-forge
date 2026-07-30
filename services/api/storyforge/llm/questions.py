@@ -125,11 +125,53 @@ Determinism: option order is a pure function of (seed, question type, option
 set). `random.Random` is seeded from a blake2b digest — stable across processes
 and independent of PYTHONHASHSEED — and the option list is canonically sorted
 before shuffling, so the model's emission order cannot leak the answer either.
+
+**Every sound this module OFFERS is provably answerable, and when the model
+cannot pick a legal answer out of the closed list, this module picks it**
+(DEVIATIONS 8.53, 8.54). A full `make warm` left six servable stories with no
+questions at all, every one of them dropping `tap_word` for "the three words must
+be close to the same length" — and the measurement that matters is that a legal,
+length-balanced triple existed anyway in five of the six, 21 of them in one case.
+The length rule was not the binding constraint and is unchanged. Two things were:
+
+    the menu was dishonest    `_prefer_current_stage` returned the first NON-EMPTY
+                              tier. At stage 8 the `current_stage_onset` tier is
+                              routinely one sound with one onset word — stage 8
+                              teaches `ou` and the only `ou`-onset word a
+                              decodable story holds is `outside`, seven letters
+                              against a story of four-letter words. Non-empty, so
+                              it fired, so the model was handed a single sound
+                              that admits NO legal question and three attempts
+                              later both types were gone. A tier now fires only
+                              when it holds a sound that can actually be answered,
+                              which preserves §8's preference exactly (the ORDER
+                              does not move) while letting stage 8 fall through to
+                              `current_stage_word` — a tier whose definition is
+                              "the correct word uses a sound this stage teaches",
+                              so those stories earn MORE §8 evidence, not less.
+
+    the proposer was the      `tap_word` is the one type no model writes: the
+    weakest link              prompt is a frame, every option is a story word that
+                              already cleared the gate and §13 with the body, and
+                              `LAYER3_EXEMPT_QTYPES` has said so since Phase 4. The
+                              model's only job is CHOOSING three words from a
+                              closed list this module composed — and it chose badly
+                              on 12 of 113 stories while a legal choice sat in the
+                              list. So when the retry budget is spent,
+                              `tap_word_options` composes the triple and
+                              `check_tap_word` judges it unchanged. The proposer
+                              changes; the judge does not. Zero tokens.
+
+`tap_word_options` is the one pure function all of that rests on: it enumerates
+the closed list and returns the best legal option set, or `None` when the sound
+cannot be asked about at all. `sound_targets` drops those, so a sound in the menu
+is a promise rather than a suggestion.
 """
 
 from __future__ import annotations
 
 import hashlib
+import itertools
 import random
 from collections.abc import Iterable, Sequence
 from functools import lru_cache
@@ -214,15 +256,24 @@ words from the story that START with it, and the words from the story that do \
 not use it at all. Pick one sound, one word that starts with it, and two words \
 that do not use it. Use only the words offered under the sound you picked. Do \
 not invent words and do not reuse a word from another sound.
+   - The three words must be within two letters of the same length. A word that \
+     is longer or shorter than the other two can be picked out by its shape, so \
+     the child never has to sound anything out. Choose the three lengths first, \
+     then the words.
 
 2. TWO-CHOICE QUESTION. Ask one short question about what happens in the story, \
 and write a true answer and a false answer.
    - Build the true answer by copying a sentence from the story, or by \
      shortening one. Keep the story's words in the story's own order, and add \
      nothing the story does not say.
-   - Build the false answer from the story's words too, then change what it \
-     claims — swap who did what, or say the opposite. It must be something the \
-     story never says.
+   - Build the false answer from the story's words too, then put them in an \
+     order the story never uses — swap who did what, or swap what happened to \
+     what. Read your false answer back and check you cannot find its words in \
+     the story one after another in that same order; if you can, it is not a \
+     wrong answer.
+   - Do NOT make the false answer by adding or removing the word "not". Every \
+     other word stays in the story's own order, so the story still reads as \
+     saying it, and it does not count as a wrong answer.
    - Never begin an answer with Yes or No.
    - The two answers must have the same number of words and be within about \
      three letters of the same length. A longer or shorter answer tells the \
@@ -305,6 +356,13 @@ class QuestionSet(BaseModel):
     usage: Usage
     attempts: int = 0
     dropped: dict[str, list[str]] = Field(default_factory=dict)
+    #: Question types this module composed itself after the model's retry budget
+    #: was spent (DEVIATIONS 8.54). Reported for the same reason `dropped` is: a
+    #: recovered question is not a normal one. `warm.enrichment_problems` fails a
+    #: run in which EVERY surviving question is derived — that is the signature of
+    #: a model returning nothing usable at all, and before this field existed the
+    #: fallback would have turned that from a non-zero exit into a quiet success.
+    derived: list[str] = Field(default_factory=list)
     #: §8/§14: which sound the tap-a-word question ended up practising, and which
     #: tier of `_prefer_current_stage` produced it. Surfaced (rather than logged)
     #: so the eval harness can measure how often the fallback fires — a high
@@ -482,6 +540,75 @@ def _cue_and_offer(
     return None, [], []
 
 
+def tap_word_options(target: SoundTarget) -> list[str] | None:
+    """The best legal option set for this sound — `[correct, other, other]`.
+
+    ``None`` when the sound admits no legal question at all, which is the case
+    `sound_targets` used to offer anyway and the model then spent three attempts
+    failing to satisfy (DEVIATIONS 8.53). Stage 8 is the clean example: the
+    `current_stage_onset` tier is `ou`, the only `ou`-onset word a decodable
+    story holds is `outside`, and no two of that story's other words are within
+    two letters of seven — so every triple the closed list admits is one
+    `check_tap_word` must reject, and offering the sound could only ever cost the
+    child the whole phonics screen.
+
+    Exhaustive over the closed list, which is small by construction
+    (`MAX_OFFERED_WORDS` each side). Every constraint applied here is one
+    `check_tap_word` applies, so a triple this returns is a triple that passes —
+    which is what lets the same function serve as the tier test (8.53), the menu
+    filter, and the fallback proposer (8.54) without three definitions of legal.
+    The one constraint it cannot see is whether `PROMPT_FRAMES` can spell a
+    readable sentence for the cue; that is per-stage rather than per-triple, so
+    `sound_targets` checks it alongside.
+
+    "Best" is the least guessable: smallest spread in length first, then the
+    shortest words, then alphabetical so the choice is reproducible.
+    """
+    best: tuple[int, int, list[str]] | None = None
+    for correct in target.onset_words:
+        pool = [w for w in target.clean_words if w != correct]
+        for pair in itertools.combinations(pool, 2):
+            options = [correct, *pair]
+            if len(set(options)) != len(options):
+                continue
+            if not _length_balanced(options, single_word=True):
+                continue
+            lengths = [len(o) for o in options]
+            key = (max(lengths) - min(lengths), sum(lengths), options)
+            if best is None or key < best:
+                best = key
+    return list(best[2]) if best is not None else None
+
+
+def _offer(target: SoundTarget) -> SoundTarget:
+    """The target as the MODEL will see it — option lists cut to `MAX_OFFERED_WORDS`.
+
+    The cut used to be the last thing `sound_targets` did, and it could remove
+    exactly the words that made the sound answerable: `clean_words` arrives in
+    reading order, so whether a legal partner for a seven-letter onset word
+    survived the first eight was luck. The proven triple therefore floats to the
+    front, and the rest of each list keeps reading order behind it — a list whose
+    first entries are a legal triple still contains a legal triple after any
+    truncation, so the answerability this module promises survives the cut.
+
+    Nothing about that order is visible to a child. Both lists are prompt-side
+    only, every word in `onset_words` is a legal correct answer and every word in
+    `clean_words` is a legal distractor, so promoting one carries no signal.
+    """
+    options = tap_word_options(target)
+    onset, clean = list(target.onset_words), list(target.clean_words)
+    if options is not None:
+        correct, *others = options
+        onset = [correct, *(w for w in onset if w != correct)]
+        clean = [*others, *(w for w in clean if w not in others)]
+    return target.model_copy(
+        update={
+            "onset_words": onset[:MAX_OFFERED_WORDS],
+            "clean_words": clean[:MAX_OFFERED_WORDS],
+        }
+    )
+
+
 def sound_targets(
     *,
     story_text: str,
@@ -499,6 +626,15 @@ def sound_targets(
     has not sounded them out, so they carry no evidence about a grapheme.
 
     "Best" is §8's evidence rule, not recency alone — see `_prefer_current_stage`.
+
+    **Qualifying now means answerable, not merely non-degenerate** (DEVIATIONS
+    8.53). A sound survives only if `tap_word_options` can compose a legal triple
+    from its closed list AND `tap_word_prompt` can spell a readable sentence for
+    its cue. Both were previously left to `check_tap_word` to discover per
+    attempt, which is the wrong place: by then the sound is already the only thing
+    on the menu and the retry budget is being spent proving it impossible. This is
+    pure narrowing — the same move `_cue_and_offer` and `_prefer_current_stage`
+    make — so nothing `check_tap_word` proves is affected.
     """
     mastered = mastered_ids(stage_id)
     sight, story = _sets(sight_words, story_words)
@@ -547,36 +683,58 @@ def sound_targets(
     # Most recently taught sound first — that is the one worth practising —
     # with an alphabetical tiebreak so the list is reproducible.
     targets.sort(key=lambda t: (-t.stage, t.grapheme))
-    return [
-        # Truncation is safe: verification tests the grapheme, not list
-        # membership, so a shorter offer only narrows the model's menu. It
-        # happens AFTER tiering so a stage-bearing word cannot be cut first.
-        target.model_copy(
-            update={
-                "onset_words": target.onset_words[:MAX_OFFERED_WORDS],
-                "clean_words": target.clean_words[:MAX_OFFERED_WORDS],
-            }
-        )
-        for target in _prefer_current_stage(targets, stage_id)[:limit]
-    ]
+
+    # Memoised per cue: `tap_word_prompt` walks `PROMPT_FRAMES` against the gate,
+    # and the same cue is re-tested once per tier otherwise.
+    frames: dict[str, bool] = {}
+
+    def askable(target: SoundTarget) -> bool:
+        if target.cue not in frames:
+            frames[target.cue] = (
+                tap_word_prompt(target.cue, stage_id, sight_words, story_words) is not None
+            )
+        return frames[target.cue]
+
+    return _prefer_current_stage(targets, stage_id, askable=askable)[:limit]
 
 
-def _prefer_current_stage(targets: Sequence[SoundTarget], stage_id: int) -> list[SoundTarget]:
+def _prefer_current_stage(
+    targets: Sequence[SoundTarget],
+    stage_id: int,
+    askable: object = None,
+) -> list[SoundTarget]:
     """§8: prefer a question that practises a sound taught AT this stage.
 
-    Three tiers, first non-empty wins (see the module docstring). The tiers
-    NARROW the closed list rather than adding anything to it, so every guarantee
+    Three tiers, best first (see the module docstring). The tiers NARROW the
+    closed list rather than adding anything to it, so every guarantee
     `check_tap_word` proves is untouched — a narrower menu cannot make a wrong
     question right.
 
-    The fallback is deliberate. A stage whose story simply contains no
+    **A tier fires when it holds an ANSWERABLE sound, not merely a sound**
+    (DEVIATIONS 8.53). "First non-empty tier wins" is what cost six live stories
+    their whole question screen: stage 8's `current_stage_onset` tier is one sound
+    (`ou`) with one onset word (`outside`) whose length no other word in the story
+    comes within two letters of, so the tier was non-empty, fired, and offered a
+    menu on which every possible answer is one `check_tap_word` must reject.
+    Falling through to `current_stage_word` costs §8 nothing — that tier's
+    definition is that the correct word uses a sound this stage teaches — and the
+    tier ORDER is unchanged, so a story that could earn onset-tier evidence still
+    does. Measured over the live pool: stage 8 goes from 4 of 8 answerable stories
+    to 8 of 8, and stage-evidence-earning stories rise from 86 to 90 of 113.
+
+    The last-resort tier is deliberate. A stage whose story simply contains no
     current-stage sound still gets a question about the newest sound available;
     dropping the only phonics question would cost the child the whole screen and
-    §8 nothing it did not already lack.
+    §8 nothing it did not already lack. Returning nothing at all is reserved for
+    the story where no sound anywhere is answerable — and that is an honest empty,
+    not a silent one: the caller stops asking for a `tap_word`, says so in
+    `dropped`, and spends the retry budget on the question it can still get.
     """
-    onset_tier = [t for t in targets if t.stage == stage_id]
-    if onset_tier:
-        return [t.model_copy(update={"scope": "current_stage_onset"}) for t in onset_tier]
+    onset_tier = [
+        t.model_copy(update={"scope": "current_stage_onset"})
+        for t in targets
+        if t.stage == stage_id
+    ]
 
     word_tier = []
     for t in targets:
@@ -588,10 +746,19 @@ def _prefer_current_stage(targets: Sequence[SoundTarget], stage_id: int) -> list
             word_tier.append(
                 t.model_copy(update={"onset_words": earning, "scope": "current_stage_word"})
             )
-    if word_tier:
-        return word_tier
 
-    return [t.model_copy(update={"scope": "older_stage_fallback"}) for t in targets]
+    old_tier = [t.model_copy(update={"scope": "older_stage_fallback"}) for t in targets]
+
+    for tier in (onset_tier, word_tier, old_tier):
+        offered = [_offer(t) for t in tier]
+        answerable = [
+            t
+            for t in offered
+            if tap_word_options(t) is not None and (askable is None or askable(t))
+        ]
+        if answerable:
+            return answerable
+    return []
 
 
 def _cue_index(
@@ -1001,7 +1168,11 @@ async def generate_questions(
     dropped: dict[str, list[str]] = {}
     needed = ["tap_word", "mcq2"] if targets else ["mcq2"]
     if not targets:
-        dropped["tap_word"] = ["no sound in this story has one onset word and two clean words"]
+        dropped["tap_word"] = [
+            "no sound in this story can be asked about: none has one onset word and "
+            "two clean words of a similar length that this stage can also spell a "
+            "readable prompt for"
+        ]
 
     total = Usage(model=fast_model())
     problems: list[str] = []
@@ -1068,6 +1239,47 @@ async def generate_questions(
     for qtype in needed:
         dropped.setdefault(qtype, problems or ["retry budget exhausted"])
 
+    # DEVIATIONS 8.54. The retry budget is spent and the phonics question — the
+    # only §8-bearing type — is still missing, while the closed list this module
+    # composed provably admits a legal answer (`sound_targets` offers no sound for
+    # which it does not). So compose the answer here and submit it to the SAME
+    # judge: `check_tap_word`, unmodified, with the same cue rule, the same
+    # per-option gate, the same "exactly one option can be correct" proof and the
+    # same length rule. A draft that fails is discarded exactly as the model's is.
+    #
+    # The proposer is the only thing that changes, and this is the one type where
+    # that is not a trust decision at all: `LAYER3_EXEMPT_QTYPES` already records
+    # that no model writes a tap-a-word string — the prompt is a frame, and every
+    # option is a story word that cleared the gate and §13 with the body. §13
+    # layer 1 still reads every string of it in `_moderate_questions`.
+    # Read BEFORE the fallback runs, and not inferred from `dropped` afterwards:
+    # a model that failed attempt 1 and succeeded on attempt 2 leaves a `dropped`
+    # entry behind, so "there are recorded problems" is not the same question as
+    # "who wrote the question that survived".
+    model_wrote_it = "tap_word" in accepted
+    derived_problems = dropped.get("tap_word")
+    derived: list[str] = []
+    if "tap_word" in needed:
+        for target in targets:
+            options = tap_word_options(target)
+            if options is None:  # pragma: no cover — `sound_targets` filters these
+                continue
+            question, why = check_tap_word(
+                TapWordDraft(
+                    target_grapheme=target.grapheme,
+                    correct_word=options[0],
+                    other_words=list(options[1:]),
+                ),
+                targets=targets,
+                **common,
+            )
+            if question is not None:
+                accepted["tap_word"] = question
+                needed.remove("tap_word")
+                derived.append("tap_word")
+                break
+            derived_problems = (derived_problems or []) + why
+
     # Stable order: the phonics question first, comprehension second (§11.3).
     questions = [accepted[q] for q in ("tap_word", "mcq2") if q in accepted]
     for idx, question in enumerate(questions):
@@ -1078,24 +1290,48 @@ async def generate_questions(
         usage=total,
         attempts=attempts,
         dropped={k: v for k, v in dropped.items() if k not in accepted},
-        tap_word_target=describe_target(accepted.get("tap_word"), targets, stage_id),
+        derived=derived,
+        tap_word_target=describe_target(
+            accepted.get("tap_word"),
+            targets,
+            stage_id,
+            source="model" if model_wrote_it else "derived",
+            model_dropped=derived_problems,
+        ),
     )
 
 
 def describe_target(
-    question: GeneratedQuestion | None, targets: Sequence[SoundTarget], stage_id: int
+    question: GeneratedQuestion | None,
+    targets: Sequence[SoundTarget],
+    stage_id: int,
+    source: str | None = "model",
+    model_dropped: Sequence[str] | None = None,
 ) -> dict:
     """What the tap-a-word question ended up practising (§8/§14).
 
     Reported for every outcome, including the ones with no question, because
     "this story could offer nothing at this stage" is the measurement that tells
     an operator the allowlist — not the node — is the problem.
+
+    `source` distinguishes the model's own choice from the one this module
+    composed after the retries were spent (DEVIATIONS 8.54), and `model_dropped`
+    keeps the reasons the model's attempts were refused even when the question
+    was recovered. Both are persisted into `gen_meta.enrichment`, so "how often
+    does the model need catching" is a query rather than a re-run — a rising
+    `derived` rate at some stage is a finding about the PROMPT, not about the
+    fallback, and would be invisible if the recovery overwrote the evidence.
     """
     if question is None:
         return {
             "scope": "none_available" if not targets else "dropped",
             "offered": len(targets),
             "stage_id": stage_id,
+            # No question survived, so nothing wrote one. `None` rather than
+            # `"derived"`: the fallback ran and also failed, which is a different
+            # fact from "the fallback was never reached".
+            "source": None,
+            "model_dropped": list(model_dropped or []),
         }
     grapheme = question.answer.get("target_grapheme")
     target = next((t for t in targets if t.grapheme == grapheme), None)
@@ -1108,4 +1344,6 @@ def describe_target(
         # The decisive fact, computed from the answer rather than trusted:
         # does the credited word carry a sound this stage teaches?
         "earns_stage_evidence": uses_stage_gpc(question.answer.get("correct", ""), stage_id),
+        "source": source,
+        "model_dropped": list(model_dropped or []),
     }

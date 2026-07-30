@@ -475,6 +475,12 @@ def test_the_fallback_still_asks_a_question_and_says_that_it_did():
 
 async def test_the_node_reports_which_tier_produced_the_target(monkeypatch):
     result, _ = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=GOOD_MCQ)])
+    # Still exact equality rather than a subset check: the expected literal gained
+    # `source` and `model_dropped` because DEVIATIONS 8.54 requires that "the model
+    # wrote this" and "we composed it after the model failed" be distinguishable in
+    # `gen_meta`. So the assertion is widened in COVERAGE, not loosened in form —
+    # and `source == "model"` is the fact this case is about on the new axis: the
+    # first attempt passed, so nothing was composed locally.
     assert result.tap_word_target == {
         "grapheme": "w",
         "stage": 3,
@@ -482,7 +488,10 @@ async def test_the_node_reports_which_tier_produced_the_target(monkeypatch):
         "offered": 1,
         "stage_id": 3,
         "earns_stage_evidence": True,
+        "source": "model",
+        "model_dropped": [],
     }
+    assert result.derived == []
 
 
 async def test_a_story_with_no_target_reports_none_available(monkeypatch):
@@ -906,13 +915,75 @@ async def test_both_questions_pass_on_the_first_attempt(monkeypatch):
     assert result.dropped == {}
 
 
-async def test_a_question_that_never_validates_is_dropped(monkeypatch):
-    """Fewer questions beats a wrong one. Retries are bounded (§7)."""
+async def test_a_tap_word_the_model_never_gets_right_is_composed_here_instead(monkeypatch):
+    """Retries are bounded (§7), and the model's wrong draft is never accepted.
+
+    This test used to be `test_a_question_that_never_validates_is_dropped`, and it
+    asserted `[q.qtype for q in result.questions] == ["mcq2"]` — that a model which
+    never writes a valid `tap_word` leaves the story without one. **That contract
+    was deliberately replaced** (DEVIATIONS 8.54), because it is what six live
+    `warm` stories were: a child reading to the end and getting no question screen,
+    and so no §8 evidence at all. `tap_word` is the only mastery-bearing type and
+    the one type whose text no model writes — the prompt is a frame from
+    `PROMPT_FRAMES`, every option is a story word already through the gate and §13
+    with the body, and `LAYER3_EXEMPT_QTYPES` has recorded that since Phase 4. So
+    when the budget is spent, this module composes the triple from the same closed
+    list and submits it to the same judge.
+
+    The two propositions the old assertion carried are both kept and one is
+    strengthened. "Retries are bounded" is unchanged. "Fewer questions beats a
+    wrong one" is now asserted *directly* — the surviving question is checked not
+    to be the model's rejected draft — rather than inferred from the absence of a
+    question, which is the weaker form. What is NOT relaxed anywhere:
+    `check_tap_word` judges the composed draft exactly as it judged the model's,
+    and `test_a_never_valid_mcq2_is_still_dropped` below holds the original
+    proposition on the type that has no fallback.
+    """
     result, calls = await _run(monkeypatch, [QuestionDraft(tap_word=BAD_TAP, mcq2=GOOD_MCQ)])
     assert len(calls) == 3  # one generation plus two retries, then stop
-    assert [q.qtype for q in result.questions] == ["mcq2"]
-    assert result.questions[0].idx == 0
-    assert "tap_word" in result.dropped
+
+    assert [q.qtype for q in result.questions] == ["tap_word", "mcq2"]
+    assert [q.idx for q in result.questions] == [0, 1]
+
+    # The model's draft was refused, and what survived is not it. BAD_TAP claims
+    # `ran` starts with `w`; the accepted question's answer must be a word that
+    # genuinely does.
+    tap = result.questions[0]
+    assert tap.answer["correct"] != BAD_TAP.correct_word
+    assert tap.answer["correct"].startswith(tap.answer["target_grapheme"])
+    assert set(BAD_TAP.other_words).isdisjoint(tap.payload["options"])
+
+    # Composed locally, and the model's failure is preserved rather than erased by
+    # the recovery — §14 measures the prompt from this, not from the outcome.
+    assert result.derived == ["tap_word"]
+    assert result.tap_word_target["source"] == "derived"
+    assert any("does not start with w" in p for p in result.tap_word_target["model_dropped"])
+    # `dropped` reports what the story ENDED UP without, and it did not end up
+    # without a tap-a-word question.
+    assert "tap_word" not in result.dropped
+
+
+async def test_a_never_valid_mcq2_is_still_dropped(monkeypatch):
+    """"Fewer questions beats a wrong one", on the type with no fallback.
+
+    The proposition the previous test used to carry, kept where it is still
+    reachable. `mcq2` is model-authored prose — there is no closed list to compose
+    it from and no pure function that could prove a synthesised one true — so a
+    draft that never validates is dropped, exactly as before, and the story is
+    served with one question rather than two.
+    """
+    bad_mcq = Mcq2Draft(
+        prompt="Did the dragon nap?",
+        # Not supported by the story in the story's own word order, so
+        # `story_supports` refuses it however many times it is offered.
+        correct="The cave sat on the dragon.",
+        incorrect="The dragon sat in the cave.",
+    )
+    result, calls = await _run(monkeypatch, [QuestionDraft(tap_word=GOOD_TAP, mcq2=bad_mcq)])
+    assert len(calls) == 3
+    assert [q.qtype for q in result.questions] == ["tap_word"]
+    assert "mcq2" in result.dropped
+    assert result.derived == []
 
 
 async def test_an_accepted_question_survives_the_retry(monkeypatch):
@@ -961,10 +1032,34 @@ async def test_usage_is_summed_across_attempts(monkeypatch):
 
 
 async def test_an_unparseable_response_fails_closed(monkeypatch):
-    """§7: a schema-parse failure is an api_fail, never a silent pass."""
+    """§7: a schema-parse failure is an api_fail, never a silent pass.
+
+    `assert result.questions == []` was the old form. Nothing about "fails closed"
+    has been relaxed — no byte of the model's output is used, on any attempt — but
+    the `tap_word` is now composed locally (DEVIATIONS 8.54), so an empty list is
+    no longer the way to say it. The assertions below say the thing itself: the
+    parse failure is recorded for BOTH types, the model authored nothing that
+    survived, and the one question that exists was written here.
+
+    The loudness this could have cost is closed in `warm.enrichment_problems`, not
+    here: a story whose every surviving question was composed locally still fails a
+    `make warm` run, because that is the signature of a model returning nothing
+    usable. See `test_dead_end_stories.py::
+    test_a_story_whose_every_question_was_composed_locally_still_fails_the_run`.
+    """
     result, _ = await _run(monkeypatch, [None])
-    assert result.questions == []
-    assert set(result.dropped) == {"tap_word", "mcq2"}
+
+    # Both types recorded the parse failure — that is the "fails closed" claim.
+    assert any(
+        "could not be read" in p for p in result.tap_word_target["model_dropped"]
+    ), result.tap_word_target
+    assert "mcq2" in result.dropped
+    assert any("could not be read" in p for p in result.dropped["mcq2"])
+
+    # Nothing the model returned became a question, and the survivor is ours.
+    assert result.derived == ["tap_word"]
+    assert result.tap_word_target["source"] == "derived"
+    assert [q.qtype for q in result.questions] == ["tap_word"]
 
 
 async def test_the_node_is_reproducible_for_a_seed(monkeypatch):

@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
-from storyforge.api import health, kids, readings, stories, validate
+from storyforge.api import catalog, health, kids, readings, stories, validate
 from storyforge.auth import auth_config
 
 logging.basicConfig(
@@ -64,6 +64,11 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(health.router)
+    # §9's `(public, cached)` pair. Mounted from Phase 8: they were specified in
+    # §9 and never routed, so every kid-session load 404'd twice on
+    # `GET /api/themes` while the SPA fell back to a copy of the seed CSVs that
+    # nothing could tell had drifted (AUDIT-PHASE6 C12, DEVIATIONS 8.60).
+    app.include_router(catalog.router)
     app.include_router(validate.router)
     app.include_router(stories.router)
     app.include_router(kids.router)

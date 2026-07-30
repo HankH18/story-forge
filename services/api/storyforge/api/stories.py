@@ -37,6 +37,18 @@ failure at boot, not a state a kid can reach at runtime.
 by request. They failed the decodability gate or moderation and are retained only
 as eval evidence (§7, warm.py).
 
+**Nor is a story with no comprehension question, whatever its status**
+(`ANSWERABLE_SQL`, DEVIATIONS 8.50). §11.3 makes the question screen half of what
+a session is, and §8 takes every promotion signal it has from a `tap_word` answer,
+so a story with no `questions` row is a session that reads and then just stops —
+the child earns nothing and no counter moves. Six `warm` stories were in that
+state after a full `make warm`, and every check in the codebase looked at
+`status`, which was still `warm`, and passed. It is now a predicate on the row,
+checked in `_SERVE_SQL`, again on the loaded DTO, and again in `GET
+/api/stories/{id}` — and, decisively, in `warm.pool_coverage`, because a gate that
+counts stories the serving path will not serve reports a pair as full while every
+child at it gets a silent §7 fallback (8.51).
+
 **The stage comes from the CHILD, never from the caller** (DEVIATIONS 7.21).
 The body is §9's `{kid_id, theme_id}`: `kid_id` is resolved through
 `auth.owned_kid`, so the anchor for every decision above is a row this caller
@@ -103,6 +115,32 @@ router = APIRouter(tags=["stories"])
 # through last_served_at ordering. `rejected` is not in this set and never will
 # be — that is the child-safety invariant this module exists to hold.
 SERVABLE_STATUSES = ("warm", "complete")
+
+#: The second half of "servable", and the reason it is a predicate on the ROW
+#: rather than a fourth `status` value (DEVIATIONS 8.50).
+#:
+#: A story with no `questions` row is a dead-end session: the child reads it, the
+#: question screen never comes, and §8 gets no `tap_word` answer — so no
+#: `gpc_stats` movement and no promotion signal. Six `warm` stories were in
+#: exactly that state after a full `make warm` (stages 7, 8 and 10), and nothing
+#: refused them, because `status` was the only thing either this module or the
+#: coverage gate ever looked at. `warm.py`'s own docstring called it "a defined,
+#: servable state (§7)"; it is a defined state and it is not a servable one.
+#:
+#: Not a status, for the reason the Phase 4 block of DEVIATIONS is about: those
+#: rows are repaired by `warm.run_backfill`, which selects
+#: `status = ANY(SERVABLE_STATUSES)`, so moving them out of that set would put
+#: them beyond the reach of the one command that fixes them — the same
+#: forward-only trap the §13 question pass fell into. The story stays `warm`, and
+#: `rejected` would be a lie: it failed neither the gate nor moderation.
+#:
+#: `{story}` is the alias of `stories` in the caller's statement. Imported and
+#: formatted by everything that has an opinion about servability — `_SERVE_SQL`
+#: below, `POST /api/readings`, and `warm.pool_coverage`/`warm.pool_depth` — and
+#: never re-spelled, exactly as `SERVABLE_STATUSES` is not (8.51). The gate and
+#: the serving path disagreeing about which stories exist is how a pair reports
+#: itself full while every child at it is served a silent §7 fallback.
+ANSWERABLE_SQL = "EXISTS (SELECT 1 FROM questions q WHERE q.story_id = {story}.id)"
 
 RATE_LIMIT_PER_MINUTE = 10  # §9
 RATE_LIMIT_WINDOW_S = 60.0
@@ -299,12 +337,13 @@ class StoryRequest(BaseModel):
 # serve-time decodability re-check. It is never empty (the caller seeds it with
 # a sentinel), so Postgres always knows the array's element type.
 _SERVE_SQL = text(
-    """
+    f"""
     UPDATE stories SET last_served_at = now()
     WHERE id = (
         SELECT id FROM stories
         WHERE status = ANY(:statuses) AND stage_id <= :stage
           AND NOT (id = ANY(:excluded))
+          AND {ANSWERABLE_SQL.format(story="stories")}
         ORDER BY stage_id DESC,                  -- never above; nearest below
                  (theme_id = :theme) DESC,       -- requested theme first
                  last_served_at ASC NULLS FIRST, -- least recently served (§7)
@@ -591,6 +630,7 @@ async def request_story(
     # keeps the empty-exclusion case on the same code path as the rest.
     excluded: list[int] = [0]
     undecodable: list[tuple[int, float]] = []
+    dead_end: list[int] = []
 
     for _attempt in range(SERVE_ATTEMPTS):
         served = (
@@ -612,6 +652,25 @@ async def request_story(
         dto = await _load_story(session, served.id)
         if dto is None:  # pragma: no cover — deleted between the UPDATE and the read
             raise HTTPException(status_code=503, detail="story vanished mid-request")
+
+        if not dto.questions:
+            # Should be unreachable: `_SERVE_SQL` requires `ANSWERABLE_SQL`. Kept
+            # for the reason 7.23 gives about the check below — this is the state
+            # a child actually meets as a session that just stops, so it should be
+            # inexpressible rather than merely unlikely, and reading a list that
+            # is already loaded costs nothing. It also covers the one window the
+            # SQL cannot: a question row deleted between the `UPDATE … RETURNING`
+            # and this read.
+            log.error(
+                "SERVE DEAD END: story %s is servable and carries no questions (§11.3) "
+                "— refusing to serve it and picking another. Repair with "
+                "`python -m storyforge.warm --backfill --only %s`",
+                dto.id,
+                dto.id,
+            )
+            dead_end.append(dto.id)
+            excluded.append(dto.id)
+            continue
 
         decodability = _is_decodable_for(dto, stage_id, sight)
         if decodability < DECODABILITY_GATE:
@@ -647,6 +706,14 @@ async def request_story(
             f"{DECODABILITY_GATE:.0%} gate for this reader; "
             f"rejected {', '.join(f'{i} ({d:.1%})' for i, d in undecodable)}"
         )
+    if dead_end:
+        detail = (
+            f"no story at or below stage {stage_id} both passes §1's gate and "
+            f"carries a comprehension question (§11.3); story/stories "
+            f"{', '.join(str(i) for i in dead_end)} have none — repair with "
+            f"`python -m storyforge.warm --backfill --only "
+            f"{','.join(str(i) for i in dead_end)}`"
+        )
     raise HTTPException(status_code=503, detail=detail)
 
 
@@ -663,5 +730,12 @@ async def get_story(
     if dto.status not in SERVABLE_STATUSES:
         # Child-safety invariant: a rejected story failed the decodability gate
         # or moderation. It is an eval artifact and is not fetchable by id either.
+        raise HTTPException(status_code=404, detail=f"story {story_id} not found")
+    if not dto.questions:
+        # The same boundary as `_SERVE_SQL`'s (DEVIATIONS 8.50), applied here for
+        # the same reason the `rejected` filter is: a content rule that only the
+        # request endpoint enforced would be one `GET` away from irrelevant. Kid
+        # mode re-fetches by id (`apps/web/src/lib/api.ts`), so this path can put
+        # a dead-end session in front of a child just as directly.
         raise HTTPException(status_code=404, detail=f"story {story_id} not found")
     return dto

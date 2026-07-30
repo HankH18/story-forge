@@ -248,6 +248,20 @@ independently — all three were tested against the built image. If a Clerk outa
 takes the hosted demo down, the answer is to run the demo locally, not to weaken
 the guard.
 
+**And it cannot be turned on in ANY container**, on App Platform or on a VPS you
+rent yourself, which is the case that used to get through. The guard now reads
+containerisation off the filesystem (`/.dockerenv`, `/run/.containerenv`,
+`/proc/1/cgroup`) rather than out of the environment, because every
+environment-based signal can be removed by whoever starts the process: `docker run
+-e DEMO_BYPASS_AUTH=true -e PORT=` **blanked** the one variable the image sets for
+itself and served a fully unauthenticated API (AUDIT-PHASE7 F11). A present-but-
+blank platform variable is now a signal in its own right, and `ENVIRONMENT=prd` and
+`ENVIRONMENT=pre-production` are refused alongside `production` (DEVIATIONS
+8.64-8.66). The one documented escape,
+`STORYFORGE_BYPASS_IN_CONTAINER=i-understand-this-disables-auth`, cancels the
+container signal and nothing else — it exists for a dev container, and setting it
+anywhere reachable is the same as publishing the database.
+
 **Do not raise `instance_count` or `--workers`.** `stories.limiter` is in-process,
 so §9's "10 story requests per minute" becomes 10 × workers × instances the moment
 you scale out (DEVIATIONS 4.10). Scaling needs a shared counter first.

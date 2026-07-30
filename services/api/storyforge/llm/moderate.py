@@ -70,7 +70,9 @@ This is a question about GRAMMAR ONLY. It is not about whether the sentence make
 sense, whether the word chosen was the best available one, or whether the \
 punctuation is conventional. Before you flag any sentence, run the SUBSTITUTION \
 TEST on it: swap every noun in the sentence for some other noun and change \
-nothing else. If the result is correct English, then the grammar was already \
+nothing else — not the verb, not its ending, not its number. If you find yourself \
+editing the verb while you swap the noun you are no longer running the test, and \
+the answer you get is worthless. If the result is correct English, then the grammar was already \
 correct and the only thing wrong was the sense — set well_formed = true and move \
 on. Only a sentence that is STILL broken after the swap is a grammar error.
 
@@ -81,11 +83,57 @@ on. Only a sentence that is STILL broken after the swap is a grammar error.
   "A dragon sit in a cave."  -> "A cat sit in a box."      broken   => false
   "The man ran back stop."   -> "The dog ran back stop."   broken   => false
 
+Then, if the sentence contains one of the helper words "did", "do", "does", \
+"can", "will", "may" or "must", run the HELPER TEST on it. After one of those \
+helper words the next verb must be the PLAIN form — and the plain form is \
+CORRECT. This is true with "not" in between and without it. So the only thing to \
+check is whether that verb is a PAST form; if it is the plain form, the sentence \
+is right:
+
+  "It did nap."                nap is plain    correct  => true
+  "The rocket did not stop."   stop is plain   correct  => true
+  "It can hear the wind."      hear is plain   correct  => true
+  "The dog does not run."      run is plain    correct  => true
+  "She did see the burrow."    see is plain    correct  => true
+  "He did not came back."      came is PAST    broken   => false  (came -> come)
+  "Sam did went up the hill."  went is PAST    broken   => false  (went -> go)
+  "The cats do not ran fast."  ran is PAST     broken   => false  (ran -> run)
+  "The dragon can flew up."    flew is PAST    broken   => false  (flew -> fly)
+
+NEVER propose changing a plain form after one of those helper words INTO a past \
+form, an "-ed" form or a past participle. "did not stopped", "can heard", \
+"did napped" and "did saw" are all wrong English, so a correction that would \
+produce one of them proves the sentence was already correct — and asking for \
+"saw" after "did", or "could" after "can", is the single most common way to get \
+this backwards. Set well_formed = true. The \
+HELPER TEST covers those seven words only: "is", "was", "were", "has", "have" \
+and "had" take a different form ("was running", "has gone"), so judge those the \
+usual way — "He has went home." is still broken (went -> gone).
+
+Never change the HELPER WORD ITSELF. "can -> could", "will -> would", "may -> \
+might", "do -> did" and "does -> did" are edits to the TENSE of a helper that was \
+already correct, and a correct helper is not a wrong word — so none of them can \
+ever be your arrow. "It can hear the wind outside." is well-formed as written, in \
+any story, however much past tense surrounds it.
+
+The HELPER TEST is ONLY about the verb standing directly after one of those seven \
+words, and it says NOTHING about any other sentence. A sentence with no helper \
+word in it is outside the test entirely, so do not carry the words "plain form" \
+across to it. In particular the HELPER TEST has no opinion about a subject and its \
+verb agreeing: "Its wings help it." contains no helper word, "help" is the correct \
+form with the plural subject "wings", and "helps" would be the error. Do not flag \
+it.
+
 Judge each sentence ON ITS OWN. Set well_formed = false only when a single \
 sentence survives the substitution test still broken AND you can name the one \
 wrong word and the word that should replace it:
 - Wrong verb form after a helper: "He did not came back."   (came -> come)
-- Subject and verb disagree:      "A dragon sit in a cave."  (sit -> sits)
+- Subject and verb disagree. ONE thing takes the "-s" verb and MORE THAN ONE takes \
+the plain verb, so settle which way round the sentence is BEFORE you correct it: \
+"A dragon sit in a cave." is broken (sit -> sits, one dragon) and "The cats runs \
+fast." is broken (runs -> run, many cats) — but "Its wings help it." is CORRECT, \
+because there is more than one wing, and asking for "wings helps" would be an \
+agreement error of your own.
 - A stray or missing word, so the sentence cannot parse: \
 "The dragon had a got time."   (a got -> a good)
 - A pronoun in the wrong case, even where speech would allow it: \
@@ -100,7 +148,10 @@ NEVER a reason to set well_formed = false:
 story.
 - A sentence opening with "And", "But", "So" or "Then".
 - Emphatic "did" or "do" plus a plain verb: "It did nap.", "Sam did stand.", \
-"The dragon did like the cave." Those are correct English.
+"The dragon did like the cave.", "She did see the burrow.", "She did see stars \
+every day." Those are correct English, and an emphatic "did" the story did not \
+NEED is still correct — "unnecessary emphatic did" is not a grammar error, and \
+"did see -> saw" is never the arrow.
 - The tense changing from one sentence to the next, or past and present mixed \
 across the story. Consistency BETWEEN sentences is style, not grammar. NEVER \
 mark a sentence wrong because of the tense used in a DIFFERENT sentence. The \
@@ -109,7 +160,14 @@ verb often does not exist in the word list and the writer MUST use the present. 
 "It had big wings. Its wings help it." is well-formed; do not ask for "helped". \
 "Sam sat in a rocket. Sam and Bob go up fast." is well-formed too. A modal — \
 "can", "will", "may" — is always correct as written; never ask for "could", \
-"would" or "might". \
+"would" or "might". Check your own note before you use it: if the justification you \
+are about to write turns on TENSE at all — "to match past tense", "for \
+consistency", "present tense for a current state", "the rest of the story is past" \
+or anything like it — then unless the sentence is a PAST form standing directly \
+after one of the HELPER TEST's seven words, set well_formed = true. That is the one \
+tense error this half of the verdict recognises; every other tense question is \
+style, and a note that reaches for a DIFFERENT sentence to justify itself is \
+answering about the story, not the sentence. \
 (Inside ONE sentence, verbs joined by "and" must still match: "Dan sat and \
 admits it." is wrong. But two verbs in the SAME form always match, whatever their \
 subjects are and however odd the result sounds: "Sam sat and it sat past the \
@@ -121,16 +179,40 @@ grammar, not the sense.
 character who lives in a can, something that "had a big lot" — every one of those \
 is correct English and must be approved. The word list is tiny and frequently \
 holds no better word; using the only available word is the format working, and \
-"the writer should have picked a different word" is never a grammar error.
+"the writer should have picked a different word" is never a grammar error. This \
+includes a plain verb where a more precise one would read better: "The girl said, \
+this rabbit got a home." is well-formed English, and swapping "got" for "has" is a \
+synonym, not a correction.
 - Punctuation and capitalisation, including speech written without quotation \
 marks: "The girl said, come here, little rabbit." is well-formed. A missing comma \
 or quotation mark is not a wrong WORD, so it can never satisfy the rule above.
+- A different preposition or particle, where the sentence still parses: "It went \
+back off and ran in the forest." is well-formed English. "off" rather than "out" \
+is a collocation preference, exactly like "the bird sat in the tree" versus "on \
+the tree" — which one sounds better is word choice, and word choice is never a \
+grammar error. (A stray VERB is different and IS an error: "The man ran back \
+stop.")
 
 If you cannot quote the broken sentence and give the exact replacement word, \
 the story is well-formed. A replacement is one WORD swapped for another word in \
 the same sentence — never a rewrite of the sentence, a better-sounding synonym, \
-or a different thing for the story to say. When in doubt, well_formed = true: a \
-wrongly rejected story is thrown away and the child gets nothing in its place."""
+or a different thing for the story to say.
+
+`grammar_note` must contain an ARROW and a REASON: quote the sentence, write \
+`wrong_word -> right_word`, then say in three or four words WHY the first word is \
+wrong. Quoting a sentence with no arrow after it is not a grammar finding, and an \
+arrow with no reason is one you have not checked — write the reason and then read \
+it back, because a reason about tense or about another sentence means the answer is \
+well_formed = true. If you cannot write both, write exactly: none.
+
+`grammar_note` is about a WRONG WORD and nothing else. If the note you are writing \
+mentions the story's ending, whether a problem was resolved, safety, or what the \
+story should have said, that is a CONTENT judgement: put it in `reason` and set \
+well_formed = true. A note that says the grammar is correct and still reports \
+well_formed = false is a contradiction — the answer in that case is true.
+
+When in doubt, well_formed = true: a wrongly rejected story is thrown away and \
+the child gets nothing in its place."""
 
 
 #: What `moderate()` prefixes a reason with when the story was judged SAFE and
@@ -140,19 +222,36 @@ wrongly rejected story is thrown away and the child gets nothing in its place.""
 UNGRAMMATICAL_PREFIX = "ungrammatical: "
 
 
+#: A `grammar_note` of "none" means "no defect found" — the judge writes the note
+#: BEFORE the boolean (see `ModerationVerdict`), so it needs a way to say "nothing".
+_NO_GRAMMAR_DEFECT = {"none", "none.", "", "n/a"}
+
+
 class ModerationVerdict(BaseModel):
     approved: bool = Field(description="True only if the story is safe for ages 5-10.")
     reason: str = Field(description="One sentence. If rejecting, name the specific problem.")
-    well_formed: bool = Field(
-        description=(
-            "True if every sentence is grammatical English. Plain, short and "
-            "repetitive prose is well-formed; only real grammar errors are not."
-        )
-    )
+    # DEVIATIONS 8.77: `grammar_note` is declared BEFORE `well_formed`, and the order
+    # is load-bearing. Structured output is emitted in schema order, so with the
+    # boolean first the judge committed to it and then reasoned in the note — three
+    # runs produced notes that ended "Re-evaluating: well-formed is true." beside
+    # `well_formed=false`. The prompt's own gate ("if you cannot name the
+    # replacement word, the story is well-formed") is unenforceable unless the note
+    # exists before the boolean does. Note first = derivation, boolean = conclusion.
     grammar_note: str = Field(
         description=(
-            "Empty string when well_formed. Otherwise quote the broken sentence "
-            "and name the error, in under fifteen words."
+            "Fill this in FIRST, before well_formed. Quote the one sentence you "
+            "believe is broken, then write the correction as an ARROW — "
+            "wrong_word -> right_word — then WHY, in three or four words. If the "
+            "substitution test and the helper test both come out correct, or you "
+            "cannot write both the arrow and the reason, write exactly: none. "
+            "Under twenty-five words."
+        )
+    )
+    well_formed: bool = Field(
+        description=(
+            "The CONCLUSION of grammar_note, not an independent judgement: false only "
+            "if grammar_note names a wrong word and its replacement, true if "
+            "grammar_note is 'none'. Plain, short and repetitive prose is well-formed."
         )
     )
 
@@ -223,10 +322,19 @@ async def moderate(body: str) -> ModerationResult:
     # it in here rather than asking the model to also flip `approved` keeps the
     # two judgements independent in the prompt (so grammar cannot leak into the
     # safety call) while the gate stays a single deterministic boolean.
+    # `grammar_note` is now the judge's working rather than a defect record (8.77),
+    # so "none" is the no-defect sentinel and a well-formed story keeps no note at
+    # all — `warm.persist` and the §14 report both treat a non-empty note as
+    # evidence of a defect, and that contract is older than this field's reordering.
+    note = verdict.grammar_note.strip()
+    if note.lower() in _NO_GRAMMAR_DEFECT or verdict.well_formed:
+        note = ""
+
     reason = verdict.reason
     if verdict.approved and not verdict.well_formed:
-        note = verdict.grammar_note.strip() or "sentence is not well-formed English"
-        reason = f"{UNGRAMMATICAL_PREFIX}{note}"
+        # Still fails CLOSED on a vague note (STATE invariant 4): a judge that says
+        # "not well-formed" and cannot name the word is a rejection, not an approval.
+        reason = f"{UNGRAMMATICAL_PREFIX}{note or 'sentence is not well-formed English'}"
 
     return ModerationResult(
         approved=verdict.approved and verdict.well_formed,
@@ -234,5 +342,5 @@ async def moderate(body: str) -> ModerationResult:
         layer="model",
         usage=usage_from_response(model, response.usage),
         well_formed=verdict.well_formed,
-        grammar_note=verdict.grammar_note.strip(),
+        grammar_note=note,
     )

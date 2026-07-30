@@ -59,16 +59,29 @@ os.environ["DEMO_BYPASS_ROLE"] = "admin"
 # are cleared here. DATABASE_URL is NOT touched: pointing the tests at a remote
 # database really should stop the bypass dead.
 #
-# The prefixes mirror `auth.DEPLOYED_ENV_PREFIXES` / `auth.is_deployed_env_value`
-# (DEVIATIONS 7.36) and are duplicated rather than imported ON PURPOSE: importing
-# `storyforge.auth` is what runs the guard, which is the thing this scrub exists
-# to get in front of. Both sites cross-reference each other.
+# The values, prefixes and markers mirror `auth.DEPLOYED_ENV_VALUES` /
+# `DEPLOYED_ENV_PREFIXES` / `DEPLOYED_ENV_MARKERS` / `auth.is_deployed_env_value`
+# (DEVIATIONS 7.36, 8.65) and are duplicated rather than imported ON PURPOSE:
+# importing `storyforge.auth` is what runs the guard, which is the thing this scrub
+# exists to get in front of. Both sites cross-reference each other.
 _DEPLOYED_VALUES = {"production", "prod", "staging", "stage", "live", "preview"}
 _DEPLOYED_PREFIXES = ("prod", "stag", "live", "preview")
+_DEPLOYED_MARKERS = ("prod", "prd", "stag", "stg", "live", "preview", "uat", "canary")
 for _leaked in ("ENV", "ENVIRONMENT", "APP_ENV", "PYTHON_ENV", "NODE_ENV", "DEPLOY_ENV"):
     _value = os.environ.get(_leaked, "").strip().lower()
-    if _value and (_value in _DEPLOYED_VALUES or _value.startswith(_DEPLOYED_PREFIXES)):
+    if _value and (
+        _value in _DEPLOYED_VALUES
+        or _value.startswith(_DEPLOYED_PREFIXES)
+        or any(_m in _value for _m in _DEPLOYED_MARKERS)
+    ):
         del os.environ[_leaked]
+
+# Platform and serving variables are now a signal by PRESENCE, not by value
+# (DEVIATIONS 8.64), so a developer or CI runner with `PORT` exported for
+# something else would fail every test at import rather than in the one place
+# that is about the guard. The tests that ARE about it set these themselves.
+for _leaked in ("PORT",):
+    os.environ.pop(_leaked, None)
 
 # Imported only after the environment above is settled.
 import httpx  # noqa: E402

@@ -50,7 +50,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from storyforge.api.kids import KidDTO
-from storyforge.api.stories import SERVABLE_STATUSES
+from storyforge.api.stories import ANSWERABLE_SQL, SERVABLE_STATUSES
 from storyforge.auth import Principal, owned_kid, owned_reading, require_parent
 from storyforge.db import get_session
 from storyforge.mastery import (
@@ -593,11 +593,24 @@ async def start_reading(
 
     story = (
         await session.execute(
-            text("SELECT id, status, stage_id FROM stories WHERE id = :id"),
+            text(
+                "SELECT s.id, s.status, s.stage_id, "
+                f"{ANSWERABLE_SQL.format(story='s')} AS answerable "
+                "FROM stories s WHERE s.id = :id"
+            ),
             {"id": body.story_id},
         )
     ).first()
     if story is None or story.status not in SERVABLE_STATUSES:
+        raise HTTPException(status_code=404, detail=f"story {body.story_id} not found")
+    if not story.answerable:
+        # DEVIATIONS 8.50. A `reading` is the row §8 counts toward promotion
+        # ("≥5 stories completed at current stage"), so opening one against a
+        # story that can never produce a `tap_word` answer would spend one of the
+        # five on a session that cannot contribute the accuracy half of the same
+        # criterion. Same 404 as `rejected`, and unreachable from kid mode for the
+        # same reason the stage check below is: the request endpoint no longer
+        # hands out such a story.
         raise HTTPException(status_code=404, detail=f"story {body.story_id} not found")
     if story.stage_id > kid.stage_id:
         # 422, not 404: both ids are real and the caller owns the kid. The thing

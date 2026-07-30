@@ -169,6 +169,10 @@ coverage = [v for v in verdict if v not in thesis]
 thesis_ok = all(v[1] for v in thesis)
 coverage_ok = all(v[1] for v in coverage)
 
+#: §1's rewrite-depth ceiling. Named rather than inlined so the prose above
+#: and the criteria table below cannot drift apart.
+REWRITE_P95_BUDGET = 2
+
 W(
     f"**Answer: {'YES on decodability' if thesis_ok else 'NO — the decodability claim did not hold'}"
     f", and the gate is the reason.** Of the {agg['produced']} stories the model"
@@ -177,11 +181,34 @@ W(
     f" {d['below_gate']} did not**. The worst single story measured"
     f" {_pct(d['min'])}. Median {_pct(d['p50'])}, mean {_pct(d['mean'])}. The"
     f" rewrite loop did most of that work at depth 0 — p95 was"
-    f" {r['p95']}, against §1's budget of {2} — so this is"
-    f" allowlist-constrained generation succeeding, not retry pressure grinding"
-    f" the model into compliance (§6's stated order of levers). No story in the"
-    f" matrix contained a single out-of-vocabulary word, and none exceeded the"
-    f" story-word cap."
+    f" {r['p95']}, against §1's budget of {REWRITE_P95_BUDGET}"
+    # §6 orders the levers: constrain generation first, rewrite second. Whether
+    # that order HELD is a fact about p95, so the sentence is derived from p95
+    # rather than asserted next to it. An earlier version of this template said
+    # "not retry pressure grinding the model into compliance" unconditionally,
+    # which read as evidence at p95=1 and as flattery at p95=2 — the same class
+    # of overstatement as the four in AUDIT-PHASE7's opening.
+    + (
+        " — so this is allowlist-constrained generation succeeding, not retry"
+        " pressure grinding the model into compliance (§6's stated order of"
+        " levers)."
+        if r["p95"] < REWRITE_P95_BUDGET
+        else (
+            f" — which is the budget exactly, with no headroom. The gate held and"
+            f" no story shipped below it, but at p95 = {r['p95']} the rewrite loop"
+            f" is carrying weight §6 assigns to the allowlist, and a further"
+            f" prompt change that costs one more rewrite would breach §1 rather"
+            f" than merely crowd it. Read this as a pass with the margin spent,"
+            f" not as a comfortable one."
+            if r["p95"] <= REWRITE_P95_BUDGET
+            else " — OVER §1's budget: the rewrite loop has become the primary"
+            " lever, which §6 forbids."
+        )
+    )
+    + (
+        " No story in the matrix contained a single out-of-vocabulary word, and"
+        " none exceeded the story-word cap."
+    )
 )
 W("")
 if not coverage_ok:
@@ -403,7 +430,8 @@ W(
             ["rewrite budget (§7)", cfg["max_rewrites"]],
             ["prompt allowlist size (§6)", cfg["prompt_word_limit"]],
             ["output effort", cfg["effort"]],
-            ["concurrency", f"{cfg['concurrency']} (sequential — DEVIATIONS 7.48)"],
+            ["concurrency", f"{cfg['concurrency']}" + (" (sequential)" if int(cfg["concurrency"]) <= 1 else " concurrent cells,"
+    " batched by stage so the per-stage cache prefix still pays — DEVIATIONS 8.100")],
             ["cache bypassed (`--cold`)", cfg["cold"]],
             ["ENRICHING run", f"{cfg['enrich']} (DEVIATIONS 7.45)"],
             ["python", cfg["python"]],

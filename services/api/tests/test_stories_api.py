@@ -13,21 +13,33 @@ behaves identically to the first.
 stories", "stages 4-12 have never been warmed", "the stage-1 story we happen to
 be served has story words" — and `make warm` falsified all three at once. Those
 now build their own themes and stories through `pool` below and assert about
-the ids they created. The database is still consulted, but only to place the
-fixture where nothing else is, which is the difference between a fixture and an
-assumption.
+the ids they created.
+
+**And the pool is no longer consulted even to PLACE the fixture** (DEVIATIONS
+8.90-8.94). 7.16 stopped reading expected values out of the database but still
+read `max(servable stage_id) + 1` to find an unoccupied stage band, so the
+assumption survived one level down: that the real pool never reaches stage 12. A
+full `make warm` fills all twelve stages — that is what `make warm-check` demands
+— so the band stopped existing and the four tests ERRORed in setup. `Pool` now
+MANUFACTURES the empty stage instead of hoping to find one: it runs the endpoint
+inside one rolled-back transaction in which the live pool has been moved out of
+`SERVABLE_STATUSES`. Nothing is committed, so real data is untouched and the
+tests hold whatever the pool contains, full or empty.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from storyforge.api.stories import RATE_LIMIT_PER_MINUTE, SERVABLE_STATUSES, limiter
-from storyforge.db import SessionLocal
+from storyforge.db import SessionLocal, engine, get_session
 from storyforge.llm.questions import SoundTarget, TapWordDraft, check_tap_word, cue_conflict
 from storyforge.main import app
 
@@ -35,6 +47,16 @@ DRAGONS = "dragons"
 
 #: §9 caps `POST /api/stories/request` at stage 12 (`StoryRequest.stage_id`).
 MAX_STAGE = 12
+
+#: The stage the `pool` fixtures build on. A CONSTANT, deliberately: the previous
+#: version of this file computed it from the live pool and that is the whole of
+#: DEVIATIONS 8.90. It has exactly one requirement — a stage below it and a stage
+#: above it, both inside §9's 1..12 — because the ladder tests place a story one
+#: rung down (`base - 1`) and one rung up (`base + 1`, the story the ladder must
+#: refuse to climb to). Any interior stage is as good as any other; the fixture
+#: body is decodable at all twelve (§5.7c monotonicity).
+FIXTURE_BASE_STAGE = 6
+assert 1 < FIXTURE_BASE_STAGE < MAX_STAGE, "the ladder tests need base - 1 and base + 1"
 
 #: Stage-1 decodable text, verified against the decoder at stage 1 (1.000 with
 #: these story words). The inventory is cumulative (§4, §5.7c monotonicity), so
@@ -117,36 +139,94 @@ async def _pool(session, stage_id: int, theme_slug: str = DRAGONS) -> set[int]:
 
 # --- fixtures the tests own outright (DEVIATIONS 7.16) -----------------------
 class Pool:
-    """Themes and stories created by one test and deleted when it ends.
+    """Themes and stories that exist only inside one test's transaction.
 
-    The trick that makes this deterministic without owning the whole database is
-    `_SERVE_SQL`'s first sort key, `stage_id DESC` under `stage_id <= :stage`: a
-    story alone at the TOP of the ladder is the winner of every request at or
-    above its stage, whatever else the pool holds. `base` is therefore the
-    lowest stage with no servable story anywhere — the one place a fixture is
-    guaranteed to be alone — and `base + 1` is guaranteed empty, which is what
-    the lower-stage rungs of §7's ladder need in order to be provoked at all.
+    §7's ladder has four rungs and the lower two — nearest LOWER stage, with and
+    without the requested theme — can only be provoked from a requested stage
+    that holds nothing. So can STATE invariant 6, that the ladder never CLIMBS:
+    proving a story one rung up is refused needs a rung the ladder would
+    otherwise have to reach for. An empty stage is therefore not a convenience
+    here, it is the only way to express the requirement.
 
-    The live pool is read ONCE, to find that gap. Nothing here asserts about it.
+    **The previous version of this class went looking for one** — `base =
+    max(servable stage_id) + 1`, with an assertion that the band existed — and
+    that is DEVIATIONS 8.90. It is the residue 7.16 left behind, one level below
+    the thing 7.16 fixed: it stopped reading expected VALUES out of the pool but
+    still bet on the pool's SHAPE, namely that stages 11 and 12 hold nothing.
+    `make warm-check` demands ≥3 servable stories in all 36 (stage,theme) pairs,
+    so the bet was against the product working, and a full `make warm` settled it.
+
+    The empty stage is now MANUFACTURED. `_owned_pool` runs the test *and the
+    endpoint* inside one transaction that is rolled back, and an `exclusive`
+    fixture opens that transaction by moving every real servable story out of
+    `SERVABLE_STATUSES` inside it. `_SERVE_SQL` then sees nothing but the rows
+    this class writes, at whatever stages it chose, and `base` is a constant. Real
+    data is untouched because nothing is ever committed — which is also why the
+    rows below need no `DELETE` any more.
+
+    `exclusive=False` keeps the live pool visible, for the one test whose subject
+    IS the live pool (DEVIATIONS 8.92).
+
+    justify-test-edit — VERDICT: TEST IS WRONG, and what is wrong is this FIXTURE
+    PRECONDITION, not one line of what the four tests assert. The deleted
+    assertion was `assert self.base + 1 <= MAX_STAGE` over `base = max(servable
+    stage_id) + 1`, which claims *§9's 1..12 ladder has two consecutive empty
+    stages at the top* — a fact about the operator's database, contradicted by
+    `warm-check`'s own definition of a full pool. ORIGIN: commit `559f102`,
+    DEVIATIONS 7.16. REVERT CHECK: nothing to revert — the four ERRORs predate
+    every change here and are caused by `make warm`; the endpoint is untouched and
+    `test_fallback_never_serves_a_story_above_the_requested_stage` (invariant 6
+    over the live pool, no fixture) stayed green throughout. The requirement the
+    assertion served — a requested stage that holds nothing — is preserved and is
+    now manufactured rather than hoped for, and every ladder assertion below,
+    including `"the ladder climbed a stage (STATE invariant 6)"`, is unchanged.
+    Sabotaging `_SERVE_SQL` so the ladder climbs turns that one red against a full
+    pool AND against an empty one, which is the evidence that the isolation did not
+    quietly stop testing it (DEVIATIONS 8.90-8.94).
     """
 
-    def __init__(self, session) -> None:
+    def __init__(self, session: AsyncSession, *, exclusive: bool) -> None:
         self.session = session
-        self.base = 0
+        self.exclusive = exclusive
+        self.base = FIXTURE_BASE_STAGE
         self.themes: dict[str, int] = {}
         self.stories: list[int] = []
+        #: How many real servable stories `start` hid. Reported by the assertion
+        #: below rather than asserted about — it is a fact about the operator's
+        #: database, which is the thing this class no longer bets on.
+        self.hidden = 0
 
     async def start(self) -> Pool:
-        top = (
+        if not self.exclusive:
+            return self
+
+        # `rejected` because it is the one existing status `SERVABLE_STATUSES`
+        # excludes; DELETE would cascade through `story_segments`, `questions`,
+        # `readings` and `answers` for no gain, since what `_SERVE_SQL` reads is
+        # `status`. Inside the doomed transaction either way (DEVIATIONS 8.93).
+        self.hidden = (
             await self.session.execute(
-                text("SELECT coalesce(max(stage_id), 0) FROM stories WHERE status = ANY(:s)"),
+                text("UPDATE stories SET status = 'rejected' WHERE status = ANY(:s)"),
+                {"s": list(SERVABLE_STATUSES)},
+            )
+        ).rowcount
+
+        # Measured, not assumed, and it catches the one failure mode that would be
+        # SILENT: an `UPDATE` that did not cover everything the serving path counts
+        # as servable. The tests could still pass in that state — against the live
+        # pool, which is the defect this class exists to end. (An override that
+        # stopped taking effect is the loud failure mode: the endpoint then cannot
+        # see the fixture's uncommitted rows at all and all four tests fail.)
+        left = (
+            await self.session.execute(
+                text("SELECT count(*) FROM stories WHERE status = ANY(:s)"),
                 {"s": list(SERVABLE_STATUSES)},
             )
         ).scalar_one()
-        self.base = int(top) + 1
-        assert self.base + 1 <= MAX_STAGE, (
-            f"no free stage band above {top}: the ladder's lower rungs cannot be "
-            "provoked without a stage that holds nothing"
+        assert left == 0, (
+            f"the fixture does not own the pool: {left} servable stories are still "
+            f"visible after hiding {self.hidden} — the ladder tests below would be "
+            "measuring the live pool instead of their own rows"
         )
         return self
 
@@ -174,7 +254,25 @@ class Pool:
         title: str = "A Fixture Story",
         status: str = "warm",
         story_words: list[str] | None = None,
+        questions: bool = True,
     ) -> int:
+        """A fixture story that is actually servable, question included.
+
+        **`questions=True` is the default because a story with none is no longer
+        servable at all** (`api/stories.py::ANSWERABLE_SQL`, DEVIATIONS 8.50): six
+        live `warm` stories carried zero `questions` rows, a child served one read
+        to the end and got no question screen, and §8 got no evidence. So a fixture
+        without one is excluded by `_SERVE_SQL` before any of the ladder, rotation
+        or DTO behaviour these tests are about can be provoked — which would make
+        them pass or fail for a reason none of them names.
+
+        The row is written by `check_tap_word` rather than typed by hand, the same
+        discipline `test_a_real_node_produced_question_never_ships_its_answer_key`
+        uses below: what the fixture holds is then what the node would have
+        persisted, so "servable" here means what it means in production. That test
+        passes `questions=False` because it writes its own set and asserts over all
+        of them.
+        """
         theme_id = await self.theme(theme)
         story_id = (
             await self.session.execute(
@@ -200,32 +298,111 @@ class Pool:
                 ),
                 {"s": story_id, "i": idx, "b": body},
             )
+        if questions:
+            draft, target = _NODE_WRITTEN_TAP_WORDS[0]
+            question, problems = check_tap_word(
+                draft,
+                targets=[target],
+                stage_id=1,
+                story_text=" ".join(FIXTURE_SEGMENTS),
+                story_words=FIXTURE_STORY_WORDS,
+                seed=story_id,
+            )
+            assert question is not None, problems  # the node's own writer
+            await self.session.execute(
+                text(
+                    "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+                    "VALUES (:s, 0, :t, :p, CAST(:pl AS jsonb), CAST(:a AS jsonb))"
+                ),
+                {
+                    "s": story_id,
+                    "t": question.qtype,
+                    "p": question.prompt,
+                    "pl": json.dumps(question.payload),
+                    "a": json.dumps(question.answer),
+                },
+            )
+        # Releases the fixture's SAVEPOINT — not a write anyone outside this test
+        # can see. The session is joined to `_owned_pool`'s transaction, which is
+        # rolled back, so there is nothing here for a `stop()` to clean up and no
+        # window in which a concurrent `make warm-check` can see a `zz-fixture-*`
+        # theme sitting in the real `themes` table (DEVIATIONS 8.91).
         await self.session.commit()
         self.stories.append(story_id)
         return story_id
 
-    async def stop(self) -> None:
-        await self.session.rollback()
-        if self.stories:
-            # `story_segments`, `questions`, `readings` all cascade off `stories`.
-            await self.session.execute(
-                text("DELETE FROM stories WHERE id = ANY(:ids)"), {"ids": self.stories}
-            )
-        if self.themes:
-            await self.session.execute(
-                text("DELETE FROM themes WHERE id = ANY(:ids)"),
-                {"ids": list(self.themes.values())},
-            )
-        await self.session.commit()
+
+@asynccontextmanager
+async def _owned_pool(*, exclusive: bool) -> AsyncIterator[Pool]:
+    """One transaction, shared by the test and by the endpoint, then rolled back.
+
+    Three pieces, and each is load-bearing:
+
+    1. **A connection out of the API's own engine, with one transaction on it.**
+       Not `SessionLocal()`: the fixture's rows have to be visible to
+       `POST /api/stories/request` without being committed, and the only way two
+       parties see the same uncommitted rows is if they are the same connection.
+    2. **`get_session` overridden**, so the endpoint runs on that connection.
+       `join_transaction_mode="create_savepoint"` is what makes the endpoint's own
+       `await session.commit()` a SAVEPOINT release instead of a real commit — the
+       request path commits mid-handler (it must; `_SERVE_SQL` is an `UPDATE …
+       RETURNING` under `FOR UPDATE SKIP LOCKED`) and that must not escape.
+    3. **REPEATABLE READ.** The snapshot is fixed at the fixture's first
+       statement, so a story `make warm` commits *while the test runs* cannot
+       appear in the ladder underneath it. Under READ COMMITTED it could, and
+       STATE.md is explicit that a concurrent writer makes this suite lie. The
+       cost is stated in DEVIATIONS 8.91: a genuine write/write race surfaces as a
+       loud serialization failure rather than as a silent flake.
+
+    Teardown rolls back, so the four tests using this leave the database exactly
+    as they found it — including `last_served_at`, which they used to stamp on real
+    rows.
+    """
+    conn = await engine.connect()
+    conn = await conn.execution_options(isolation_level="REPEATABLE READ")
+    try:
+        outer = await conn.begin()
+        session = AsyncSession(
+            bind=conn, join_transaction_mode="create_savepoint", expire_on_commit=False
+        )
+
+        async def _shared_session() -> AsyncIterator[AsyncSession]:
+            # No `finally: close()` — FastAPI resumes generator dependencies after
+            # the response, and closing here would end the transaction the rest of
+            # the test still runs in.
+            yield session
+
+        app.dependency_overrides[get_session] = _shared_session
+        try:
+            yield await Pool(session, exclusive=exclusive).start()
+        finally:
+            app.dependency_overrides.pop(get_session, None)
+            await session.close()
+            await outer.rollback()
+    finally:
+        await conn.close()
 
 
 @pytest.fixture
-async def pool(session):
-    fixture = await Pool(session).start()
-    try:
+async def pool() -> AsyncIterator[Pool]:
+    """The fixture owns the whole visible pool. Use this for the request path."""
+    async with _owned_pool(exclusive=True) as fixture:
         yield fixture
-    finally:
-        await fixture.stop()
+
+
+@pytest.fixture
+async def shared_pool() -> AsyncIterator[Pool]:
+    """Fixture rows BESIDE the live pool, not instead of it (DEVIATIONS 8.92).
+
+    For the answer-key sweep below, whose whole strength per 7.18 is that it reads
+    whatever the question node actually wrote into the real database — it caught
+    7.14 that way. Hiding the pool from it would have left it green and reduced it
+    to a fixture-only test, which is 8.50's `_insert_story` mistake exactly. It
+    fetches stories by id and never asks the ladder for one, so it needs rows of
+    its own and no isolation beyond the rollback.
+    """
+    async with _owned_pool(exclusive=False) as fixture:
+        yield fixture
 
 
 async def _request(client, stage_id: int, theme=DRAGONS) -> dict:
@@ -371,7 +548,7 @@ async def test_dto_carries_assets_and_questions_when_present(client, session):
         await session.commit()
 
 
-async def test_a_real_node_produced_question_never_ships_its_answer_key(client, session, pool):
+async def test_a_real_node_produced_question_never_ships_its_answer_key(client, shared_pool):
     """The 4.9 claim, tested against rows the QUESTION_GEN node actually wrote.
 
     The previous version of this assertion inserted its own payload and then
@@ -396,8 +573,20 @@ async def test_a_real_node_produced_question_never_ships_its_answer_key(client, 
     construction. The leak check is widened from prefix-only to 7.14's full
     containment rule in both directions: under the old, prefix-only form live row
     696 (`cue_word: "win"` over the option `in`) was invisible.
+
+    `shared_pool`, not `pool`, and that distinction is DEVIATIONS 8.92: `pool`
+    hides the live pool so §7's lower rungs can be provoked, and the sweep this
+    test IS would then have had nothing but its own two rows to sweep — green,
+    still carrying the paragraph above about live row 4392, and no longer able to
+    find another one. Nothing it asserts changed; it fetches by id and never asks
+    the ladder for a story, so the isolation it needs is only the rollback.
     """
-    story_id = await pool.story(stage=pool.base, theme="alpha", title="Node Written Questions")
+    # `questions=False`: this test writes the whole set itself and asserts over all
+    # of it, so `Pool.story`'s default row would be a third, unasserted question.
+    session = shared_pool.session
+    story_id = await shared_pool.story(
+        stage=shared_pool.base, theme="alpha", title="Node Written Questions", questions=False
+    )
     for idx, (draft, target) in enumerate(_NODE_WRITTEN_TAP_WORDS):
         question, problems = check_tap_word(
             draft,

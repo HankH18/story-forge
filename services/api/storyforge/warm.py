@@ -46,6 +46,18 @@ rewrite(s)` and exited 0 with both nodes gutted, because
 loud failure: it is how nine servable stories reached the pool with no questions
 and nobody noticed.
 
+**A story with no questions is not servable, and the pool count says so.** The
+paragraph above was true and insufficient: `run_warm` reported six stories that
+reached the pool unenriched and exited non-zero, and all six went on being served
+anyway, because nothing outside this module's exit code cared (DEVIATIONS
+8.50-8.51). `api/stories.py::ANSWERABLE_SQL` is now the boundary, and
+`pool_coverage`/`pool_depth` import it — so a hollow story makes the pair look
+SHALLOW rather than full, which is the difference between a red `--check-coverage`
+and a child getting a silent §7 fallback. The generator side of the same defect is
+in `llm/questions.py`: every sound it offers is now provably answerable, and the
+`tap_word` triple is composed locally when the model's retries are spent (8.53,
+8.54).
+
 **Repair is not forward-only.** The same shape of bug came back once already:
 the §13 question-moderation pass was added, and `--backfill` selected only
 stories with ZERO question rows — so the stories that already held UNMODERATED
@@ -69,7 +81,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import select, text
 
 from storyforge import obs
-from storyforge.api.stories import SERVABLE_STATUSES
+from storyforge.api.stories import ANSWERABLE_SQL, SERVABLE_STATUSES
 from storyforge.db import SessionLocal
 from storyforge.decoder import mastered_ids
 from storyforge.llm.client import fast_model
@@ -191,6 +203,13 @@ def _body_verdict(mod: ModerationResult) -> dict:
     }
 
 
+_DEPTH_SQL = text(
+    "SELECT count(*) FROM stories s "
+    "WHERE s.stage_id = :s AND s.theme_id = :t AND s.status = 'warm' "
+    f"AND {ANSWERABLE_SQL.format(story='s')}"
+)
+
+
 async def pool_depth(session, stage_id: int, theme_id: int) -> int:
     """How many stories this pair still holds as `warm` — the REFILL number.
 
@@ -204,15 +223,16 @@ async def pool_depth(session, stage_id: int, theme_id: int) -> int:
 
     So coverage can pass while this still wants to generate. That is the two
     policies doing their separate jobs.
+
+    What the two DO now agree about is `ANSWERABLE_SQL` (DEVIATIONS 8.51). A
+    question-less story is not servable, so counting one here would be worse than
+    counting it in coverage: this number decides how many stories to GENERATE, and
+    three dead-end `warm` rows in a pair would make `make warm` skip that pair
+    forever — the gap could never fill, and the operator's remedy for a red
+    coverage gate ("re-run `make warm`") would do nothing at all.
     """
     return (
-        await session.execute(
-            text(
-                "SELECT count(*) FROM stories "
-                "WHERE stage_id = :s AND theme_id = :t AND status = 'warm'"
-            ),
-            {"s": stage_id, "t": theme_id},
-        )
+        await session.execute(_DEPTH_SQL, {"s": stage_id, "t": theme_id})
     ).scalar_one()
 
 
@@ -231,8 +251,14 @@ class PairDepth:
 # CROSS JOIN, and the status filter is in the ON clause rather than the WHERE:
 # a pair with no stories at all has to come back as a row with 0, and a WHERE
 # would drop exactly the rows the gate exists to find. That is the whole query.
+#
+# `ANSWERABLE_SQL` sits in the same ON clause for the same reason (DEVIATIONS
+# 8.51): a story with no comprehension question is not servable, so counting one
+# here would report a pair at target that a child cannot be served from — and §7's
+# ladder answers that pair with a lower stage, silently and correctly, which is
+# AUDIT-PHASE7 F4 reached by a second route.
 _COVERAGE_SQL = text(
-    """
+    f"""
     SELECT st.id AS stage_id, t.slug AS theme_slug, count(s.id) AS servable
     FROM stages st
     CROSS JOIN themes t
@@ -240,6 +266,7 @@ _COVERAGE_SQL = text(
       ON s.stage_id = st.id
      AND s.theme_id = t.id
      AND s.status = ANY(:statuses)
+     AND {ANSWERABLE_SQL.format(story="s")}
     GROUP BY st.id, t.slug
     ORDER BY st.id, t.slug
     """
@@ -249,9 +276,10 @@ _COVERAGE_SQL = text(
 async def pool_coverage(session) -> list[PairDepth]:
     """Servable depth for every (stage, theme) pair. One query, no API calls.
 
-    `SERVABLE_STATUSES` is imported from the endpoint, never re-spelled here, so a
-    fourth `status` value cannot make this gate and the serving path disagree —
-    the same discipline `eval.py` uses for `EVAL_STATUS`.
+    `SERVABLE_STATUSES` and `ANSWERABLE_SQL` are both imported from the endpoint,
+    never re-spelled here, so neither a fourth `status` value nor a change to what
+    "servable" means can make this gate and the serving path disagree — the same
+    discipline `eval.py` uses for `EVAL_STATUS`.
     """
     rows = (await session.execute(_COVERAGE_SQL, {"statuses": list(SERVABLE_STATUSES)})).all()
     return [PairDepth(r.stage_id, r.theme_slug, r.servable) for r in rows]
@@ -583,9 +611,21 @@ async def _moderate_questions(questions: Sequence[GeneratedQuestion], on: date):
     (an mcq2 whose false option reads as an unresolved scare) costs a story its
     comprehension question; §6 is explicit that those costs are not symmetric.
 
-    Rejection drops the QUESTIONS, never the story: the story already cleared
-    the gate and its own moderation pass, and a story with no questions is a
-    defined, servable state (§7).
+    Rejection drops the QUESTIONS, never the story: the story already cleared the
+    gate and its own moderation pass, so §13's verdict on a second model's text is
+    not evidence about the body.
+
+    **This docstring used to end "and a story with no questions is a defined,
+    servable state (§7)". It is a defined state and it is NOT a servable one**
+    (DEVIATIONS 8.50). That sentence was the codebase's own statement of the
+    defect: six `warm` stories carried zero questions after a full `make warm`, and
+    every check looked at `status`, which was still `warm`. A child served one
+    reads to the end and the session stops — no question screen, no `tap_word`
+    answer, no `gpc_stats` movement, no §8 promotion signal. `ANSWERABLE_SQL` now
+    refuses it at the serve boundary, and `pool_coverage` stops counting it, so a
+    story this function strips of every question leaves the pool visibly shallower
+    instead of invisibly hollow. The story row still stays — `--backfill` is what
+    repairs it, and it selects on `SERVABLE_STATUSES`.
     """
     hits = blocklist_check(question_text(questions))
     if hits:
@@ -643,9 +683,14 @@ async def enrich(
     ENRICHING after validation for a reason: a story that will never be served
     must not cost Haiku calls.
 
-    Both nodes degrade rather than raise. A story with no picture renders the
-    §06 striped placeholder; a story with no questions still reads fine. Neither
-    is worth discarding a story that already cleared the decodability gate.
+    Both nodes degrade rather than raise, and neither failure is worth discarding a
+    story that already cleared the decodability gate. But the two degrade to very
+    different places, and this docstring used to flatten them: a story with no
+    picture renders the §06 striped placeholder and reads fine, whereas a story
+    with no questions is a dead-end session and is no longer servable at all
+    (`ANSWERABLE_SQL`, DEVIATIONS 8.50). So the story row survives either way —
+    raising here would lose the generation spend for nothing — and only one of the
+    two outcomes leaves something a child can be given.
 
     What changed: the degradation is now *reported*. Every key in the returned
     meta is written to `gen_meta.enrichment`, `*_error` names the exception type
@@ -746,6 +791,12 @@ async def enrich(
             cost += mod_cost
             meta["questions"] = written
             meta["questions_dropped"] = qset.dropped
+            # DEVIATIONS 8.54. Which questions this module composed itself because
+            # the model's retries were spent. Recorded rather than smoothed over:
+            # the fallback exists so a child is never left with a dead-end
+            # session, not so an operator stops hearing about a model that has
+            # stopped producing usable questions.
+            meta["questions_derived"] = list(qset.derived)
             # §8: which stage's sound the phonics question practises. Persisted
             # so "does the mastery loop close at this stage?" is answerable from
             # the database instead of by re-running the node.
@@ -916,6 +967,10 @@ async def _write_questions(
                 answer=q.answer,
             )
         )
+    # The types that actually SURVIVED, not the ones generated: §13 can reject an
+    # `mcq2` after the fact, so "what did the child end up with" is only knowable
+    # here. `enrichment_problems` reads it against `questions_derived`.
+    meta["questions_written"] = [q.qtype for q in keep]
     return len(keep), cost
 
 
@@ -1003,6 +1058,23 @@ def enrichment_problems(meta: dict) -> list[str]:
             problems.append(f"0 questions — moderation rejected them: {why.get('reason')}")
         elif not meta.get("questions_error"):
             problems.append(f"0 questions — dropped: {meta.get('questions_dropped')}")
+    else:
+        # DEVIATIONS 8.54's own downside, closed. The derived tap-a-word question
+        # keeps a story out of the dead-end state, and that is exactly what makes
+        # it capable of hiding an outage: three unparseable responses used to
+        # leave 0 questions and fail the run, and would now leave 1 and pass it.
+        # So the test is not "was anything derived" — one fumble in eleven stories
+        # is the measured normal rate and failing every run on it would make this
+        # exit code worthless — but "did the model contribute NOTHING that
+        # survived", which is the api_fail signature §7 wants to be loud.
+        derived = set(meta.get("questions_derived") or ())
+        written = list(meta.get("questions_written") or ())
+        if written and derived.issuperset(written):
+            problems.append(
+                f"every surviving question was composed locally after the model's "
+                f"retries were spent ({sorted(written)}) — the model contributed "
+                f"nothing usable: {meta.get('questions_dropped')}"
+            )
     if not meta.get("segments_tagged") and not meta.get("scene_tags_error"):
         problems.append("0 tagged segments — SCENE_TAGGING returned nothing usable")
     return problems
@@ -1049,6 +1121,14 @@ def _report_enrichment(story_id: int, meta: dict) -> list[str]:
         f"{meta.get('segments_tagged', 0)}/{meta.get('segments', 0)} segment(s) tagged, "
         f"{meta.get('segments_with_art', 0)} with art, ${meta.get('cost_usd', 0.0):.4f}"
     )
+    if meta.get("questions_derived"):
+        # Not a blocking problem (see `enrichment_problems`), but never silent: an
+        # operator who runs `make warm` does not run SQL, and a rising derived rate
+        # at some stage is a finding about the PROMPT.
+        print(
+            f"      {meta['questions_derived']} composed locally after the model's "
+            f"retries were spent (§11.3 satisfied, prompt is not)"
+        )
     mod = meta.get("questions_moderation")
     if mod and not mod.get("approved"):
         print(f"      questions REJECTED by moderation ({mod['layer']}): {mod['reason']}")
@@ -1128,7 +1208,7 @@ def _finish(
 
 async def run_warm(stages: list[int], themes: list[str], target: int, effort: str):
     today = date.today()
-    made = skipped = rejected = 0
+    made = skipped = rejected = derived = 0
     total_cost = 0.0
     failures: dict[int, list[str]] = {}
     # DEVIATIONS 8.4: (stage, theme, "ExcType: message") per generation that
@@ -1192,6 +1272,7 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
                     total_cost += story_cost
                     if result.passed:
                         made += 1
+                        derived += 1 if (meta or {}).get("questions_derived") else 0
                         trace = (
                             f" [trace {result.langfuse_trace_id}]"
                             if result.langfuse_trace_id
@@ -1248,7 +1329,13 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
         raise SystemExit(f"make warm produced no warm stories{detail}")
     _finish(
         f"{made} warm, {rejected} rejected, {len(api_failures)} api_fail, "
-        f"{skipped} pair(s) already full. Cost ${total_cost:.4f}",
+        f"{skipped} pair(s) already full"
+        # An aggregate rather than an exit code (DEVIATIONS 8.54): the measured
+        # rate at which the model needs catching is ~11% of stories, so failing
+        # the run on it would make the exit code worthless — but a number the
+        # operator can watch move is the whole point of recording it.
+        + (f", {derived} tap-a-word question(s) composed locally" if derived else "")
+        + f". Cost ${total_cost:.4f}",
         failures,
         api_failures,
         gaps if full_matrix else (),
@@ -1257,16 +1344,32 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
 
 
 # --- backfill ----------------------------------------------------------------
-# Servable stories whose questions are missing OR have never been through §13.
+# Servable stories whose questions are missing, have never been through §13, or
+# cannot move §8.
 #
-# Two clauses, and the second one is the fix. The first version had only
-# `NOT EXISTS (questions)`, which made the §13 question-moderation pass
-# FORWARD-ONLY: a story that already carried questions — written before that
-# pass existed — matched nothing, so every `--backfill` run skipped it, forever,
-# and no other code path re-moderated a question row. Nine of 28 servable
-# stories were in that state; story 17 was still serving the option that
-# motivated the fix in the first place. A story is now unenriched if it has no
-# questions or no §13 receipt for the ones it has.
+# Three clauses, and each one was added after the previous set failed to reach the
+# rows it was written for. The first version had only `NOT EXISTS (questions)`,
+# which made the §13 question-moderation pass FORWARD-ONLY: a story that already
+# carried questions — written before that pass existed — matched nothing, so every
+# `--backfill` run skipped it, forever, and no other code path re-moderated a
+# question row. Nine of 28 servable stories were in that state; story 17 was still
+# serving the option that motivated the fix in the first place.
+#
+# The third clause is the same lesson a second time (DEVIATIONS 8.56). After the
+# six zero-question stories were repaired, a live sweep of all 36 pairs found
+# serves returning an `mcq2` and no `tap_word`. Those are not dead-end sessions —
+# the child gets a question screen — but `MASTERY_QTYPES` is `("tap_word",)`, so
+# they move no `gpc_stats` counter and earn nothing toward promotion. Six servable
+# stories were in that state and **not one of them was reachable**: they have
+# questions and they have a §13 receipt, so the first two clauses were both
+# satisfied. Five of the six had dropped `tap_word` for the same "close to the same
+# length" reason 8.53 is about.
+#
+# Idempotence is by RECEIPT, not by hope, exactly as `_UNGRADED_BODY_SQL` does it:
+# `describe_target` writes `source: null` when nothing wrote a tap-a-word question,
+# so a story this sweep has already tried and failed on carries the key with a null
+# value and is excluded. A selected story therefore either gains a `tap_word` or
+# records that it cannot have one — a second run selects nothing either way.
 _UNENRICHED_SQL = text(
     """
     SELECT s.id, t.slug AS theme_slug
@@ -1277,6 +1380,31 @@ _UNENRICHED_SQL = text(
       AND (
             NOT EXISTS (SELECT 1 FROM questions q WHERE q.story_id = s.id)
             OR s.gen_meta -> 'enrichment' -> 'questions_moderation' IS NULL
+            OR (
+                 -- §8 cannot move without one of these, whatever else the story
+                 -- carries. Spelled from `MASTERY_QTYPES` so this sweep and the
+                 -- grader in `POST /api/readings/{id}/answers` cannot disagree.
+                 NOT EXISTS (
+                   SELECT 1 FROM questions q
+                   WHERE q.story_id = s.id AND q.qtype = ANY(:mastery_qtypes)
+                 )
+                 -- ...unless a previous run already established that this story
+                 -- cannot have one. `source` present-and-null is that receipt.
+                 --
+                 -- `coalesce(..., false)` is load-bearing, not defensive. When
+                 -- `tap_word_target` is absent entirely, `? 'source'` is NULL
+                 -- rather than false, so the AND is NULL, the NOT is NULL, and the
+                 -- whole three-way OR evaluates to NULL — which WHERE treats as
+                 -- false. The story silently drops out of its own repair sweep. A
+                 -- test caught this on a hand-built row; the six live stories hid
+                 -- it because they all carried a `tap_word_target` from their first
+                 -- enrichment, so `? 'source'` was false for them and not NULL.
+                 AND NOT coalesce(
+                   s.gen_meta -> 'enrichment' -> 'tap_word_target' ? 'source'
+                   AND s.gen_meta -> 'enrichment' -> 'tap_word_target' ->> 'source' IS NULL,
+                   false
+                 )
+               )
           )
     ORDER BY s.id
     """
@@ -1541,17 +1669,24 @@ async def run_backfill(
         rows = (
             await session.execute(
                 _UNENRICHED_SQL,
-                {"statuses": list(target_status), "only": list(only) if only else None},
+                {
+                    "statuses": list(target_status),
+                    "only": list(only) if only else None,
+                    "mastery_qtypes": list(MASTERY_QTYPES),
+                },
             )
         ).all()
         if not rows:
             print(
-                "  every servable story has questions and a §13 verdict on them "
-                "— nothing to backfill"
+                "  every servable story has questions, a §13 verdict on them and a "
+                f"{'/'.join(MASTERY_QTYPES)} question §8 can count — nothing to backfill"
             )
             return
 
-        print(f"  {len(rows)} servable story/stories with missing or unmoderated questions")
+        print(
+            f"  {len(rows)} servable story/stories with questions that are missing, "
+            f"unmoderated, or cannot move §8"
+        )
         for row in rows:
             story = await session.get(Story, row.id)
             if story is None:  # pragma: no cover — deleted mid-run

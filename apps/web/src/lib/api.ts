@@ -82,6 +82,18 @@ export interface Theme {
   slug: string
   display_name: string
   emoji: string
+  /**
+   * Servable stories in this theme, across every stage — reported by
+   * `GET /api/themes` and deliberately not read by any component.
+   *
+   * §7's ladder answers an empty (stage, theme) cell with a lower stage or
+   * another theme, so a shallow theme is a preference miss, not a dead end, and
+   * hiding the card would make it one: §07 fixes the picker at 3–6 cards and an
+   * empty picker is a screen a child cannot leave (DEVIATIONS 8.68). Absent when
+   * the list came from the seed fallback below, which knows nothing about the
+   * pool.
+   */
+  servable_stories?: number
 }
 
 export interface Kid {
@@ -284,12 +296,25 @@ async function optional<T>(path: string, init?: RequestInit): Promise<T | null> 
 // --- themes ------------------------------------------------------------------
 
 /**
- * `GET /api/themes` is in §9 but not yet routed. The picker must still show
- * something, and inventing themes would let a child pick one the warm pool has
- * never heard of — so the fallback is exactly `data/seed/themes.csv`, the same
- * rows the server would return. Ids match the seed order.
+ * The fallback for `GET /api/themes`, which now exists (`api/catalog.py`,
+ * DEVIATIONS 8.60) and used to 404 on every kid-session load.
+ *
+ * **It is kept, not deleted, and the reason is not nostalgia.** The route
+ * existing does not make it reachable: the picker with an empty theme list is a
+ * screen with nothing to tap, which is the stuck state §01 forbids, and the
+ * moment a child is most likely to meet it is exactly when the API is
+ * unreachable. Inventing themes would be worse — a slug the server cannot resolve
+ * is a 404 on `POST /api/stories/request`, and a 404 is not retryable, so kid
+ * mode burns its three attempts and lands on the printer screen.
+ *
+ * So the fallback is exactly `data/seed/themes.csv`, the same rows the server
+ * returns, with ids in seed order. `lib/seeds.test.ts` parses that CSV and
+ * asserts this constant equals it, field for field — the drift this mirrors was
+ * silent before, and the test found a real one on its first run in
+ * `SEEDED_STAGES` (DEVIATIONS 8.61). Exported for that test and for no other
+ * caller.
  */
-const SEEDED_THEMES: Theme[] = [
+export const SEEDED_THEMES: Theme[] = [
   { id: 1, slug: 'dragons', display_name: 'Dragons', emoji: '🐲' },
   { id: 2, slug: 'space', display_name: 'Space', emoji: '🚀' },
   { id: 3, slug: 'animals', display_name: 'Animals', emoji: '🦊' },
@@ -297,6 +322,9 @@ const SEEDED_THEMES: Theme[] = [
 
 export async function getThemes(): Promise<Theme[]> {
   const live = await optional<Theme[]>('/api/themes')
+  // `.slice(0, 6)` is §07's card ceiling, not a filter: the route returns every
+  // seeded theme, shallow ones included, because the ladder makes a shallow theme
+  // a preference miss rather than a dead end (DEVIATIONS 8.68).
   if (Array.isArray(live) && live.length) return live.slice(0, 6) // §07: 3–6 cards
   return SEEDED_THEMES
 }
@@ -426,14 +454,26 @@ export async function createKid(displayName: string, stageId: number): Promise<R
 // --- stages -------------------------------------------------------------------
 
 /**
- * `GET /api/stages` is not routed (§9 does not list it). The add-kid form still
- * has to name the twelve stages, and "Stage 7" alone is not a choice a parent
- * can make — so the fallback is exactly `data/seed/stages.csv`, the same rows
- * the server holds, in id order. Same pattern and same reasoning as
+ * The fallback for `GET /api/stages`, which now exists (`api/catalog.py`).
+ *
+ * The add-kid form has to name the twelve stages — "Stage 7" alone is not a
+ * choice a parent can make — and `stageName()` below is called synchronously from
+ * render, so this list is load-bearing even when the route answers. It is exactly
+ * `data/seed/stages.csv`, in id order. Same pattern and same reasoning as
  * SEEDED_THEMES above: mirror the seed, never invent.
+ *
+ * Stage 1's description was `simple three-letter words` here and
+ * `simple consonant-vowel-consonant words` in the CSV — the drift was real,
+ * shipped, and invisible until `lib/seeds.test.ts` compared them (DEVIATIONS
+ * 8.61). The CSV is the seed the database was built from, so it is the side that
+ * is right by definition.
  */
-const SEEDED_STAGES: Stage[] = [
-  { id: 1, name: 'CVC', description: 'Single letters s a t p i n m d c — simple three-letter words' },
+export const SEEDED_STAGES: Stage[] = [
+  {
+    id: 1,
+    name: 'CVC',
+    description: 'Single letters s a t p i n m d c — simple consonant-vowel-consonant words',
+  },
   { id: 2, name: 'Doubles & x', description: 'Remaining single letters, doubled consonants (ck ss ll ff), and x' },
   { id: 3, name: 'Digraphs', description: 'Two letters one sound: sh ch th ng qu, plus w x y z v j' },
   { id: 4, name: 'Endings', description: 'Consonant clusters and the -s -es -ed -ing endings' },

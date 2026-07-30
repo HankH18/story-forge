@@ -3669,3 +3669,1526 @@ from a run that fixed them.
 `docs/EVAL.md`. It does not run it — a failed matrix must not silently rewrite the
 committed report — but "someone remembered" is what 8.39 is an entry about, so the
 command is on screen rather than in a doc.
+
+---
+
+## Phase 8 — the three findings 7.38 deferred, and the §18 inversion
+
+Numbered 8.60-8.69. `docs/DEVIATIONS.md` 7.38 named four things and did not do
+them: C10 (kid mode's permanent printer), C11 (a revoked Clerk token works until
+`exp`), C12 (`GET /api/themes` / `GET /api/stages` do not exist) and the §18
+inversion. AUDIT-PHASE7 F11 then measured two live defeats of the §18 guard on the
+real image. Three of the four are closed below. **C11 is closed as a written,
+justified non-fix**, which is a different thing from being deferred again: 7.38
+said "not touched, because `verify_token` is the most security-sensitive function
+in the repo", which is a reason to be careful and not an answer to the question.
+The answer is in 8.63.
+
+**8.60 — `GET /api/themes` and `GET /api/stages` exist, in a new `api/catalog.py`,
+public and cached exactly as §9 says.**
+PROVED before the change: `storyforge/main.py` mounted `health`, `validate`,
+`stories`, `kids`, `readings` and nothing else, so both routes 404'd on **every
+kid-session load, twice per load under StrictMode**. The SPA absorbed it — both
+getters go through `optional()` and fall back to a hand-copy of
+`data/seed/{themes,stages}.csv` — so the only visible cost was noise in the
+network panel, and the real cost was invisible. Because the route did not exist,
+the fallback was not a fallback: **the cards a child saw were whatever the
+TypeScript literal said, on every load, with the database having no vote.** Both
+directions of drift then bite, and the audit's phrasing named only the softer one:
+
+- a slug in `lib/api.ts` that the database does not have — a renamed theme, a
+  removed one, a reseed — is a card that answers `POST /api/stories/request` with
+  `404 unknown theme 'x' — run make seed`. A 404 is not retryable, so kid mode
+  spends its three attempts and parks on the printer **forever**. That is C12
+  feeding C10, and it is the sharp direction.
+- a theme added to `themes.csv` and seeded but not typed into `lib/api.ts` is the
+  softer one: no card, so no child can ever reach content that exists.
+
+Both are gone for the same structural reason — the cards now come from the table
+`_resolve_theme` reads. **Proved in a real browser rather than argued**, against an
+auth-enforced API (`demo_bypass_auth: false`, `x-storyforge-auth: enforced`,
+`garbage token → 401` confirmed first) with a real Clerk session and a private copy
+of the database: a fourth theme (`unicorns`) was inserted with SQL and nothing
+else, and the picker painted a fourth card — a card the TypeScript literal cannot
+produce. Tapping it returned `POST /api/stories/request → 200` and
+`POST /api/readings → 201` for a stage-1 reader, with the server logging "warm pool
+empty for stage 1 / unicorns; served stage 1 / space instead". A brand-new theme is
+safe to tap on the day it is seeded, which is the whole of C12.
+
+The routes are five lines of SQL each against tables that already exist. Two
+decisions in them are not obvious:
+
+- **They are public — no `require_parent`.** §9 says `(public, cached)` and this
+  is the one place the whole file makes an exception, alongside `/api/health`.
+  What they expose is `data/seed/*.csv`, which is committed to the repository:
+  twelve stage names and three theme names. There is no child in either payload
+  (§13), so an auth requirement would buy nothing and would make the picker's
+  first paint depend on Clerk having loaded.
+- **`Cache-Control: public, max-age=300` on both**, because "cached" in §9 is a
+  property of the response and not a comment about the server. The stage list
+  changes when the scope and sequence changes, which is never; the theme list
+  changes when `make seed` runs.
+
+  Observed live, and worth naming because it is the one cost: after inserting a
+  fourth theme, the browser kept painting three cards until the cached response
+  expired. Adding a theme is therefore visible within five minutes, and
+  **removing** one leaves a window of the same length in which a child can tap a
+  card whose slug no longer resolves — a 404 that kid mode cannot retry. That
+  window used to end on the permanent printer screen; 8.62 is what makes it end on
+  a story instead, which is the two fixes in this section covering each other
+  rather than either one being complete alone.
+
+**8.61 — The seed-mirror fallback STAYS, and is pinned to the CSV by a test that
+found a real drift on its first run.**
+The obvious move once the routes exist is to delete `SEEDED_THEMES` /
+`SEEDED_STAGES`. That would be wrong twice over. The fallback is not standing in
+for a missing route — it is what makes `GET /api/themes` failing *not* a
+child-facing failure, and the API being unreachable is exactly when a child is
+already at risk of the printer screen. And the picker with an empty theme list is
+a screen with nothing to tap, which is the stuck state §01 forbids, reached
+through a path §07 has no copy for.
+
+So the fallback is kept and its actual risk — silent drift from the seed — is
+closed with the cheapest available check: `apps/web/src/lib/seeds.test.ts` parses
+`data/seed/themes.csv` and `data/seed/stages.csv` and asserts the two TypeScript
+constants equal them, field by field, including emoji and id order.
+
+**It went red on the first run, which is why it is worth having.** PROVED drift:
+`SEEDED_STAGES[0].description` read "Single letters s a t p i n m d c — simple
+**three-letter** words" where `stages.csv` says "…simple
+**consonant-vowel-consonant** words". Every other field of all 12 stages and all
+3 themes matched. One wrong word on the add-kid form is a small harm; the point
+is that nothing in the repository could tell that it was wrong, and the same
+mechanism silently mis-renders a theme name or an emoji. The constant is
+corrected to the CSV's text — the CSV is the seed the database was built from, so
+it is the side that is right by definition.
+
+The two constants are `export`ed for the test, and only for the test. That is a
+real widening of the module's surface and it is the smaller cost: the alternative
+is a test that reaches into the module's source text with a regex, which is a
+test of the file's formatting.
+
+**8.62 — Kid mode's permanent printer is bounded: the stall re-serves the last
+story this reader was actually served, and a second stall hands the tablet to the
+adult. `stage` still comes from the server, and no story is ever generated,
+chosen or re-scored on the client.**
+C10, PROVED by the audit against a 401-ing API: three attempts, then "Writing
+your story… the printer is working / Try again", and "Try again" returns to the
+picker, which re-enters the same loop indefinitely. §01 says a child never sees an
+error state *and* never gets stuck; the screen satisfied the first clause and
+violated the second, and it says the printer is working when nothing is working.
+The audit's easiest route in is §9's limiter: 10 story requests per minute per
+user, and an eleventh tap of "Read another" is ordinary behaviour for a
+five-year-old who wants a different dragon.
+
+7.38 declined this on the grounds that "fall back to the last successfully served
+story is a change to what a child reads, which is §0/§1 territory". That is the
+right instinct pointed at the wrong object. The story being re-served is not a
+new artifact and is not chosen by the client: it is a story **the server picked
+for this same reader** through `POST /api/stories/request`, which resolves the
+stage from the `kids` row (7.21) and re-validates the pick against that reader's
+own stage before returning it (`_is_decodable_for`, 7.23). Re-reading it later is
+inside the guarantee, not outside it, for a reason §7 already relies on: the GPC
+inventory and the sight-word list are cumulative (§4), so a story decodable at
+stage N stays decodable at every stage above it (§5.7c monotonicity). A stale
+cache can therefore only ever be *easier* than the reader's current stage — the
+same direction the fallback ladder is allowed to move.
+
+What is cached is one story per reader, keyed by kid id, in `localStorage`:
+
+- **Keyed by kid id, never shared.** C9's lesson (7.33) is that a substituted
+  reader is worse than a refusal, so a sibling's tablet cannot serve reader A's
+  cache to reader B.
+- **Seven-day expiry.** Not for decodability — that cannot expire upward — but
+  because the pool can *retract* a story. The Phase 6 grammar backfill moved 4 of
+  28 servable stories to `rejected` while they were being served (STATE.md), and
+  a client cache with no clock would keep re-serving a retracted story to that
+  child forever. Seven days bounds it to one story, for one reader, for one week.
+- **The reading is still recorded through the server**, so the record is gated by
+  the same two refusals as any other reading: `POST /api/readings` 404s a
+  non-servable story and refuses a story above the kid's stage (7.22). If the
+  cached story has been retracted, the child re-reads it once and no evidence is
+  filed — the honest outcome, and it needs no client-side logic to arrange.
+
+The stall path is now bounded rather than infinite: attempt (3 network tries) →
+re-serve the cached story if there is one → otherwise the printer with **one**
+"Try again" → and on a second stall, `navigate('/app')`. Handing over to the
+adult surface is the same route `resolveKid` returning `null` already takes
+(7.24): `/app` is a real screen that knows how to name the readers and how to add
+one, `RequireParent` sends a signed-out visitor to sign-in, and the child sees a
+grown-up's page rather than a lie about a printer. **Nothing in this path renders
+an error string to a child**, which is the §01 line, and nothing waits forever,
+which is the other half of it.
+
+**Both rungs were driven in a real browser against the enforced API, with the 429
+produced for real rather than mocked** — ten `POST /api/stories/request` calls with
+the session's own token, so the eleventh was the child's tap:
+
+```
+kid 1648, one story already read (cache present):
+  tap → 429, 429, 429 → the screen shows "Sam sat in a rocket." (story 1663)
+       → POST /api/readings 201, reading 12496, kid 1648, story stage 1
+       → console: "[kid] request failed; re-serving the last story 1663"
+kid 2622, nothing ever read (no cache):
+  tap → 429, 429, 429 → "Writing your story… the printer is working  Try again"
+  Try again → tap → 429, 429, 429 → url becomes /app, the parent home renders
+```
+
+No error string appeared on either path, and the second one terminates. Before this
+change the first path was the printer forever and the second was the printer
+forever.
+
+What this does NOT fix: the 429 itself. Its root cause is that a (stage, theme)
+pair holding few stories round-robins the same story back, so a child hunting for
+a *different* dragon spends the limiter (6.7). That is `warm.py` and the pool,
+both outside this job — and live coverage has already moved a long way (see
+8.69).
+
+**8.63 — C11 is ACCEPTED and documented, not fixed: a revoked Clerk session's
+token stays valid until `exp`, ≤60 s for every token a browser holds. The
+docstring sentence that invited the wrong generalisation is the thing that
+changes.**
+PROVED by the audit: `GET /api/kids` with token T → 200; revoke the session
+through the Backend API → `status: revoked`; the same T → 200 for the rest of its
+life. `verify_token` checks signature, `exp`, `nbf`, `iss` and optionally `aud`,
+and never asks Clerk anything.
+
+**Not fixed, on purpose, and here is the arithmetic rather than the instinct.**
+
+1. **The window is the token's remaining lifetime, and for a browser that is
+   ≤60 s.** Measured, in this same audit's clean section: Clerk's browser session
+   token has `exp - iat = 60`, and `getToken()` transparently re-mints ~7 s
+   before expiry. After a sign-out or a server-side revocation the re-mint fails,
+   so the exposure is bounded by whatever is left of one minute. The audit's
+   30-minute observation came from a **Backend-API-minted 1800 s token**, which
+   is a shape no browser in this product produces and which only an operator
+   holding `CLERK_SECRET_KEY` can create.
+2. **Checking `sts != "active"` does not close it.** The claim is present and is
+   **frozen at mint time** — the audit says so explicitly ("present, and frozen
+   at `"active"` from mint time"). A revoked session's already-issued token still
+   reads `active`, so the check would refuse a different population (Clerk's
+   `pending` sessions, i.e. a session with unfinished tasks) and close nothing at
+   all. It would also be a new way for auth to refuse a legitimate parent if
+   Clerk ever emits a value this code has not seen, on a path a child's session
+   depends on. Rejected as machinery that looks like the fix and is not.
+3. **A per-request Clerk call is worse than the window.** It puts a network round
+   trip and a third-party dependency on every authenticated request, including
+   every request in a reading session, and it converts a Clerk blip from "JWKS is
+   cached, nobody notices" (7.34's stale-key window) into a total outage. §9's
+   design is stateless verification over JWKS precisely so that Clerk being slow
+   is not this product being down.
+4. **A maximum-token-lifetime cap was considered and rejected.** Refusing any
+   token with `exp - iat` above, say, 300 s would bound the window for *every*
+   token including the operator-minted ones. It is one line. It is also a
+   guarantee about a value the operator can change in the Clerk dashboard: raise
+   the session token lifetime there and this API refuses every request in the
+   product, with a 401 that names nothing an operator would connect to a
+   dashboard setting. Auth failing closed is correct; auth failing closed on a
+   configuration change nobody deployed is an outage.
+
+What the window actually costs: for ≤60 s after sign-out, a token already
+captured off the wire or off a device reaches **that same parent's own family
+data**. It grants no role it did not have (roles are re-read from the token every
+request, so a revoked *admin* is also bounded by the same ≤60 s) and it reaches
+no other family (ownership is a `kids.parent_id` filter, 6.9/6.10). This is the
+ordinary stateless-JWT trade and it is the one §9 chose.
+
+The code change is one paragraph in `auth.py`'s module docstring. The audit's real
+point was never the 60 s: it was that the docstring makes an adjacent claim which
+*is* true — "revoking admin takes effect on the next call rather than at the next
+login" — and a reader generalises it to session revocation, where it is false. The
+docstring now states both, with the bound and with the reason a `sts` check is not
+the answer, so the next reader does not have to re-derive this.
+
+**8.64 — §18: a platform variable that is PRESENT is a signal, whatever its
+value. `docker run -e PORT=` no longer boots a bypassed API.**
+AUDIT-PHASE7 F11, defeat 1, PROVED against the real built image:
+`docker run -e DEMO_BYPASS_AUTH=true -e PORT= -e DATABASE_URL=…localhost… ` stayed
+up serving a **fully unauthenticated API** and had to be killed. The mechanism is
+one line: `deployment_signals` read `(os.environ.get(name) or "").strip()` and
+appended a signal only when the result was truthy, so *blanking* the variable
+removed the only signal the image supplies to itself (the Dockerfile's own
+`ENV PORT=8080`) while `--port ${PORT:-8080}` served happily on 8080.
+
+`PLATFORM_VARS` and `SERVING_HINT_VARS` now test **presence** —
+`name in os.environ` — and an empty value gets its own sentence in the refusal
+("present but blank"), because blanking a platform variable is a stronger signal
+than setting it: no platform sets `PORT=`, and no laptop has a reason to. The
+value-based test stays for `ENV_NAME_VARS`, where an empty value really is
+"unconfigured" rather than "someone emptied this".
+
+Sabotage-checked, which is the only reason these tests are worth anything: the new
+cases were written first and run against the unchanged guard, where **14 of them
+failed** — 4 blank-platform-variable cases, 7 environment-value spellings and 3
+container cases — while the laptop canary and every false-positive case passed, so
+the corpus is not simply asserting the new implementation back to itself. Re-run
+against the **built image** after the fix, the audit's own command
+(`docker run -e DEMO_BYPASS_AUTH=true -e PORT= -e DATABASE_URL=…localhost…`) now
+exits with `RuntimeError: … (PORT is present but BLANK — a platform variable was
+emptied. Unset it entirely to run the §18 bypass locally.; /.dockerenv exists …)`.
+
+**8.65 — §18: `ENVIRONMENT=prd` and `ENVIRONMENT=pre-production` are refused, and
+the family is closed by a rule that does not depend on someone having thought of
+the spelling.**
+F11, defeats 2 and 3, PROVED in-process: both booted bypassed, and
+`auth.py:494-498`'s comment said the prefixes closed the family after `prod-us`.
+They did not — `DEPLOYED_ENV_PREFIXES` is a `str.startswith` test, so `prd` is not
+a prefix of anything in it and `pre-production` starts with `pre`.
+
+`is_deployed_env_value` now also looks for deployment MARKERS anywhere in the
+normalised value: `prod`, `prd`, `stag`, `stg`, `live`, `preview`, `uat`,
+`canary`. Substring rather than prefix, because the family is spelled every way a
+team has ever spelled it (`preprod`, `pre-production`, `k8s-prod`, `eu-stg`) and
+a prefix list only ever catches the spellings someone thought of. The
+false-positive direction is checked in the same test as before and in both
+directions: `dev`, `development`, `local`, `test`, `ci`, `sandbox`, `demo`,
+`laptop`, `""` and `"   "` all still resolve to "not deployed", and none of them
+contains any marker. `tests/conftest.py`'s duplicate of this rule — which exists
+because importing `storyforge.auth` is what runs the guard — is extended in step
+and still cross-references it.
+
+**8.66 — §18: being in a CONTAINER is a signal, and it is the first signal in this
+guard that no `-e` can blank. The inverse control the audit asked for, scoped to
+the one place it pays for itself.**
+This is the substantive half of "the §18 inversion". 7.36 recorded the honest
+criticism of its own design — "this list is still ~30 negative signals and a bare
+`docker run` on a public host sets none of them" — and F11's defeat 1 is exactly
+that: the operator does not need to know which 30 variables to avoid, only that
+blanking one gets them past it.
+
+`deployment_signals` now also reports containerisation, read off the filesystem
+rather than the environment: `/.dockerenv`, `/run/.containerenv` (podman), and a
+`docker`/`containerd`/`kubepods`/`lxc`/`podman` marker in `/proc/1/cgroup`. None
+of those can be unset by a `docker run` flag, and on macOS — where `make dev` and
+this suite run — none of them exists, so the laptop path is untouched. §18's own
+words are "a laptop-only fallback"; a container is not a laptop.
+
+**There is exactly one way past it, and it is a positive assertion rather than the
+absence of a signal:** `STORYFORGE_BYPASS_IN_CONTAINER=i-understand-this-disables-auth`,
+spelled in full, cancels the container signal **and nothing else** — every other
+signal still refuses, so this is not a master key. It exists because the failure
+mode 7.36 was worried about is real and asymmetric: a guard that blocks a
+legitimate local workflow gets deleted, and then nothing is guarded. The
+workflows that need it are a dev container and a containerised CI runner, which
+would otherwise fail every test at import with a message about production. A
+careless operator putting the demo on a VPS will not set a variable they have
+never heard of; a developer hitting the refusal reads its message, which names
+the variable and says plainly what it turns off.
+
+Verified against the **built image**, four ways, because a guard tested only
+in-process is a guard tested somewhere it will never run:
+
+```
+-e PORT= -e DATABASE_URL=…localhost…                      REFUSED (blank PORT + container)
+PORT unset entirely, localhost DSN, nothing else set      REFUSED (container alone)
+-e ENVIRONMENT=prd                                        REFUSED (env value + PORT + container)
+override + PORT unset + localhost DSN                     BOOTS — the dev-container escape works
+override + ENVIRONMENT=production                         REFUSED (it is not a master key)
+override + remote DigitalOcean DB host                    REFUSED (nor is it a key to that)
+```
+
+**What is still NOT done, and why:** the bind-address half of the inversion
+(refuse when the process is listening on `0.0.0.0`) and the general positive
+laptop assertion. The bind address is not knowable at import — the guard runs
+when `storyforge.auth` is imported, before uvicorn has a socket, and reading it
+back out of `sys.argv` is a guess about how the process was started rather than a
+control. Making the laptop assertion mandatory for the *whole* guard still
+changes §18's contract from one flag to two during exactly the emergency the flag
+exists for (7.36's reason, unchanged and still correct), and `tests/conftest.py`
+turns the bypass on for the entire suite. The container signal was chosen instead
+because it converts the one measured defeat into a refusal without touching the
+contract for anyone on a laptop.
+
+**8.67 — `make dev` was re-verified after the guard change, because a guard that
+blocks local development is worse than the gap it closes.**
+Not a deviation so much as the evidence for one. The §18 changes above are
+refusals that run at import, so the failure mode is "the API will not start on a
+developer's machine" and it would be discovered by the next person, not by me.
+Verified live after the change, in this order:
+
+```
+deployment_signals(<the .env DSN>) on this host        -> []
+DEMO_BYPASS_AUTH=true python -c "import storyforge.auth"
+                                                      -> imports, logs the §18 banner
+DEMO_BYPASS_AUTH=true ENVIRONMENT=development …        -> imports (a laptop word stays a laptop word)
+tests/test_auth.py (149 tests, bypass on for all)      -> green
+make dev                                               -> Postgres ready, uvicorn :8000, Vite :5173
+  GET :8000/api/health                                 -> {"status":"ok","demo_bypass_auth":false}
+  GET :5173/api/themes  (through the Vite proxy)       -> the four-field theme list
+  GET :5173/                                           -> 200
+```
+
+`conftest.py` also gained a `PORT` scrub, for the same reason it already scrubs
+`ENVIRONMENT=production`-ish values: `PORT` is now a signal by presence, so a
+developer or CI runner with it exported for something unrelated would fail the
+whole suite at import rather than in the one test that is about the guard. The
+tests that ARE about it set it themselves.
+
+**8.68 — `GET /api/themes` reports how many servable stories each theme holds,
+and the picker deliberately does not filter on it.**
+The question the route raises is whether it should return only themes the pool
+can actually serve — a theme that resolves but has no stories looks like a dead
+end for a child. Answered with the ladder in hand: it is **not** a dead end.
+`_SERVE_SQL` orders by `stage_id DESC, (theme_id = :theme) DESC`, so an empty
+(stage, theme) cell is answered with a story at a lower stage, or in another
+theme, or both, and `fallback.kind` says which — never a 404 and never an empty
+result. The only theme that dead-ends a child is one the `themes` table does not
+have, and a route that reads that table cannot return one. That is the whole of
+C12's fix.
+
+Filtering would also *create* the failure it aims to prevent. §07 fixes the
+picker at 3-6 cards; a filter that emptied the list would leave a child a screen
+with nothing to tap, which is worse than being handed a dragon story after asking
+for a rocket, and which §07 has no copy for.
+
+So the depth is **reported, not enforced**: each theme row carries
+`servable_stories`, counted with `SERVABLE_STATUSES` imported from the serving
+endpoint rather than re-spelled (the discipline `warm.py`'s coverage gate already
+uses, 8.42), and the SPA's `Theme` type carries it as an optional field that no
+component reads. It is there so that "this theme is offered" and "this theme has
+content" can be compared in one request by an operator or by the Phase 8 admin
+portal — which is the drift C12 was actually about.
+
+It is deliberately an **upper bound** and the docstring says so. `status` is the
+half of servability that lives on the row's status column, and the serving path may
+refuse an individual row for its own reasons (the serve-time decodability re-check
+of 7.23, and any per-row predicate added since). Importing the whole predicate
+would couple a cosmetic field to the internals of the serving statement; copying it
+would be a second answer waiting to drift. High by a row is the right direction for
+a number whose only job is to make a mismatch visible.
+
+**8.69 — Live pool coverage, measured twice while closing C12, is 34-36 of 36
+pairs at full depth and MOVING. `docs/STATE.md`'s pool row is stale in the OTHER
+direction.**
+Recorded because the C12 and C10 reasoning both depend on it, and because a claim
+in the state doc is now pessimistic rather than optimistic — the rarer and less
+dangerous direction, but still a doc that does not describe the database. Measured
+directly against the live pool, not through `make warm-check` (this job may not
+run it), at the start and the end of this work:
+
+```
+first  5 of 36 pairs hold fewer than 3 servable stories, every one of them 2
+       (s6/space, s7/animals, s8/dragons, s9/animals, s11/dragons); none holds 0.
+       stories: 106 warm, 7 complete, 19 rejected, 193 eval.
+~2h later, same query:
+       2 of 36 pairs short, shallowest still 2, none 0.
+       stories: 110 warm, 7 complete, 20 rejected, 213 eval.
+```
+
+Two things follow. **The number in this entry is a timestamp, not a fact** — a
+concurrent agent is filling the pool, so any coverage figure written down here is
+a reading and not a state, and `make warm-check` is the only way to ask the
+question at the moment it matters. And **no (stage, theme) pair is empty in either
+reading**, which is what the C10 argument leans on: with no empty cell there is no
+404-shaped route to the printer left, so §9's 10/min limiter is the only path a
+child can reach it by, which is exactly the one 8.62 bounds.
+
+`docs/STATE.md:16` still says "13 of 36 … stages 7-12 hold none, stage 6 holds one
+dragons story". That was true when it was written. The row is left for the agent
+that owns `warm.py` and the run that moved it, rather than edited from here while
+that work is in flight.
+
+---
+
+## Phase 8 — the two defects a live 60-story warm run measured
+
+Numbered 8.70-8.79. A full `make warm` produced 60 stories with 9 rejects (15%).
+Six were examined and **five are false**, which is the whole basis of this section:
+the numbers below are counts off `gen_meta->'moderation'` in the live pool, not
+projections. The sixth (story 7268, "The dragon did nip a cat") is a **correct**
+reject and is left working — it is also the single most useful piece of evidence
+here, because layer 3 caught deliberate harm with no blocklist word anywhere in
+the story.
+
+| story | stage | half that fired | verbatim |
+|---|---|---|---|
+| 7290 | 6 | `well_formed=false` | `"The rocket did not stop."` — "stop should be replaced with a past participle" |
+| 7317 | 9 | `well_formed=false` | `"It can hear the wind outside."` should be `"It could hear the wind outside."` "to match past tense" |
+| 7292 | 7 | blocklist | `hurt` — in *"The girl did not want to hurt the rabbit."* |
+| 7304 | 8 | blocklist | `hurt` — in *"The dragon did not want to hurt them."* |
+| 7345 | 11 | blocklist | `hurt` — in *"The dragon did not want to hurt things."* |
+| 7268 | 1 | content | *"The dragon did nip a cat"* — CORRECT, left working |
+
+**8.70 — The grammar judge was making a grammar error of its own: it wanted a PAST
+form after an auxiliary. The fix is a second mechanical test, not another
+prohibition.**
+`"The rocket did not stop."` is correct English — after the auxiliary *did* the
+bare infinitive is required, and the judge's own suggested correction ("a past
+participle") produces `"The rocket did not stopped."`, which is wrong. 8.20's
+noun-substitution test cannot catch this: substituting nouns gives *"The dog did
+not stop."*, which is fine, so the test says "approve" and the judge flagged
+anyway.
+
+The reason it flagged is visible in the prompt. `did not` appears exactly ONCE in
+`MODERATION_SYSTEM`, as the header example of the **reject** list — *"Wrong verb
+form after a helper: `He did not came back.` (came -> come)"* — while every
+carve-out example of the same construction is affirmative (*"It did nap."*, *"Sam
+did stand."*). A judge pattern-matching on `did not` therefore had one exemplar and
+it was a rejection. The two false positives are the same root cause read twice:
+in both, the judge tried to force a past form onto a sentence that already had the
+right one.
+
+So the fix names the actual diagnostic instead of adding a ninth prohibition, in
+the shape 8.20 established (a test the judge RUNS, before it is allowed to flag).
+The **HELPER TEST**: after `did`/`do`/`does`/`can`/`will`/`may`/`must`, with or
+without `not`, the next verb must be the PLAIN form; the plain form is correct and
+a PAST form is the error, so the only question is whether that verb is a past
+form. It is stated with four passing and four failing examples side by side, and
+with an explicit floor — never propose a correction that turns a plain form after
+a helper INTO a past form or an `-ed`/`-en` participle, because "did not stopped",
+"can heard" and "did napped" are all wrong English and producing one means the
+sentence was already right.
+
+**This is a sharpening, not a relaxation, and the trap is the point.** The same
+construction appears on both sides: `"He did not came back."` — the sentence that
+shipped to a child and that DEVIATIONS 4.12 exists because of — must still FAIL,
+and `"The rocket did not stop."` must PASS. A fix that buys one by breaking the
+other is worthless, so the fixture now holds four auxiliary rejects rather than
+one (8.75).
+
+**8.71 — Decided deliberately: the grammar half does NOT police tense consistency,
+and the enforcement is a self-check on the judge's own note rather than a rule.**
+Story 7317's note was *"should be `It could hear the wind outside.` to match past
+tense"*. `MODERATION_SYSTEM` **already** said, in as many words, *"A modal — can,
+will, may — is always correct as written; never ask for could, would or might"*,
+and the judge did it anyway. That is 8.20's lesson repeating: a prohibition in a
+list is not a rule a judge applies.
+
+The policy call, stated so it can be disagreed with. Tense consistency is **not**
+policed, for three reasons and one of them is mechanical rather than stylistic:
+
+1. Grammaticality is a property of ONE sentence. `"It can hear the wind
+   outside."` is well-formed on its own; whether it matches the tense of the
+   sentence before it is a judgement about a *pair* of sentences, which is style.
+2. The allowlist FORCES it. Below the stage that teaches the `-ed` ending the
+   past-tense form of a verb is not in the child's word list at all, so
+   present-tense narration is not sloppiness — it is the only legal output. This
+   is the same mechanism already recorded for *"do not ask for helped"*, one modal
+   over.
+3. The costs are asymmetric in the direction that settles it: a wrongly rejected
+   story is thrown away and the child is served a fallback (§7's ladder) instead.
+
+Because the rule already existed and failed, the change is a check the judge can
+run against its own draft note: **if the note's justification would contain "to
+match past tense", "for consistency", or "the rest of the story is past", the
+sentence is well-formed — set `well_formed = true`.** That is checkable text, not
+an appeal. And since tense consistency is NOT kept, no reporting change is needed;
+had it been kept it would have had to be reported as a style rejection, never as
+`ungrammatical:`.
+
+**8.72 — `grammar_note` was carrying a CONTENT judgement, and that is what made
+story 7290 unfalsifiable.**
+7290's full note reads: *"stop should be replaced with a past participle or the
+sentence needs restructuring; as written with "did not" the base verb is correct,
+but the final sentence leaves a critical safety issue unresolved."* The judge
+**stated that the grammar was correct** and still returned `well_formed=false`,
+because it had folded the story's unresolved ending — a real §13 REJECT bullet,
+which it also correctly reported in `reason` — into the grammar field. One added
+sentence closes it: `grammar_note` is about a wrong WORD and nothing else, and a
+note mentioning the story's ending, whether a problem was resolved, safety, or
+what the story should have said belongs in `reason`.
+
+7290 is therefore entered in the fixture as a **grammar-only** case: the content
+half is deliberately not asserted, because rejecting that story for an unresolved
+ending is defensible and asserting `approved is True` would be asserting something
+this entry does not believe. Only `well_formed is True` is required of it.
+
+**8.73 — `hurt` removed from `data/blocklist.txt`: 224 entries -> 223. 8.15 kept it
+after examination and that is no longer defensible.**
+`hurt` caused **3 of the 9 rejects in one run**, at stages 7, 8 and 11 — and all
+three are the SAME construction: *"did not want to hurt"*. The sentences layer 1
+killed are sentences whose meaning is the explicit ABSENCE of harm; two of them are
+the story's kindness beat. 8.15's argument was *"these are not false positives at
+all — layer 3's REJECT list says 'Anyone or anything is hurt', so layer 1 and layer
+3 agree."* They do agree. That is precisely why layer 1's copy is redundant while
+its short-circuit is expensive: `moderate()` returns immediately on a blocklist
+hit, so an innocuous entry does not merely narrow vocabulary — **it stops layer 3
+from ever applying the hazard-vs-harm judgement §13 was calibrated for** (8.14's
+general argument, and the crux 8.15 did not apply to itself).
+
+8.14's test, applied: *is the hazard carried by the WORD, or only by the SENTENCE?*
+*"My foot hurt."* and *"She did not want to hurt the rabbit."* carry none. The
+hazard in *"the dog hurt the cat"* is the sentence.
+
+**Two things make this a PROVED removal rather than a judgement call.**
+
+- **Layer 3 demonstrably does this job, in this run.** Story 7268 — *"The dragon
+  did nip a cat."* — was rejected by layer 3 for *"the dragon deliberately harming
+  another character"*, with **no blocklist word anywhere in the story**. That is
+  the same hazard class as `hurt`, caught one layer down, live.
+- **The word-level block does not even carry the hazard it claims to.** `hurts`
+  (rank 4,227) is **NOT** on the blocklist, and neither is `hurting`. *"The dragon
+  hurts the cat."* passes layer 1 today, unchanged. Blocking one inflection of a
+  verb while its siblings are unblocked is not a hazard control; it is a
+  false-positive generator, and removal is what makes the list internally
+  consistent. Adding the siblings would move the wrong way — it would extend a
+  short-circuit that is already measured to be firing 3-for-3 on non-harm.
+
+Still covered by layer 3's *"Anyone or anything is hurt, injured, killed, or
+dies"* — verbatim, unchanged, and now actually reachable. The compensating control
+is a fixture case in the other direction: a story where `hurt` IS harm must be
+rejected by the judge with layer 1 silent (8.75).
+
+Cost/benefit in rows: `hurt` is `min_stage` 7, so the removal adds 6
+`allowed_words` rows (stages 7-12) and touches no stage below 7. Stage 1, the
+tightest at 157 against §18's 150 floor, is unaffected. The win is not the 6 rows;
+it is the three stories.
+
+**8.74 — The other seven words 8.15 kept, re-examined against the same evidence
+standard. All seven KEPT.**
+The mandate's asymmetry is not rhetorical: **removing a genuine hazard to fix a
+false positive is far worse than the false positive.** `hurt` cleared the bar
+because there is measured cost — 3 rejects, at 3 stages, all non-harm. None of
+these seven has any. Sixty live stories produced zero rejects on any of them, so
+removing one would be trading a real hazard sense for a hypothetical false
+positive, which is the trade this entry exists to refuse. Each is recorded with the
+reason it stays, not merely marked "kept".
+
+| kept | rank / min_stage | rows if removed | reason it stays |
+|---|---|---|---|
+| `shot` | 582 / 3 | 10 | The mandate's own must-still-catch case is *"The man had a gun. He shot it and the dragon was dead."*, and `tests/test_phase3.py::test_blocklist_catches_violence_without_an_api_call` asserts `shot` by name alongside `gun` and `dead`. *"The rocket shot up"* is a real loss and `went up` covers it. Hazard is in the word. |
+| `fight` | 556 / 6 | 7 | The only one of the eight with a measured TRUE positive: `docs/EVAL.md`'s third layer-1 rejection was `fight` at stage 7 (8.15). A fight *is* characters in conflict — the innocuous senses ("fight a fire", "fight for") are figurative and out of domain for decodable prose. |
+| `beat` | 1,003 / 6 | 7 | *"beat its wings"* is natural dragon prose, so the cost is real — but `beat`-as-strike is **co-dominant, not recessive**, and 8.14's removal test requires the innocuous sense to be clearly dominant. Zero measured cost in 60 stories. |
+| `blade` | 5,100 / 5 | 8 | *"a blade of grass"* is genuine, but at rank 5,100 it is barely in any prompt window, and the weapon sense is dominant. `sword` and `knife` stay on identical reasoning; removing `blade` alone would be incoherent. |
+| `hate` | 772 / 5 | 8 | The next-weakest of the seven, and named as such. *"The cat hates rain"* is innocuous — but `hates` and `hated` are unalignable at every stage, so only the bare form is at stake, and in a generated story about characters `hate` is animosity. Covered by layer 3's "Cruelty, bullying" if removed later; not removed now, because there is no cost to point at. |
+| `butt` | 4,348 / 2 | 11 | The largest allowlist cost of the seven and it is still a keep. This is the *bodily* section, and §13's REJECT list names "bodily functions, or bathroom humour" — for ages 5-10 the hazard genuinely is in the WORD, which is the one criterion that outranks the row count. The goat-butting verb sense is rare and `butts` is not blocked anyway. |
+| `smoking` | 2,854 / unalignable | **0** | Free to keep: `smoking` aligns at no stage, so it can never appear in `allowed_words` and the entry costs zero rows. It is not dead code — the 95% gate means one undecodable word in a 20-word story can still clear it, so layer 1 remains the thing that stops it. Zero cost, nonzero protection. |
+
+All 31 profanity and 34 sexual entries stay, unchanged and unexamined-for-removal,
+per 8.14 — the list exists because 42 profanities were once in the vocabulary
+handed to a model writing children's stories.
+
+**Counted, not assumed, because 6.15's own bug was a row count moving the wrong
+way and 8.17 made lines and entries equal so the list could be verified by
+counting it:** after this change `data/blocklist.txt` has **295 lines, 223
+non-comment non-blank lines, and `len(load_blocklist()) == 223`**. `load_blocklist()`
+reads ONE WORD PER LINE; a space-separated rewrite once loaded 22 entries instead
+of 240 with no symptom but the count.
+
+**8.75 — The live fixture grew in BOTH directions, and the count in 8.20's table
+was wrong.**
+STATE invariant 5 requires re-testing in both directions, so
+`tests/test_grammar.py::FIXTURE` is extended rather than replaced.
+
+First, a correction to the record: 8.20 reported a **29**-case fixture (18
+must-approve / 11 must-reject). The file holds **28** — 18 must-approve and **10**
+must-reject, 8 of them ungrammatical. Counted off the module, not read off the
+prose. The measured rates 8.20 reports are unaffected (6 of 18 -> 0 of 18 false
+positives; the reject side was 0 of 10, not 0 of 11), but a fixture whose size is
+misreported is the same class of weakness 8.17 fixed in the blocklist, so it is
+corrected here rather than carried.
+
+Added — **6 must-approve**, five of them VERBATIM out of `story_segments` for the
+warm-run rejects above, not retyped:
+
+- `approve/negated-auxiliary-did-not-hurt` (7292, stage 7) — *"The girl did not
+  want to hurt the rabbit."*
+- `approve/negated-auxiliary-hurt-dragon` (7304, stage 8) — *"The dragon did not
+  want to hurt them."*
+- `approve/hurt-in-a-kind-sentence` (7345, stage 11) — *"The dragon did not want
+  to hurt things."*
+  These three are the blocklist change's both-directions test: each one is a story
+  layer 1 killed, and each must now reach layer 3 AND be approved by it. They span
+  three stages deliberately, because a layer-1 removal is safe at every stage or
+  it is not safe.
+- `approve/modal-can-among-past-sentences` (7317, stage 9) — *"It can hear the
+  wind outside."* in an otherwise past-tense story. 8.71's case.
+- `approve/grammar-did-not-stop` (7290, stage 6) — the only **grammar-only** entry
+  in the fixture: `well_formed is True` is asserted, `approved` is not, for the
+  reason given in 8.72.
+- `approve/negated-auxiliary-bare-verb` — constructed, short, resolved ending, so
+  that `"did not stop"` is also covered by a case where `approved` IS asserted and
+  the content half cannot make it flaky.
+
+Added — **6 must-reject**, four of which are the trap in 8.70 stated four ways.
+Every one is noun-substitution-invariant, so 8.20's test cannot rescue them, and
+each turns red on any fix that reads as "anything after an auxiliary is fine":
+
+- `reject/ungrammatical-past-form-after-did` — *"Sam did went up the hill."* (went -> go)
+- `reject/ungrammatical-past-form-after-do-not` — *"The cats do not ran fast."* (ran -> run)
+- `reject/ungrammatical-past-form-after-modal` — *"The dragon can flew up."* (flew -> fly)
+- `reject/ungrammatical-past-form-after-has` — *"Sam has went home."* (went -> gone).
+  This one guards the hole the HELPER TEST's own carve-out could open: `has`, `have`
+  and `had` take a participle, NOT the plain form, so naming seven helpers after
+  which the plain form is correct must not be readable as "after any helper".
+- (`reject/ungrammatical-verb-form`, *"He did not came back."*, already present, is
+  the fifth and is the one that must never be lost — it shipped to a child.)
+- `reject/unsafe-hurt-as-harm` — `hurt` used as ACTUAL harm, with no other
+  blocklist word in the body, so layer 1 is silent and the judge is what is being
+  tested. This is 8.73's compensating control. If it ever passes, the removal was
+  wrong and must be reverted, not patched.
+- `reject/unsafe-deliberate-harm-nip` (7268, stage 1) — VERBATIM, the live story
+  layer 3 got right. It is in the fixture so that the thing this section leans on
+  is a case the suite checks rather than an anecdote.
+
+28 cases -> **40** (24 must-approve, of which 1 is grammar-only; 16 must-reject).
+The live test also now asserts that **every** must-reject case dies at
+`layer == "model"`. Without that line, a future blocklist addition could short-
+circuit a reject case and the matrix would still read all-green while having
+stopped testing §13's calibration at all — which is precisely what `hurt` was.
+The judge is stochastic, so the rates are reported over multiple runs, before and
+after, in both directions — a single clean run is not evidence.
+
+**8.76 — `make precompute` re-run after the blocklist change.**
+Required by §18: a stage with almost no vocabulary starves generation, and the
+binding constraint is stage 1 at 157 against the 150 floor. Rows per stage, the
+floor check, and "0 blocklisted words appear in `allowed_words`" are reported with
+the run rather than assumed from the 6-row delta.
+
+## Phase 8 — the six servable stories with no comprehension question
+
+Numbered 8.50-8.59 to stay clear of every block above. Logged **before** the
+changes, per §0. Every claim marked **PROVED** was measured in this repo with the
+command shown; everything else is reasoning and is labelled **ASSUMED**.
+
+The defect, restated so the fix can be judged against it. A full `make warm` over
+§7's whole matrix left six `warm` stories carrying zero `questions` rows —
+7291/7297/7299 at stage 7, 7302 at stage 8, 7332/7334 at stage 10:
+
+```sql
+SELECT st.id, st.stage_id, st.status, count(q.id)
+FROM stories st LEFT JOIN questions q ON q.story_id = st.id
+WHERE st.status IN ('warm','complete')
+GROUP BY st.id, st.stage_id, st.status HAVING count(q.id) = 0;
+```
+
+A child served one of those reads the story and the session ends: no question
+screen, so no §8 mastery evidence, no `gpc_stats` movement and no promotion
+signal. `run_warm` did NOT hide this — `enrichment_problems` printed
+`! 0 questions — dropped: {...}` per story and the run exited non-zero, exactly as
+DEVIATIONS 5.12-5.16 arranged. What no code path anywhere asserted is the thing
+that actually matters to the child: **an unenriched story that reaches the pool is
+still servable.** `warm.py`'s own `_moderate_questions` docstring says so in as
+many words — "a story with no questions is a defined, servable state (§7)" — and
+`SERVABLE_STATUSES` agrees, because status is the only thing either the serve
+query or the coverage gate looks at. The Phase 4 audit named "an unenriched story
+in front of a child" as the defect and fixed the *reporting*; 8.50 below fixes the
+*serving*. The earlier check that found 0 of 28 found zero because the pool was
+entirely stages 1-6, where the yield is ~100% (**PROVED**, table in 8.53).
+
+The cause of the drops is a fix of ours interacting badly with vocabulary size.
+DEVIATIONS 7.14 closed a real leak — a `tap_word` cue that was a prefix of exactly
+one option let a child answer with no phonics while §8 credited the guess — and
+the constraints that came with it are harder to satisfy as words get longer. All
+six stories dropped BOTH types, and the two verbatim reasons are these:
+
+```
+{'tap_word': ['the three words must be close to the same length'],
+ 'mcq2': ['"run back" is also true in the story, so it is not a wrong answer']}
+```
+
+**Neither check is weakened by anything below, and the entries are written in that
+order because the first thing to establish was which check is actually binding.**
+`tap_word` options of wildly different lengths let a child pick by shape; an
+`mcq2` distractor that is also true is unanswerable. A question a child can answer
+without reading is worse than no question — that is the whole reason 7.14 exists.
+
+**8.50 — A servable story with no questions is refused by the SERVING path, as a
+shared SQL predicate rather than as a fourth `status` value or a comment.**
+
+Three designs were on the table.
+
+- **A new status** (`unenriched`, say) is the obvious one and it is wrong in a way
+  that matters: `_UNENRICHED_SQL` selects on `s.status = ANY(:statuses)` with
+  `SERVABLE_STATUSES`, so moving these rows out of that set would put them beyond
+  the reach of the one command that repairs them (`--backfill`). That is the exact
+  shape of the bug DEVIATIONS' Phase-4 block is about — the §13 question pass was
+  forward-only and skipped the nine stories that needed it most. A repair path the
+  broken rows cannot enter is not a repair path.
+- **A check in `enrich`/`persist`** — refuse to write `status='warm'` when the
+  question set came back empty — is forward-only in the other direction. It says
+  nothing about the six rows already in the pool, or about a row whose questions
+  are later removed by `_remoderate_questions` (§13 rejecting an `mcq2` is a
+  supported outcome and leaves the story with one question, or none).
+- **The predicate at the serve boundary** is the one that cannot be got around,
+  because it is a property of the row read at read time rather than a property of
+  how the row was written.
+
+So `ANSWERABLE_SQL` is defined once in `api/stories.py`, beside
+`SERVABLE_STATUSES` and for the same reason: it is imported by everything that has
+an opinion about whether a story can be served, and never re-spelled. `_SERVE_SQL`
+gains it, `GET /api/stories/{id}` gains it, and `POST /api/readings` gains it — a
+reading is the row §8 counts, so starting one against a dead-end story is the
+error worth refusing even though §7's ladder should make it unreachable.
+
+The status quo is preserved for the story itself. It stays `warm`, it stays
+`--backfill`-reachable, and it is not `rejected` — it failed neither the
+decodability gate nor moderation, and calling it rejected would falsify the one
+thing `rejected` means (see 8.42's argument about two denominators).
+
+**8.51 — The coverage gate and the refill count adopt the same predicate, or the
+fix creates a second silent hole.**
+
+This is the half that makes 8.50 safe rather than merely correct. `pool_coverage`
+counts `status = ANY(SERVABLE_STATUSES)`; if a question-less story stops being
+servable but still counts as coverage, `make warm-check` reports a pair at target
+that a child cannot actually be served from — and §7's ladder answers that pair by
+serving a lower stage, correctly and silently, which is AUDIT-PHASE7 F4 again with
+a different cause. `pool_depth` (the REFILL number, 8.42) needs it for the
+mirror-image reason: three question-less `warm` stories in a pair would make
+`make warm` skip the pair forever, so the gap could never fill.
+
+Both therefore filter on the same imported predicate. The two denominators stay
+different in the way 8.42 documents — `warm` versus `warm|complete` — and now
+agree about answerability, which is what they were always meant to agree about.
+
+**8.52 — Defence in depth at serve time, in the shape `_is_decodable_for` already
+established (DEVIATIONS 7.23).**
+
+The serve loop re-validates the story it picked against the reader's own stage and
+skips it, loudly, if it fails — three attempts, `log.error`, and a 503 that names
+the rejected ids rather than a fabricated story. A question-less story is checked
+the same way, at the same place, for the same reason 7.23 gives: this should be
+inexpressible after 8.50, not merely unlikely, and the check is free. It also
+covers the one case the SQL predicate cannot — a question row deleted between the
+`UPDATE … RETURNING` and the `_load_story` read.
+
+**8.53 — `_prefer_current_stage`'s tiers fire on ANSWERABILITY, not on
+non-emptiness. This, not the length rule, is what was costing the questions.**
+
+The obvious reading of the log line is that `TAP_LEN_SPREAD = 2` has become too
+tight at high stages, and the obvious fix is to relax it to a bounded ratio. That
+reading is **wrong, and measured wrong** before anything was changed. Replaying
+`sound_targets` over all 113 servable stories and exhaustively enumerating every
+(onset, clean, clean) triple the closed offer list admits:
+
+| rule | stories with a legal triple |
+|---|---|
+| `spread <= 2` (current) | 109 of 113 |
+| `spread <= 2 or ratio <= 1.4` | 109 |
+| `spread <= 2 or ratio <= 1.6` | 109 |
+| `spread <= 2 or ratio <= 2.0` | 111 |
+
+**PROVED.** A legal, length-balanced question existed for every one of the six
+stories except 7302 — 21, 24 and 21 triples respectively for the three stage-7
+stories, 6 and 3 for the two at stage 10 — under the UNCHANGED rule. `['want',
+'far', 'big']` was available to 7291 and the node dropped the question anyway. So
+relaxing the length rule would buy two stories out of four and would buy the
+sixteen it is blamed for nothing at all. It is not relaxed.
+
+What is actually binding is the tier logic. `_prefer_current_stage` returns the
+first NON-EMPTY tier, and at stages 7-10 the `current_stage_onset` tier is
+frequently a single sound with a single onset word — stage 8 teaches `ou`, and the
+only common `ou`-onset word a decodable story contains is `outside`. Seven
+letters, against a story whose other words are four. The tier is non-empty, so it
+fires, so the model is handed a menu of exactly one sound that admits **no** legal
+question, and three attempts later both types are gone. The offered menu was
+dishonest: `sound_targets` was offering sounds `check_tap_word` would reject on
+every possible answer.
+
+The fix is one word of the rule — a tier fires when it holds a sound that can
+actually be answered — plus the pure function that decides it,
+`tap_word_options`, which enumerates the closed list and returns the best legal
+triple or `None`. `sound_targets` drops targets where it returns `None` (and where
+`tap_word_prompt` cannot spell a readable frame, the other silent dropper), so
+every sound offered is provably answerable. §8's preference is strictly preserved
+because the tier ORDER does not move: stage 8's stories fall through to
+`current_stage_word`, whose whole definition is "the correct word uses a sound this
+stage teaches", so they earn *more* §8 evidence than before, not less. Measured
+per stage in the same replay: stage 8 goes from 4 of 8 stories answerable to 8 of
+8, and the count of stories whose best answerable sound still earns stage evidence
+rises from 86 to 90 of 113. **PROVED.**
+
+**8.54 — When the model's three attempts still drop `tap_word`, the triple is
+composed by pure function and put through the identical `check_tap_word`.**
+
+`tap_word` is the only §8-bearing question type (`mastery.MASTERY_QTYPES`) and it
+is the one type whose text no model writes: the prompt is a frame from
+`PROMPT_FRAMES` filled with a cue `_cue_index` picked from the precomputed
+allowlist, and every option is a word of the story, already through the gate and
+through §13 with the body. `LAYER3_EXEMPT_QTYPES` has said exactly that since
+Phase 4. The model's only contribution is *choosing* three words from a closed
+list this module composed — and at stages 7-10 it chose badly, or ran out of
+retries, on 12 of 113 stories while a legal choice was sitting in the list.
+
+So after the retry budget is spent, the node makes the choice itself. This is not
+a relaxation and it is important to be exact about why: the proposer changes, the
+judge does not. The synthesised draft goes through `check_tap_word` unmodified —
+same "exactly one option can be correct" proof, same 7.14 cue rule, same gate on
+every option, same length rule — and is discarded if it fails. §13 layer 1 still
+reads every string in `_moderate_questions`; layer 3 still reads only
+model-authored prose, which this is not, which is the pre-existing rule and not a
+new exemption. Cost: zero tokens, zero API calls.
+
+`QuestionSet.tap_word_target` gains `source: "model" | "derived"`, persisted into
+`gen_meta.enrichment`, so §14 can measure how often the model needed catching
+rather than that it was caught.
+
+**8.55 — The `mcq2` prompt stops steering the model into the check it then fails.**
+§0's rule is to fix the prompt, never the gate, and this is a prompt defect.
+
+`story_supports` decides an `mcq2` by SUBSEQUENCE: every word of the option must
+appear in the story, in the story's order. `QUESTION_RULES` tells the model to
+"Build the false answer from the story's words too, then change what it claims —
+swap who did what, **or say the opposite**." Saying the opposite in English means
+inserting or deleting `not`, which leaves every other word in the story's own
+order — so the false answer is still a subsequence, and the check correctly refuses
+it as "also true in the story". The instruction and the check disagree, and the
+instruction is the one that is wrong. Live evidence, all six stories: 7291's
+rejected distractor was `"She did want to stay far from home."` against a story
+saying `"The rabbit did not want to stay far from home."`
+
+The rule the model is given now states the property it has to satisfy — the false
+answer's words must not read off the story in the story's order — names the `not`
+trick as the specific thing that fails, and asks for a reordering instead.
+`story_supports` is not touched.
+
+One consequence is recorded rather than fixed, because fixing it would weaken the
+check: subsequence matching is *conservative in the wrong direction* for a
+distractor. `"She did want to stay far from home."` is genuinely false in 7291 and
+the check calls it supported, because dropping `not` is invisible to a
+word-order test. So a correct question was lost, not a wrong one admitted, and the
+failure direction is the safe one (§6's asymmetry argument). Making the check
+semantic would mean asking a model whether a sentence is entailed by a story,
+which replaces a decidable property with a judgement — the trade §11.3 was
+designed to avoid. **ASSUMED**: the prompt fix recovers most of this yield; the
+tap_word work above is what actually guarantees a story has a question, and the
+`mcq2` rate is measured after the fact rather than promised here.
+
+**8.56 — The six existing stories are repaired through `--backfill --only`, not
+deleted, and not by hand.**
+
+`answers.question_id` is `ON DELETE CASCADE` and a `tap_word` answer is the row
+§8's `gpc_stats` was computed from; an agent has already destroyed one that way
+(7.15). `--backfill` is the path that already knows this: it takes
+`_remoderate_questions` for any story a child has answered and never issues a
+DELETE that can cascade. Running it `--only 7291,7297,7299,7302,7332,7334` also
+re-measures the yield fix against the exact six stories that motivated it, which a
+hand-written INSERT would not. Cost is six Haiku question calls plus their §13
+pass.
+
+**And `_UNENRICHED_SQL` gains the §8 half of the same predicate, because the live
+pool turned out to hold a second population the first one could not reach.** After
+the six were repaired and the defect query returned zero, a live sweep of all 36
+pairs through the real endpoint found three serves returning an `mcq2` and no
+`tap_word`. Those stories are servable and are NOT dead-end sessions — the child
+gets a question screen — but `mastery.MASTERY_QTYPES` is `("tap_word",)`, so they
+move no `gpc_stats` counter and contribute nothing toward promotion, which is the
+same harm this whole block is about arriving by a quieter route. Six servable
+stories are in that state (1684 at stage 4, 7305/7307 at stage 8, 7340 at stage 10,
+7341/7343 at stage 11), and **five of the six dropped `tap_word` for the identical
+"close to the same length" reason** — so they are 8.53's population exactly, and
+the measurement says all six can now produce one.
+
+`--backfill` could not reach any of them, and the reason is worth naming: they have
+questions AND a §13 receipt, so both clauses of `_UNENRICHED_SQL` are satisfied.
+That is precisely the forward-only trap this module's own docstring is about — the
+§13 question pass shipped matching only `NOT EXISTS (questions)` and thereby
+skipped the nine stories that most needed it. A fix that cannot reach the rows the
+fix is for is not a fix. So "unenriched" now also means **"servable with no
+mastery-bearing question"**, spelled from `MASTERY_QTYPES` rather than from the
+literal `'tap_word'` so the sweep and §8's grader cannot drift.
+
+Idempotence is preserved the way `_UNGRADED_BODY_SQL` preserves it (6.25) — by a
+receipt rather than by hope. `describe_target` writes `source: null` when nothing
+wrote a tap-a-word question, so a story the sweep has already tried and failed on
+carries the key `source` with a null value, and the predicate excludes it. A story
+selected once therefore either gains a `tap_word` (excluded by the first clause) or
+records that it could not (excluded by the second). **A second run selects nothing
+and spends nothing** — asserted, not assumed.
+
+**8.77 — `grammar_note` is emitted BEFORE `well_formed`, and the field order is the
+mechanism. This is the fix that actually closed the false positives; 8.70's prompt
+work alone did not.**
+Measuring 8.70 was what found this. With the HELPER TEST in place and the schema
+unchanged, `approve/unquoted-dialogue-statement` failed **3 of 3** runs — and the
+notes are the diagnosis, verbatim from the live judge:
+
+> `"She did see the burrow"` — see should be plain form after "did"; change to
+> `"She did see the burrow"` is incorrect. **Actually, this is correct: "did" +
+> plain verb "see". Re-evaluating: well-formed is true.**
+
+The judge reached the right answer one field too late. `ModerationVerdict` declared
+`well_formed` before `grammar_note`, structured output is generated in schema
+order, so the boolean was committed and the reasoning happened afterwards in the
+note. The prompt's oldest grammar gate — *"If you cannot quote the broken sentence
+and give the exact replacement word, the story is well-formed"* — **cannot bind at
+all** unless the note exists before the boolean does. It had been unenforceable
+since 4.12.
+
+Swapping the two declarations fixed all three residual grammar false positives at
+once (`unquoted-dialogue-statement` 3/3 -> 0/2, `semantics-went-back-off` 2/3 ->
+0/2, `grammar-did-not-stop` 2/3 -> 0/2) with no other change. `grammar_note` is now
+the derivation and `well_formed` is its conclusion, and the field descriptions say
+so, because the schema is the part of the contract the model reads.
+
+Two consequences handled rather than absorbed:
+
+- The note is now the judge's **working**, so it needs a way to say "nothing
+  found": `none`. `moderate()` normalises `none`/`n/a`/empty to `""` and drops the
+  note entirely on a well-formed story, because `warm.persist` and the §14 report
+  both treat a non-empty `grammar_note` as evidence of a defect and that contract
+  is older than this reordering.
+- **The normalisation must not become a route to approval.** A judge that says
+  `well_formed=false` and writes `none` is self-contradictory, and STATE invariant
+  4 settles it: the resolution is still REJECT, with the existing "sentence is not
+  well-formed English" fallback. There is a test for exactly that, because "we
+  could not tell" reading as "it was fine" is the failure invariant 4 exists for.
+
+The content half (`approved` before `reason`) is deliberately NOT reordered. It has
+no measured defect, 3.10 calibrated it over two rounds, and churning a working
+judgement to match a fixed one is how calibration gets lost.
+
+**8.78 — The agreement bullet taught only one direction, and the judge duly made an
+agreement error of its own.**
+Found in the same measurement. The bullet read *"Subject and verb disagree: "A
+dragon sit in a cave." (sit -> sits)"* — one worked example, singular subject, so
+the only lesson available was *fix agreement by adding "-s"*. The judge then
+proposed `help -> helps` for *"Its wings help it."* in 2 of 3 runs, which is
+ungrammatical. `MODERATION_SYSTEM` already carried that sentence as a carve-out,
+but framed as a TENSE carve-out (*do not ask for "helped"*), so it never fired
+against an AGREEMENT complaint.
+
+Aggravated by 8.70: the HELPER TEST introduced the phrase "plain form", and the
+judge carried it across to a sentence with no helper word in it — *"the plural
+subject 'wings' requires the plain verb form"*. Two lines, both narrow: the HELPER
+TEST is scoped explicitly to the verb standing directly after one of its seven
+words and told to say nothing about agreement, and the agreement bullet now states
+both directions with the judge's own wrong correction named in it (`"wings helps"`
+would be the error). One run also showed the substitution test being executed
+incorrectly — *"Its dogs helps it. This is broken."* — the noun swapped AND the
+verb edited, so the test now says "change nothing else — not the verb, not its
+ending, not its number."
+
+Both reject cases for agreement stay in the fixture and both must still fail:
+`"A dragon sit in a cave."` (one thing, plain verb) and `"The cats runs fast."`
+(many things, "-s" verb). The bullet is stated in both directions precisely so that
+neither can be bought with the other.
+
+**8.79 — Naming a construction made it salient, and the judge began inverting the
+new rule. Two observed cases attached to it, and the note format made mandatory.**
+The last thing the measurement surfaced, and the least anticipated: after the
+HELPER TEST named `did` + plain verb, the judge started asking for `see -> saw`
+after `did` — the precise inversion the rule forbids — in 2 of 4 runs, in two
+different stories (`"She did see the burrow."` and `"She did see stars every
+day."`). A rule that names a pattern raises the pattern's salience in both
+directions; that is a cost of 8.70's approach and it is paid here rather than
+denied. Fixed the way 8.20 fixed its own: the observed sentence goes into the
+HELPER TEST's CORRECT column verbatim, `"did saw"` joins `"did not stopped"` and
+`"can heard"` in the list of wrong English, and the prompt says plainly that asking
+for "saw" after "did" or "could" after "can" is the commonest way to get this
+backwards.
+
+Separately, 1 of 4 runs returned `well_formed=false` with the note `"The rocket did
+not stop."` and **no correction in it at all** — the sentence quoted, nothing
+proposed. That walks straight past the gate 8.77 had just made bindable, because
+"give the exact replacement word" is a request and not a format. So the note now
+has a REQUIRED FORMAT: it must contain an arrow, `wrong_word -> right_word`, and a
+quoted sentence with no arrow after it is not a grammar finding. That is something
+the judge can check about its own output before it commits the boolean.
+
+Deliberately NOT done: enforcing the arrow in code. Detecting "does this note name
+a replacement" is brittle text matching, and the failure mode of getting it wrong
+is approving a story nobody vouched for — the exact trade STATE invariant 4
+forbids. The requirement is stated where the judge can act on it and the code
+still fails closed.
+
+**8.80 — What the measurement actually says, in both directions, over multiple
+runs. This table is the deliverable, not the fixes above.**
+All figures are the live Haiku judge over the 40-case fixture. BEFORE is the prompt
+at git HEAD with `hurt` restored to the blocklist; AFTER is the working tree.
+Multiple runs because the judge is stochastic and a single clean run is not
+evidence — the residual false positives below did not repeat in the same places.
+
+| direction | BEFORE (2 runs) | AFTER (3 runs) |
+|---|---|---|
+| false positives — a good story thrown away, of 23 scored must-approve | **5, 4** | **0, 0, 1** |
+| ...of which the GRAMMAR half fired on a good story (24 cases incl. grammar-only) | **3, 1** | **0, 0, 1** |
+| false negatives — a bad story reaching a child, of 16 must-reject | 0, 0 | **0, 0, 0** |
+| correct rejects, of 16 must-reject | 16, 16 | **16, 16, 16** |
+| must-reject cases that died at layer 1 instead of at the judge | 1 (`hurt`) | **0** |
+
+Every case the warm run measured is fixed and stayed fixed: the three `hurt`
+stories, `"It can hear the wind outside."` and `"The rocket did not stop."` fail in
+both BEFORE runs and pass in all three AFTER runs. Two of the three AFTER runs are
+perfectly clean in both directions.
+
+**The one residual, named rather than rounded away: `"Its wings help it."`, 1 run in
+3.** The judge proposes `help -> helps` with the reason *"one subject takes -s
+form"*, treating a plural as a singular. This is not new and is not a cost of this
+work — `tests/test_grammar.py` has recorded since 6.27 that *"one of its own
+corrections ('wings helps') was itself ungrammatical"*, and 8.78's rewritten
+agreement bullet took it from 2 runs in 3 down to 1. It is left as a measured
+residual instead of being chased further, because the next thing to try is another
+prompt line and the last four of those each traded one false positive for a
+different one (8.77-8.79, 8.82). Its cost is one story going back to the pool.
+
+A second, smaller residual for the record: `reject/ungrammatical-coordinated-tense`
+(*"Dan sat and admits it acts mad."*) is caught by the CONTENT half rather than the
+grammar half in roughly 1 run in 3, so the story is correctly rejected for the wrong
+reason. `fn` is 0 in every run — no bad story reaches a child — but the fixture's
+grammar-half assertion on that case is the flakiest thing in the file.
+
+The intermediate states are recorded in 8.77-8.79 and 8.82 rather than hidden,
+because **four of them were REGRESSIONS introduced by fixing 8.70**, each caught
+only by re-running the WHOLE fixture rather than the case being worked on. That is
+the entire argument for STATE invariant 5, and this section is the strongest
+evidence for it in the repository: every single pass at the grammar prompt broke
+something that had been passing.
+
+**The trap held.** `"He did not came back."` — the sentence that shipped to a child
+— fails in every run, and so do the four auxiliary rejects added beside it, while
+`"The rocket did not stop."` passes. Same construction, opposite verdicts, which is
+the only shape of result worth having here.
+
+**8.81 — `make precompute` after the blocklist change, reported rather than
+inferred.**
+Re-run required by 8.76. **64,290 -> 64,296 rows** across 12 stages in 1.52s — the
++6 is `hurt` at stages 7-12 and nothing else, which is what `min_stage(hurt) = 7`
+predicts.
+
+| stage | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| words | **157** | 1,734 | 2,593 | 3,127 | 3,658 | 5,392 | 5,845 | 6,470 | 8,515 | 8,610 | 8,835 | 9,360 |
+
+Stage 1 is the tightest at **157**, unchanged, above §18's **150** floor; no stage
+is below it. Checked against the live table rather than the computed rows:
+**0 of the 223 blocklisted words appear in `allowed_words`**, and `hurt` now holds
+its 6 rows.
+
+**8.82 — The arrow requirement (8.79) legitimised the false positive 8.71 exists to
+stop, and the fix belongs in the HELPER TEST rather than the note format.**
+The regression that proves re-running the whole fixture is not optional. 8.79 made
+`grammar_note` a terse `wrong_word -> right_word`. `can -> could` is a perfectly
+well-formed arrow — so the format change **removed the field where the judge had
+been writing its justification**, which is the only thing 8.71's tense self-check
+has to inspect. `approve/modal-can-among-past-sentences`, clean for two rounds, went
+straight back to failing **2 runs in 3**, with the note reduced to exactly
+`It can hear the wind outside. -> It could hear the wind outside.` and no reason
+attached to catch.
+
+Two changes, and the mechanical one is the one that worked:
+
+- **In the HELPER TEST: never change the helper WORD ITSELF.** `can -> could`,
+  `will -> would`, `may -> might`, `do -> did` and `does -> did` are edits to the
+  TENSE of a helper that was already correct, and a correct helper is not a wrong
+  word, so none of them can ever be the arrow. Story 7317's sentence is named as
+  well-formed "in any story, however much past tense surrounds it" — the judge's own
+  justification refuted at the point it decides. 3 of 3 clean afterwards.
+- **The note must carry an arrow AND a reason.** Requiring the arrow alone was the
+  defect; the reason is what 8.71 reads back. "An arrow with no reason is one you
+  have not checked."
+
+And one more of the same shape, from the run after that: the judge asked for
+`did see -> saw` calling it an *"unnecessary emphatic did"*. Whether the emphasis
+was needed is word choice, so the emphatic-"did" carve-out now says so in the
+judge's own words — an emphatic "did" the story did not NEED is still correct, and
+`"did see -> saw"` is never the arrow.
+
+**The pattern across 8.77-8.79 and this entry, worth more than any of the individual
+fixes: every pass at this prompt broke something that had been passing, and every
+one was caught by the full 40-case fixture rather than by the case being worked on.**
+A judge prompt is not a list of rules that compose. Naming a construction raises its
+salience in BOTH directions, and tightening an output format can silently delete the
+evidence another rule depends on.
+
+**8.57 — What the changes measured, before and after, per stage.**
+
+The yield question is "could this story have produced a `tap_word`", and it is
+answerable with no API call: replay `sound_targets` over the persisted text and
+enumerate every triple the closed offer list admits. Run over all 113 servable
+stories, under the UNCHANGED `TAP_LEN_SPREAD = 2` throughout. `tapRow` is what the
+pool actually held before any of this.
+
+| stage | stories | tapRow (had one) | answerable BEFORE | answerable AFTER |
+|---|---|---|---|---|
+| 1-6 | 63 | 62 | 63 | 63 |
+| 7 | 8 | 5 | 8 | 8 |
+| 8 | 8 | 5 | **4** | **8** |
+| 9 | 8 | 8 | 8 | 8 |
+| 10 | 9 | 6 | 9 | 9 |
+| 11 | 8 | 6 | 8 | 8 |
+| 12 | 9 | 9 | 9 | 9 |
+| **all** | **113** | **101** | **109** | **113** |
+
+**PROVED.** Three things follow, and the middle one is the finding.
+
+- The model was dropping `tap_word` on **12 of 113 stories while the list it was
+  handed admitted a legal answer** — 89% actual against a 96% ceiling. That gap is
+  a prompt-and-menu defect, not a constraint problem, which is why relaxing the
+  length rule was the wrong instinct (8.53).
+- Stage 8 is the only stage where the CEILING moved, 4 → 8, and it moved because
+  of the tier rule rather than the length rule.
+- §8 evidence quality went UP, not down: stories whose best answerable sound still
+  earns current-stage evidence rose from **86 to 90 of 113**, because stage 8's
+  four newly-answerable stories all land in `current_stage_word`.
+
+The stronger property the fallback rests on was measured separately: for all
+**460** (story, sound) pairs the fixed `sound_targets` offers, the triple
+`tap_word_options` composes is accepted by the unchanged `check_tap_word` —
+**0 refusals**. So "the menu is a promise" is a measurement, not a design claim.
+
+Live confirmation, on the six stories that caused this (`--backfill --only
+7291,7297,7299,7302,7332,7334`, **$0.0525**):
+
+| story | stage | before | after | tap_word source | earns §8 evidence |
+|---|---|---|---|---|---|
+| 7291 | 7 | 0 questions | tap_word + mcq2 | model | yes |
+| 7297 | 7 | 0 questions | tap_word + mcq2 | model | yes |
+| 7299 | 7 | 0 questions | tap_word + mcq2 | model | yes |
+| 7302 | 8 | 0 questions | tap_word | model | yes |
+| 7332 | 10 | 0 questions | tap_word + mcq2 | model | yes |
+| 7334 | 10 | 0 questions | tap_word + mcq2 | model | yes |
+
+Two things worth stating because they were not the expected result. First, **all
+six came from the model** — the honest menu plus the length rule stated in the
+prompt was enough, and the 8.54 fallback never fired. It stays, because "the model
+happened to manage it six times" is not a guarantee and a dead-end session is what
+the absence of one costs. Second, `mcq2` went from **0 of 6 to 5 of 6** on exactly
+the stories that had failed it, which is the 8.55 prompt fix; 7302's remaining
+`mcq2` failure is two NEW reasons (`find` is undecodable at stage 8, and "a big
+rock" genuinely is true in the story), not the negation trap.
+
+The defect query returns **0 rows**. `--check-coverage` went from 28 to 31 of 36
+pairs at target; the five still short hold two `warm` stories each and are a story
+shortfall, not a question one (**PROVED**: `status` counts per pair).
+
+**8.58 — 8.54's own downside, closed rather than accepted: an outage must not be
+able to hide inside the fallback.**
+
+A derived `tap_word` keeps a story out of the dead-end state, and that is exactly
+what makes it capable of muffling an alarm. Three unparseable responses used to
+leave 0 questions, which `enrichment_problems` reports and `_finish` turns into a
+non-zero exit; they would now leave 1 and pass quietly. That is a real loss of the
+control the Phase 4 audit installed, and it was surfaced by an existing test
+(`test_an_unparseable_response_fails_closed`) rather than reasoned out in advance.
+
+The threshold is deliberately not "was anything derived". The measured rate at
+which the model needs catching is ~11% of stories, so failing every run on it would
+make the exit code worthless — alarm fatigue is how a control stops being one. The
+condition is **"did the model contribute nothing that survived"**, which is §7's
+api_fail signature: `enrichment_problems` fails a story whose `questions_written`
+are all in `questions_derived`. A story where the model wrote a usable `mcq2` and
+only the phonics question was composed is printed per story and counted in the run
+summary, and does not fail the run.
+
+**8.59 — Five existing tests changed, and the justification for each, because a
+test edit with no recorded reason is indistinguishable from silencing the witness.**
+
+Two needed no assertion touched at all.
+
+- **`test_story_stage_binding.py::_insert_story` gains a `questions` row.** This is
+  the one that matters, and it was nearly missed. The fixture built a story with no
+  questions, so after 8.50 `_SERVE_SQL` excluded it before any of the gates those
+  tests are about could run — which made
+  `test_an_undecodable_story_in_the_pool_is_never_served` pass **vacuously**: green,
+  still carrying its own "sabotage-checked" note, and proving nothing. My change
+  had quietly disarmed a child-safety test. **PROVED both ways**: with the question
+  row present, deleting the `_is_decodable_for` branch turns it red again ("the
+  serve-time gate let through a story measuring 36.4% decodable"); without it, the
+  test stays green through that sabotage. No assertion was modified.
+- **`test_warm_coverage.py::test_the_coverage_gate_counts_what_the_serving_path_serves`**
+  asserted `"WHERE" not in str(_COVERAGE_SQL)`. That substring was a PROXY for the
+  requirement its own comment states — the status filter must be in the LEFT JOIN's
+  ON clause, because a pair with no stories has to come back as a row with 0.
+  `ANSWERABLE_SQL` joined that same ON clause as a correlated `EXISTS (SELECT 1 …
+  WHERE …)`, which satisfies the requirement while containing the word. The proxy
+  over-approximated, so it is replaced by one that tests PLACEMENT (subqueries
+  stripped innermost-first, then no `WHERE` at top level) — a stronger check of the
+  same requirement, not a looser one — and the behavioural half now has a real test
+  next to it in `test_dead_end_stories.py`.
+
+Three were in `test_questions.py`, and one of those is a contract that was
+deliberately replaced.
+
+- **`test_the_node_reports_which_tier_produced_the_target`** compared
+  `tap_word_target` to an exact dict that gained two keys. Kept as exact equality
+  and the new keys added, so the assertion is widened in coverage and not loosened
+  in form.
+- **`test_a_question_that_never_validates_is_dropped` → `test_a_tap_word_the_model_
+  never_gets_right_is_composed_here_instead`.** It asserted that a model which
+  never writes a valid `tap_word` leaves the story without one — which is precisely
+  the behaviour six live stories were, and precisely what 8.54 replaces. Both
+  propositions it carried survive and one is strengthened: "retries are bounded" is
+  unchanged, and "fewer questions beats a wrong one" is now asserted DIRECTLY (the
+  surviving question is checked not to be the model's rejected draft, and its
+  answer to genuinely start with the target grapheme) rather than inferred from the
+  absence of a question, which is the weaker form. The original proposition is
+  additionally kept where it is still reachable, in a new
+  `test_a_never_valid_mcq2_is_still_dropped` — `mcq2` is model-authored prose, there
+  is no closed list to compose it from, and it is still dropped.
+- **`test_an_unparseable_response_fails_closed`** asserted `result.questions == []`.
+  "Fails closed" is untouched — no byte of the model's output is used on any
+  attempt — but an empty list is no longer how to say it, so the test now asserts
+  the thing itself: the parse failure is recorded for both types, nothing the model
+  returned became a question, and the survivor is marked `derived`. The loudness
+  that would otherwise have been lost is 8.58, tested separately.
+
+**Not done, and stated rather than left to be discovered.** `story_supports`'
+subsequence test is conservative in the wrong direction for a distractor (8.55) and
+was NOT changed; the `mcq2` rate is measured after the fact, not promised. No third
+question type was added — `qtype` is a Postgres enum and §11.3 fixes the inventory
+at two, and the measurement above says the yield problem did not need one.
+
+**Two test fixtures now write a `questions` row, and both cases were nearly
+missed.** `test_stories_api.py::Pool.story` and
+`test_story_stage_binding.py::_insert_story` both built stories with none, so after
+8.50 `_SERVE_SQL` excluded them before the ladder, rotation, DTO and decodability
+behaviour those suites are about could be provoked at all. Left alone, that does
+not merely break tests — it makes them pass or fail for a reason none of them
+names, and it had already turned
+`test_an_undecodable_story_in_the_pool_is_never_served` into a vacuous green while
+it still carried its own "sabotage-checked" note. Both fixtures now build the row
+by calling `check_tap_word`, so what they call servable is what the node would have
+persisted. The general lesson, which is the same one 8.50 is about from the other
+end: **a predicate added at a serving boundary silently re-scopes every fixture
+that did not satisfy it**, and the fixtures that go quiet are more dangerous than
+the ones that go red.
+
+**Four pre-existing ERRORs in `test_stories_api.py` are unrelated collateral of the
+full `make warm`, and they are the honest gap in this report's gate.**
+`Pool.start()` needs a stage band with nothing at or above it, and stage 12 is now
+populated, so `assert self.base + 1 <= MAX_STAGE` fails at setup. **PROVED to be
+pool CONTENT and not code**: against a private `pg_dump` copy with the stage-11/12
+servable stories removed, the whole suite is **775 passed, 2 skipped, 0 failures, 0
+errors** — all four run and pass, including the answer-key leak sweep. Against the
+shared database it is **771 passed, 2 skipped, 4 errors**, from a baseline of 746
+passed, 2 skipped, 4 errors. The fixture's design — it wants an empty band, and a
+correctly-full pool no longer has one — is a decision for whoever owns that suite,
+not something to change underneath it while another agent is editing tests in the
+same tree. One deadlock (`psycopg.errors.DeadlockDetected`, two processes) appeared
+in one shared-database run and not in the private copy, which is exactly the
+concurrent-writer symptom `docs/STATE.md` documents; `test_auth.py` passes 149/149
+alone.
+
+## Phase 8 — the fixture that assumed the pool would never be full
+
+Numbered 8.90-8.94 to stay clear of every block above. Logged **before** the
+changes, per §0. Every claim marked **PROVED** was measured in this repo with the
+command shown; everything else is reasoning and is labelled **ASSUMED**.
+
+The defect, and it is the one the block above ended by flagging.
+`tests/test_stories_api.py::Pool.start` read the live pool for the highest stage
+holding a servable story, placed its fixture one stage above that, and then
+asserted the band it needed existed:
+
+```python
+self.base = int(top) + 1
+assert self.base + 1 <= MAX_STAGE, (
+    f"no free stage band above {top}: the ladder's lower rungs cannot be "
+    "provoked without a stage that holds nothing")
+```
+
+A full `make warm` fills all twelve stages, and that is not an accident of one
+operator's database — it is the product's own definition of a correct pool.
+`make warm-check` is the gate and it exits non-zero while any of the 36
+(stage,theme) pairs holds fewer than 3 servable stories, stage 12 included. So the
+fixture's precondition can only hold while `warm-check` is RED. It is now false
+and will stay false. **PROVED** against a private `pg_dump` copy of the live
+database (`sfjob890`, taken before any edit here, per STATE.md's recipe because
+`make warm` and `make eval` are both running against the shared one):
+
+```
+stage 1..12 servable: 11 12 10 11 12 9 9 8 8 9 8 9   (116 rows, all 116 answerable)
+tests/test_stories_api.py -p no:randomly  ->  14 passed, 4 errors in 0.84s
+AssertionError: no free stage band above 12 ... assert (13 + 1) <= 12
+```
+
+All four failures are ERRORs in fixture setup, so not one assertion about the
+product ever ran.
+
+**8.90 — Through the `justify-test-edit` gate: TEST IS WRONG, and it is the
+FIXTURE PRECONDITION that is wrong, not one line of what the four tests assert.**
+
+ASSERTION: `assert self.base + 1 <= MAX_STAGE` over `base = max(servable
+stage_id) + 1`. What it claims about the product: *there are at least two
+consecutive stages at the top of §9's 1..12 ladder that hold no servable story.*
+That is a claim about the operator's database, not about Story Forge.
+
+ORIGIN: commit `559f102` (`git log -S "no free stage band above" --
+services/api/tests/test_stories_api.py` returns exactly one commit), DEVIATIONS
+7.16 — the JOB-A2 fix that made these four tests own their fixture rows. The
+requirement it was serving is real and is cited there: §7's rungs 3 and 4
+(nearest LOWER stage) and STATE invariant 6 (the ladder never climbs) cannot be
+provoked at all unless the requested stage holds nothing. The assertion is the
+MECHANISM 7.16 chose for that, not the requirement.
+
+REVERT CHECK: nothing to revert. The tree was clean at `538a08b` and the four
+ERRORs are already there; they are caused by `make warm`, not by any change of
+mine. This is the third time in this repo a test has encoded a fact about the
+database as the contract (6.14, 7.16, and now this) and the same answer applies:
+the fact is not a fact any more.
+
+EVIDENCE the code is right by independent means: the endpoint is untouched and
+`test_fallback_never_serves_a_story_above_the_requested_stage` — invariant 6 over
+the LIVE pool, no fixture at all — is green through the whole episode. The four
+tests never reach `_SERVE_SQL`.
+
+BLAST RADIUS: `pool.base` is read by exactly the four tests; `MAX_STAGE` is used
+by nothing else; no product code depends on either. `_pool()` and the eleven
+tests that do not take the `pool` fixture are untouched.
+
+ACTION: the precondition and the live-pool probe are both deleted, and the empty
+stage band they hoped to FIND is MANUFACTURED instead (8.91). Every ladder
+assertion in all four tests is byte-for-byte unchanged, including
+`assert body["id"] == below, "the ladder climbed a stage (STATE invariant 6)"`.
+
+**8.91 — Isolation is now a rolled-back transaction the API shares, not an empty
+stage nobody promised.**
+
+`Pool` takes a connection out of the API's own engine, opens one transaction on it
+at **REPEATABLE READ**, and overrides FastAPI's `get_session` so the endpoint runs
+inside that same transaction. Teardown is `rollback()`. Nothing is committed and
+nothing is deleted, which is what makes the next line safe: the exclusive fixture
+opens with
+
+```sql
+UPDATE stories SET status = 'rejected' WHERE status = ANY(:servable);
+```
+
+so the fixture owns the entire visible pool, and `base` becomes the **constant 6**
+instead of a probe. The live pool is not read for anything, ever — which is the
+distinction 7.16 drew and then only half-applied: it stopped reading the pool for
+expected VALUES but still read it to place the fixture, and placement is where the
+assumption survived.
+
+Four consequences, stated because they are behaviour changes and not just plumbing:
+
+- The old fixture COMMITTED its rows. For the length of each test the shared
+  database therefore held a `zz-fixture-*` theme, which is 12 (stage,theme) pairs
+  holding zero stories — i.e. the old fixture could turn a concurrent
+  `make warm-check` red. It cannot now; nothing it writes is ever visible outside
+  its own transaction.
+- These four tests no longer mutate `last_served_at` on any real row. The module
+  docstring's "that column exists to be mutated" still describes the rotation
+  tests, which are not `pool` tests.
+- REPEATABLE READ freezes the snapshot at the fixture's first statement, so a
+  story `make warm` commits mid-test cannot climb into the ladder underneath the
+  test. Under READ COMMITTED it could, and the operator is running `make warm`
+  right now. The cost is honest: if a concurrent transaction updates one of the
+  rows the hide-UPDATE touches in the same instant, Postgres raises a
+  serialization failure — a loud, retryable error instead of a silent flake.
+- The hide-UPDATE holds row locks on the servable pool until rollback (sub-second
+  per test). A concurrent `warm --backfill` writing one of those rows blocks for
+  that long rather than failing. Accepted, and named.
+
+The fixture then asserts the isolation it just claimed — `count(*)` of servable
+stories is 0 before control reaches the test — so the mechanism is measured rather
+than assumed. Without that, an override that silently stopped taking effect would
+leave the tests green and meaningless.
+
+**8.92 — The trap in the same change, which is 8.50's `_insert_story` trap again:
+hiding the pool would have gutted the answer-key sweep while it stayed green.**
+
+`test_a_real_node_produced_question_never_ships_its_answer_key` sweeps EVERY live
+servable `tap_word` row, and DEVIATIONS 7.18 is explicit that this is its strength
+— it caught 7.14 because it reads whatever the node actually wrote into the real
+pool, not a payload a test typed. Moving all of those rows to `rejected` would
+have reduced the sweep to the two rows the test writes itself, and the test would
+have passed. So there are two fixtures over one mechanism: `pool` (exclusive,
+owns the visible pool) for the three request-path tests, and `shared_pool`
+(transactional, live rows still visible) for the sweep. That test never calls
+`POST /api/stories/request` — it fetches by id — so it never needed ladder
+isolation, only rows of its own.
+
+**8.93 — Rejected alternatives, with the reason each fails.**
+
+- **A private theme alone.** It is enough for rung 1: within the `stage_id =
+  requested` tier `_SERVE_SQL` sorts `(theme_id = :theme) DESC` and only fixture
+  stories carry a `zz-fixture-*` theme. It does nothing for rungs 2-4, because
+  §7's ladder falls back ACROSS themes on purpose. Rung 2's test asks for an
+  EMPTY private theme, at which point every real story at that stage ties with the
+  fixture on the theme key and the tiebreak is `last_served_at ASC NULLS FIRST, id
+  ASC` — and **PROVED** on the copy: 17 of 116 servable stories have
+  `last_served_at IS NULL`, 2 of them at stage 6, while every fixture row gets an
+  id above `max(id) = 8936`. A real story wins. Rungs 3 and 4 cannot be reached at
+  all while every stage holds something, because a request at stage S is answered
+  by the highest stage <= S, which is S.
+- **Commit the hide and restore the statuses in a `finally`.** It writes to the
+  shared pool. A crash between the two commits leaves every servable story
+  `rejected` — an empty pool for every reader — and `make warm`, `warm-check` and
+  `make eval` would all see it. Unacceptable while any of them may be running,
+  which is always.
+- **A private database or schema per test.** `storyforge.db.engine` is
+  module-level and the app binds to it at import, so re-pointing it per test is a
+  larger and riskier change than a transaction, and migrating + seeding a fresh
+  database per test costs seconds per test.
+- **A temp table shadowing `stories` through `pg_temp`.** Lock-free and fully
+  isolating, and rejected because it changes WHICH TABLE the endpoint queries: the
+  tests would stop exercising the real schema, and permanent-table FKs cannot
+  reference temp rows.
+- **DELETE the live rows inside the doomed transaction** instead of restatusing
+  them. `story_segments`, `questions`, `readings` and `answers` all cascade off
+  `stories`; it is a far larger write for no gain, and the predicate
+  `_SERVE_SQL` actually reads is `status`.
+
+**8.94 — What is NOT fixed here, stated rather than left to be discovered.**
+
+The four `pool` tests now pass against any pool, empty or full. The other eleven
+tests in the file still require `make seed && make warm`, exactly as the module
+docstring has always said, and that is a decision and not an oversight:
+`test_least_recently_served_rotation` needs two real stage-1 stories,
+`test_rejected_stories_are_never_served` needs a real `rejected` row,
+`test_fallback_never_serves_a_story_above_the_requested_stage` sweeps the live
+pool for invariant 6, and `test_a_real_node_produced_question_never_ships_its_
+answer_key` sweeps it for answer-key leaks. Converting those to fixture-owned
+data would delete the live sweeps that 7.18 defends and that caught 7.14 — it
+would be the weakening this whole block exists to refuse. `FIXTURE_BASE_STAGE = 6`
+is a constant with one requirement, that a stage exist below and above it inside
+1..12, and it is asserted at module scope rather than left as a comment.
+
+**Measured, after the change. Every number below is from a private `pg_dump` copy
+of the live database, because `make warm` and `make eval` were writing the shared
+one throughout (STATE.md's recipe, and the reason 8.47 exists).**
+
+Two copies, deliberately at the two extremes the fixture used to sit between:
+`sfjob890` — the live pool, **all twelve stages populated, 116 servable and all
+116 answerable** — and `sfempty890`, the same database after `TRUNCATE stories
+CASCADE`: **0 stories, 0 questions, 12 stages and 3 themes still seeded.**
+
+- **PROVED — the four tests hold at both extremes.** `tests/test_stories_api.py`
+  went from `14 passed, 4 errors` to **`18 passed`** on the full copy, and the four
+  `pool`/`shared_pool` tests pass on the EMPTY copy as well. The old fixture could
+  not run against either: it needed a pool that was neither.
+- **PROVED — no real row is written.** Running only the four tests leaves
+  `md5(string_agg(id||status||last_served_at))` over all 348 `stories` rows
+  **identical**, with `themes`/`questions`/`story_segments` at 3/190/2304 before
+  and after and **0 `zz-fixture%` themes left behind**. Over the whole file that
+  md5 DOES move — that is the eleven non-`pool` tests stamping `last_served_at`,
+  which they have always done and which 8.94 keeps.
+- **PROVED — the mechanism is real, not nominal.** Probed inside the fixture
+  against the live engine: `SHOW transaction_isolation` → `repeatable read`, the
+  hide moved **116** rows, and `get_session in app.dependency_overrides` → True.
+- **PROVED — the ladder is still what these tests test.** Sabotage 1, the one that
+  matters: `stage_id <= :stage` → `stage_id <= greatest(:stage, 12)`, so the ladder
+  may CLIMB. `test_a_stage_with_no_pool_falls_back_to_the_nearest_lower_stage`
+  fails with its own words — `AssertionError: the ladder climbed a stage (STATE
+  invariant 6)` — **on the full copy AND on the empty one**, which is the whole
+  point: the isolation, not the live pool, is what makes the invariant testable.
+  Ten of the file's eighteen tests go red under it on the full copy.
+- **PROVED — rung order too.** Sabotage 2: `ORDER BY stage_id DESC` → `ASC`
+  (nearest-lower becomes farthest-lower). Both ladder tests go red on both copies.
+- **PROVED — the isolation itself is load-bearing.** Sabotage 3: delete the
+  `app.dependency_overrides[get_session] = _shared_session` line. All four tests
+  fail, because the endpoint can no longer see rows nobody committed. A fixture
+  whose isolation could be removed without anything going red would be decoration.
+- **PROVED — order independence, which is new.** 18/18 three times under
+  `-p no:randomly` and three times under pytest-randomly's own seeds. The DTO
+  test's docstring records a real flake — it "passed in a whole-file run and
+  failed under `-x`" because `_SERVE_SQL` orders on `last_served_at` and earlier
+  tests moved it. It cannot recur: the `pool` tests no longer share a pool with
+  anything.
+- **PROVED by reading, not by running** — `warm._COVERAGE_SQL` is `stages CROSS
+  JOIN themes`, so a committed `zz-fixture-*` theme really is 12 pairs at depth 0
+  and really would have made a concurrent `make warm-check` exit non-zero. That is
+  a static proof about the query, and it is what 8.91's first consequence rests on.
+- **ASSUMED, and not provoked**: the serialization-failure cost of REPEATABLE READ.
+  It follows from Postgres's semantics for a write/write race against the
+  hide-`UPDATE`, and no such race was staged. If it ever fires it is a loud,
+  retryable error, which is the direction chosen over a silent flake.
+
+Full gates on a fresh copy of the live database: **775 passed, 2 skipped, 0 failed,
+0 errors** (`.venv/bin/python -m pytest -p no:randomly`, 72s) and
+`.venv/bin/ruff check storyforge tests scripts` → `All checks passed!`.
+
+**Do the four tests still test what their names claim? Yes, and one of them tests
+it for the first time against data that cannot drift.** Not one assertion in any
+of the four was modified, added to or removed; the diff against `538a08b` deletes
+only the class docstring, the live-pool probe, the precondition, `stop()`, the old
+`pool` fixture, and the answer-key test's fixture parameter. `test_empty_pair_…`
+still proves rung 2 beats rung 3 (sabotage 2 makes it say so), `test_a_stage_with_
+no_pool_…` still proves rungs 3 and 4 and that the ladder never climbs (sabotage 1
+makes it say so, at both pool extremes), `test_request_returns_a_full_dto` still
+pins §11.2's whole DTO against a story it wrote, and the answer-key sweep still
+reads every live node-written `tap_word` row (8.92 is the note about how nearly it
+did not).

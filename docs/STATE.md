@@ -11,7 +11,7 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 |---|---|
 | 0 scaffold | `make dev` boots PG16 + FastAPI + Vite. Style-guide tokens confirmed in a real browser (computed styles, not just a 200). |
 | 1 decoder | Pure validator, **93**-GPC inventory, vendored SHA-pinned CMUdict. 18/18 §5.7 goldens. Anti-golden suite + vacuity ratchet (**44.75%**, ceiling 50%) — both sabotage-tested, and the ratchet has now refused a real proposed row (DEVIATIONS 8.12). `wh`→/w/ added at stage 3 (8.13). |
-| 2 precompute | `make seed` idempotent; `make precompute` → **64,290** rows / 12 stages in 1.5s (stage 1 = 157, the tightest, above §18's 150 floor). `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **224** entries, **38** sight words (DEVIATIONS 8.10–8.17). |
+| 2 precompute | `make seed` idempotent; `make precompute` → **64,296** rows / 12 stages in 1.5s (stage 1 = 157, the tightest, above §18's 150 floor). `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **223** entries, **38** sight words (DEVIATIONS 8.10–8.17, 8.73–8.74, 8.81). |
 | 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` **targets** ≥3 per (stage,theme) over all 12 stages × 3 themes, idempotent — see the pool row below for what the database actually holds. Moderation = free blocklist + Haiku judge. |
 | warm pool | **`make warm-check` is RED and that is the honest state: 13 of 36 (stage,theme) pairs hold ≥3 servable stories (53 servable in all); stages 7–12 hold none, stage 6 holds one dragons story.** The earlier version of this row said "`make warm` fills ≥3 per (stage,theme)" — false about the command (it defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories over 3 of 12 stages) and still false about the database. The command is fixed and gated (DEVIATIONS 8.40–8.48); the pool needs one `make warm` run, ~$1.30 by `make warm-plan`'s projection (a floor — the high stages are longer), and until then §7's ladder serves those children a lower stage silently and correctly. |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
@@ -67,7 +67,18 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
 4. **Moderation fails closed** — unparseable verdict ⇒ `approved=False`.
 5. **Moderation separates hazard from harm.** A fire-breathing dragon is the
    premise. The first prompt had a 55% false-positive rate. Any change must be
-   re-tested in BOTH directions (3 approve + 3 reject cases).
+   re-tested in BOTH directions, against the live judge, over MULTIPLE runs —
+   the 40-case fixture in `tests/test_grammar.py::FIXTURE` (24 must-approve,
+   16 must-reject), run with `STORYFORGE_LIVE_MODERATION=1`. It costs ~$0.14 a
+   run. **Every one of the four passes at the grammar prompt in DEVIATIONS
+   8.70–8.82 broke a case that had been passing, and none was caught by testing
+   the case being worked on** — naming a construction raises its salience in both
+   directions, and tightening an output format silently deleted the evidence
+   another rule depended on. Run the WHOLE fixture, more than once.
+   The blocklist is in scope too: a layer-1 entry short-circuits `moderate()`, so
+   an innocuous word there does not narrow vocabulary, it stops this judgement
+   from ever running (8.73). The live test asserts every must-reject case dies at
+   `layer == "model"` for that reason.
 6. **The fallback ladder never climbs stage.** A higher-stage story can contain
    untaught GPCs; a lower stage is always safe (cumulative inventory).
 7. **Tailwind verdict CSS lives outside `@layer utilities`** — dynamic class
@@ -85,6 +96,23 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     Restart Vite after touching `tailwind.config.ts`; verify tokens in `dist/`.
 13. Async SQLAlchemy: never touch a lazy relationship (`story.segments`) —
     re-query instead, or it raises `MissingGreenlet`.
+14. **"Servable" is `SERVABLE_STATUSES` AND `ANSWERABLE_SQL`** — a story with zero
+    `questions` rows is a dead-end session (read to the end, no question screen, no
+    §8 evidence, no promotion signal) and is refused by `_SERVE_SQL`, by `GET
+    /api/stories/{id}` and by `POST /api/readings`. Both halves are defined once in
+    `api/stories.py` and imported; `warm.pool_coverage`/`pool_depth` use the same
+    predicate, because a gate that counts stories the serving path will not serve
+    reports a pair as full while every child at it gets a silent §7 fallback. Six
+    live `warm` stories were in exactly that state (DEVIATIONS 8.50–8.56).
+15. **Every sound `sound_targets` offers is provably answerable, and `tap_word` has
+    a pure-function proposer of last resort.** A tier of `_prefer_current_stage`
+    fires on answerability, not non-emptiness — "first non-empty tier" handed stage
+    8 a menu of one impossible sound (`ou`/`outside`) and cost the story both
+    questions. When the model's three attempts are spent, `tap_word_options`
+    composes the triple and the UNCHANGED `check_tap_word` judges it. Measured:
+    460/460 derived drafts accepted, 113/113 servable stories answerable, under the
+    unchanged `TAP_LEN_SPREAD`. Never relax the length rule to manufacture a
+    question — it was measured not to be the binding constraint (DEVIATIONS 8.53).
 
 | 5 kid mode + mastery | Full kid session live in a real browser (dev AND production bundle): theme picker → reading → questions → celebration, TTS, §11 floors verified by computed style. `readings`/`answers` APIs, `gpc_stats`, stage promotion proven at the 79/80% boundary. |
 

@@ -2354,9 +2354,17 @@ async def run_full(
             print(f"  eval_runs.id = {run_id}\n")
 
         async def one(stage: int, theme: str, i: int) -> None:
-            async with sem:
+            # A session PER CELL, not the enclosing one. `AsyncSession` is not
+            # concurrency-safe: sharing it across `asyncio.gather` raises "This
+            # session is provisioning a new connection; concurrent operations are
+            # not permitted", which is why `--concurrency` above 1 had never
+            # actually run despite being an advertised flag (DEVIATIONS 8.100).
+            # Per-cell sessions also preserve the property `--resume` relies on —
+            # each item commits as it completes, so an interrupted run keeps every
+            # measurement it finished.
+            async with sem, SessionLocal() as cell_session:
                 await _attempt(
-                    session=session,
+                    session=cell_session,
                     stage=stage,
                     theme=theme,
                     index=i,

@@ -910,9 +910,15 @@ async def test_backfill_reaches_a_story_whose_questions_were_never_moderated(
     assert "The man ran back stop." not in served
     assert meta["enrichment"]["questions_replaced"] == 1
     assert meta["enrichment"]["questions_moderation"]["approved"] is True
-    assert "1 servable story/stories with missing or unmoderated questions" in (
-        capsys.readouterr().out
-    )
+    # The sentence gained a third condition when `_UNENRICHED_SQL` did (DEVIATIONS
+    # 8.56: a servable story with no mastery-bearing question is also unenriched,
+    # because §8 cannot move without one). Kept as an exact substring rather than
+    # relaxed to a count-only match — the message names what the sweep selects on,
+    # and that is worth pinning.
+    assert (
+        "1 servable story/stories with questions that are missing, unmoderated, "
+        "or cannot move §8"
+    ) in capsys.readouterr().out
 
 
 async def test_a_story_with_a_moderation_receipt_is_left_alone(session, story, nodes):

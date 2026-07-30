@@ -928,3 +928,151 @@ def test_the_environment_value_prefixes_cut_where_they_are_meant_to(value, deplo
     from storyforge.auth import is_deployed_env_value
 
     assert is_deployed_env_value(value) is deployed
+
+
+# --- §18: the two defeats AUDIT-PHASE7 F11 measured on the real image ---------
+# Defeat 1 was `docker run -e DEMO_BYPASS_AUTH=true -e PORT= …`: blanking the one
+# variable the image supplies to itself (the Dockerfile's `ENV PORT=8080`) removed
+# the only signal and a fully unauthenticated API stayed up. The guard tested the
+# VALUE; the fact that matters is the PRESENCE (DEVIATIONS 8.64).
+@pytest.mark.parametrize(
+    "name",
+    ["PORT", "K_SERVICE", "DIGITALOCEAN_APP_ID", "AWS_LAMBDA_FUNCTION_NAME"],
+)
+def test_a_platform_variable_that_is_present_but_BLANK_is_still_a_signal(monkeypatch, name):
+    """`-e PORT=` is not "no platform variable". It is someone emptying one.
+
+    No platform sets one of these to the empty string and no laptop has a reason
+    to, so blank is if anything a stronger signal than set.
+    """
+    monkeypatch.setenv("DEMO_BYPASS_AUTH", "true")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://storyforge:storyforge@localhost:5433/storyforge"
+    )
+    monkeypatch.setenv(name, "")
+    reset_auth_config()
+    signals = deployment_signals("postgresql+psycopg://u:p@localhost:5433/db")
+    assert any(name in s for s in signals), f"{name}= produced no signal: {signals}"
+    with pytest.raises(RuntimeError) as caught:
+        assert_demo_bypass_is_local()
+    assert name in str(caught.value), "the refusal must name the variable it saw"
+    monkeypatch.undo()
+    reset_auth_config()
+
+
+@pytest.mark.parametrize(
+    ("value", "deployed"),
+    [
+        # F11 defeats 2 and 3: both BOOTED bypassed, against a code comment that
+        # claimed the prefix list had closed this family after `prod-us`.
+        ("prd", True),
+        ("pre-production", True),
+        # The same family, spelled the other ways teams spell it.
+        ("preprod", True),
+        ("eu-stg", True),
+        ("k8s-prod", True),
+        ("uat", True),
+        ("canary", True),
+        ("release-candidate", False),  # not a deployment word on its own
+        # And the false-positive direction, which is the reason this is a
+        # parametrised pair and not a one-way sweep: a guard that refuses a
+        # laptop gets disabled, which is worse than the gap.
+        ("dev", False),
+        ("development", False),
+        ("local", False),
+        ("localhost", False),
+        ("test", False),
+        ("testing", False),
+        ("ci", False),
+        ("sandbox", False),
+        ("demo", False),
+        ("laptop", False),
+        ("", False),
+        ("   ", False),
+    ],
+)
+def test_the_deployed_environment_markers_catch_prd_and_pre_production(value, deployed):
+    from storyforge.auth import is_deployed_env_value
+
+    assert is_deployed_env_value(value) is deployed, value
+
+
+def test_a_container_is_a_deployment_signal_and_no_env_flag_can_blank_it(monkeypatch, tmp_path):
+    """§18 says "laptop-only". A container is not a laptop.
+
+    This is the first signal in the guard that lives on the filesystem rather
+    than in the environment, which is the whole point: `docker run` has no flag
+    that removes `/.dockerenv` (DEVIATIONS 8.66).
+    """
+    marker = tmp_path / ".dockerenv"
+    marker.write_text("")
+    monkeypatch.setattr("storyforge.auth.CONTAINER_MARKER_FILES", (str(marker),))
+    monkeypatch.setenv("DEMO_BYPASS_AUTH", "true")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://storyforge:storyforge@localhost:5433/storyforge"
+    )
+    reset_auth_config()
+
+    signals = deployment_signals("postgresql+psycopg://u:p@localhost:5433/db")
+    assert any("container" in s for s in signals), signals
+    with pytest.raises(RuntimeError) as caught:
+        assert_demo_bypass_is_local()
+    assert "container" in str(caught.value)
+    monkeypatch.undo()
+    reset_auth_config()
+
+
+def test_a_container_cgroup_marker_is_enough_on_its_own(monkeypatch, tmp_path):
+    cgroup = tmp_path / "cgroup"
+    cgroup.write_text("11:name=systemd:/kubepods/besteffort/pod1234/abcdef\n")
+    monkeypatch.setattr("storyforge.auth.CONTAINER_MARKER_FILES", ())
+    monkeypatch.setattr("storyforge.auth.CONTAINER_CGROUP_PATH", str(cgroup))
+    assert any("container" in s for s in deployment_signals(""))
+
+
+def test_the_container_override_cancels_the_container_signal_and_nothing_else(
+    monkeypatch, tmp_path
+):
+    """The one documented way past it, and it is not a master key.
+
+    A dev container and a containerised CI runner are real workflows, and a guard
+    that fails them at import gets deleted rather than configured. The escape is a
+    positive assertion spelled out in full — and every OTHER signal still refuses
+    while it is set, which is what stops it being a bypass for the bypass.
+    """
+    from storyforge.auth import CONTAINER_OVERRIDE_VALUE, CONTAINER_OVERRIDE_VAR
+
+    marker = tmp_path / ".dockerenv"
+    marker.write_text("")
+    monkeypatch.setattr("storyforge.auth.CONTAINER_MARKER_FILES", (str(marker),))
+    monkeypatch.setattr("storyforge.auth.CONTAINER_CGROUP_PATH", str(tmp_path / "absent"))
+
+    monkeypatch.setenv(CONTAINER_OVERRIDE_VAR, CONTAINER_OVERRIDE_VALUE)
+    assert deployment_signals("postgresql+psycopg://u:p@localhost:5433/db") == []
+
+    # A near miss is not the assertion. The value has to be typed.
+    monkeypatch.setenv(CONTAINER_OVERRIDE_VAR, "true")
+    assert any("container" in s for s in deployment_signals(""))
+
+    # And it cancels ONE signal, not the guard.
+    monkeypatch.setenv(CONTAINER_OVERRIDE_VAR, CONTAINER_OVERRIDE_VALUE)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    assert any("ENVIRONMENT" in s for s in deployment_signals(""))
+
+
+def test_the_bypass_is_still_permitted_on_this_developer_machine(monkeypatch):
+    """The whole suite runs under the bypass, so this is the canary for it.
+
+    If widening the signals above ever makes a laptop look deployed, this fails
+    here rather than in `make dev` on somebody else's afternoon.
+    """
+    monkeypatch.setenv("DEMO_BYPASS_AUTH", "true")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://storyforge:storyforge@localhost:5433/storyforge"
+    )
+    for leaked in ("PORT", "K_SERVICE", "DYNO"):
+        monkeypatch.delenv(leaked, raising=False)
+    reset_auth_config()
+    assert_demo_bypass_is_local()
+    monkeypatch.undo()
+    reset_auth_config()

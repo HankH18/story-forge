@@ -24,6 +24,29 @@ admin takes effect on the next call rather than at the next login. A role string
 this code does not recognise resolves to `parent`; an unknown value must never
 be able to escalate.
 
+**Do not generalise the sentence above to SESSIONS. Revoking a session does not
+invalidate a token that has already been issued** — `verify_token` checks the
+signature, `exp`, `nbf`, `iss` and optionally `aud`, and asks Clerk nothing, so a
+revoked session's token is accepted for the rest of its own lifetime. That is the
+ordinary stateless-JWT trade and it is deliberate (AUDIT-PHASE6 C11, DEVIATIONS
+8.63). **The bound is the token's remaining lifetime, and Clerk's browser session
+token measures `exp - iat = 60`** — `getToken()` re-mints it roughly every 53 s
+and the re-mint is what fails after a sign-out — so the exposure for anything a
+browser holds is ≤60 s, reaching that same parent's own family data and no other
+family's (ownership is the `kids.parent_id` filter below). The audit observed 30
+minutes because it used a **Backend-API-minted 1800 s** token, which only a holder
+of `CLERK_SECRET_KEY` can create and which no browser in this product produces.
+
+Three closures were considered and are recorded in 8.63 rather than built.
+Checking `sts != "active"` closes nothing: the claim is frozen at mint time, so a
+revoked session's issued token still reads `active`. Asking Clerk per request puts
+a third-party round trip on every authenticated call, including every call in a
+child's reading session, and turns a Clerk blip into a total outage — which is the
+thing the JWKS cache and its stale-key window (7.34) exist to avoid. Capping
+`exp - iat` would bound the window for every token, and would also make this API
+refuse every request in the product the day an operator raises the session-token
+lifetime in a dashboard this code cannot see.
+
 **Ownership is enforced here, not in the handlers.** `owned_kid` and
 `owned_reading` are the only ways a route reaches a kid or a reading, and both
 filter on `kids.parent_id = <this caller>`. A row belonging to another parent is
@@ -496,6 +519,26 @@ DEPLOYED_ENV_VALUES: Final[frozenset[str]] = frozenset(
 #: production cluster (DEVIATIONS 7.36). Deliberately not `dev`, `development`,
 #: `local` or `test`: those must keep working.
 DEPLOYED_ENV_PREFIXES: Final[tuple[str, ...]] = ("prod", "stag", "live", "preview")
+#: …and the MARKERS, looked for anywhere in the value, because the prefix test
+#: above missed `prd` and `pre-production` and both booted a bypassed API
+#: (AUDIT-PHASE7 F11, DEVIATIONS 8.65) — under a comment claiming the prefixes had
+#: closed the family. A prefix list only catches the spellings someone thought of;
+#: this family is spelled `preprod`, `pre-production`, `k8s-prod`, `eu-stg`, `prd`.
+#:
+#: Every one of these is checked in BOTH directions in `tests/test_auth.py`: none
+#: of `dev`, `development`, `local`, `localhost`, `test`, `testing`, `ci`,
+#: `sandbox`, `demo`, `laptop` contains any of them, and a false positive here
+#: costs a developer their demo.
+DEPLOYED_ENV_MARKERS: Final[tuple[str, ...]] = (
+    "prod",
+    "prd",
+    "stag",
+    "stg",
+    "live",
+    "preview",
+    "uat",
+    "canary",
+)
 #: Variables that name an environment.
 ENV_NAME_VARS: Final[tuple[str, ...]] = (
     "ENV",
@@ -570,6 +613,40 @@ CONTAINER_DB_HOSTS: Final[frozenset[str]] = frozenset(
     {"db", "database", "postgres", "postgresql", "pg", "pgbouncer"}
 )
 
+#: Evidence of containerisation that lives on the FILESYSTEM rather than in the
+#: environment — which is the entire reason it is here (DEVIATIONS 8.66).
+#:
+#: Every other signal in this guard can be removed by whoever starts the process.
+#: AUDIT-PHASE7 F11 proved the cheapest version of that: `docker run
+#: -e DEMO_BYPASS_AUTH=true -e PORT=` blanked the one variable the image supplies
+#: to itself and served a fully unauthenticated API. There is no `docker run` flag
+#: that removes `/.dockerenv`.
+#:
+#: §18's own words are "a laptop-only fallback". A container is not a laptop. On
+#: macOS — where `make dev` and the test suite run — none of these paths exists,
+#: so the laptop path is untouched by their presence in this list.
+CONTAINER_MARKER_FILES: Final[tuple[str, ...]] = ("/.dockerenv", "/run/.containerenv")
+CONTAINER_CGROUP_PATH: Final = "/proc/1/cgroup"
+CONTAINER_CGROUP_MARKERS: Final[tuple[str, ...]] = (
+    "docker",
+    "containerd",
+    "kubepods",
+    "lxc",
+    "podman",
+)
+#: The one documented way past the container signal, and it cancels **that signal
+#: only** — every other signal still refuses while it is set, so it is not a key
+#: to the guard.
+#:
+#: It exists because the failure mode is asymmetric: a dev container or a
+#: containerised CI runner would otherwise fail every test at import with a
+#: message about production, and a guard that blocks a legitimate local workflow
+#: gets deleted rather than configured. The value has to be typed in full, so
+#: setting it is a decision rather than a shrug — and a careless operator putting
+#: the demo on a VPS will not set a variable they have never heard of.
+CONTAINER_OVERRIDE_VAR: Final = "STORYFORGE_BYPASS_IN_CONTAINER"
+CONTAINER_OVERRIDE_VALUE: Final = "i-understand-this-disables-auth"
+
 _BYPASS_BANNER = (
     "DEMO_BYPASS_AUTH=true — Clerk verification is DISABLED and every request "
     "runs as the fixed local session %r (§18). This is a laptop-only fallback; "
@@ -580,8 +657,11 @@ _BYPASS_BANNER = (
 def is_deployed_env_value(value: str) -> bool:
     """Does an environment-name variable's value mean "not a laptop"?
 
-    Exact membership OR a prefix match, because the exact-only version booted a
-    bypassed API under `ENVIRONMENT=prod-us` (DEVIATIONS 7.36).
+    Exact membership, a prefix match, OR a marker anywhere in the value. Each
+    widening is a measured defeat of the previous one: the exact-only version
+    booted a bypassed API under `ENVIRONMENT=prod-us` (DEVIATIONS 7.36), and the
+    prefix version booted under `ENVIRONMENT=prd` and `ENVIRONMENT=pre-production`
+    (AUDIT-PHASE7 F11, DEVIATIONS 8.65).
 
     `tests/conftest.py` scrubs these values before importing this module and so
     duplicates the rule rather than calling this function — importing
@@ -591,7 +671,47 @@ def is_deployed_env_value(value: str) -> bool:
     normalised = value.strip().lower()
     if not normalised:
         return False
-    return normalised in DEPLOYED_ENV_VALUES or normalised.startswith(DEPLOYED_ENV_PREFIXES)
+    if normalised in DEPLOYED_ENV_VALUES or normalised.startswith(DEPLOYED_ENV_PREFIXES):
+        return True
+    return any(marker in normalised for marker in DEPLOYED_ENV_MARKERS)
+
+
+def container_signals() -> list[str]:
+    """Is this process inside a container? Read off the filesystem, not the env.
+
+    Returns at most one signal, and none at all when `CONTAINER_OVERRIDE_VAR`
+    carries `CONTAINER_OVERRIDE_VALUE` exactly. Any read error is treated as "no
+    evidence": this function must never be the reason the API fails to start.
+    """
+    if (os.environ.get(CONTAINER_OVERRIDE_VAR) or "").strip() == CONTAINER_OVERRIDE_VALUE:
+        return []
+
+    for path in CONTAINER_MARKER_FILES:
+        try:
+            if os.path.exists(path):
+                return [
+                    f"{path} exists, so this process is in a container — §18 permits "
+                    f"the bypass on a laptop only. Set "
+                    f"{CONTAINER_OVERRIDE_VAR}={CONTAINER_OVERRIDE_VALUE} only if this "
+                    f"container really is a development machine."
+                ]
+        except OSError:  # pragma: no cover — a stat that raises is not evidence
+            continue
+
+    try:
+        with open(CONTAINER_CGROUP_PATH, encoding="utf-8", errors="replace") as handle:
+            cgroup = handle.read().lower()
+    except OSError:
+        return []  # no /proc at all (macOS), or unreadable — not evidence
+    for marker in CONTAINER_CGROUP_MARKERS:
+        if marker in cgroup:
+            return [
+                f"{CONTAINER_CGROUP_PATH} names {marker!r}, so this process is in a "
+                f"container — §18 permits the bypass on a laptop only. Set "
+                f"{CONTAINER_OVERRIDE_VAR}={CONTAINER_OVERRIDE_VALUE} only if this "
+                f"container really is a development machine."
+            ]
+    return []
 
 
 def deployment_signals(database_url: str = "", clerk_secret_key: str | None = None) -> list[str]:
@@ -603,11 +723,14 @@ def deployment_signals(database_url: str = "", clerk_secret_key: str | None = No
     one env var during a demo, a false negative costs an unauthenticated
     production API.
 
-    **This is still a list of negative signals, and that is its weakness.** A
-    bare `docker run -e DEMO_BYPASS_AUTH=true` on a public host sets none of
-    them. The honest control is the inverse — refuse unless an explicit local
-    assertion is present and the process is not bound to `0.0.0.0` — and it is
-    recorded as the follow-up in DEVIATIONS 7.36 rather than pretended away here.
+    **This is mostly a list of negative signals, and that is its weakness.** A
+    bare `docker run -e DEMO_BYPASS_AUTH=true` on a public host sets few of them,
+    and AUDIT-PHASE7 F11 proved that blanking one variable removed the last one.
+    `container_signals()` is the answer to that specific defeat and the one entry
+    here that no `-e` flag can erase (DEVIATIONS 8.66). The remaining half of the
+    inverse control — refuse unless the process is bound to `127.0.0.1` — is still
+    not taken, because the bind address does not exist yet when this runs (this
+    module is imported before uvicorn has a socket); see 8.66.
     """
     signals: list[str] = []
 
@@ -616,17 +739,33 @@ def deployment_signals(database_url: str = "", clerk_secret_key: str | None = No
         if is_deployed_env_value(value):
             signals.append(f"{name}={value}")
 
+    # PRESENCE, not value, for both loops below. `-e PORT=` booted a fully
+    # unauthenticated API on the real image (AUDIT-PHASE7 F11, DEVIATIONS 8.64):
+    # `(os.environ.get(name) or "").strip()` is empty for a blanked variable, so
+    # emptying it removed the signal while `--port ${PORT:-8080}` served on. No
+    # platform sets one of these to "" and no laptop has a reason to, so a blank
+    # value is if anything the stronger signal — someone had to do it on purpose.
     for name in PLATFORM_VARS:
-        if (os.environ.get(name) or "").strip():
-            signals.append(f"{name} is set (platform-injected)")
+        if name in os.environ:
+            value = (os.environ.get(name) or "").strip()
+            signals.append(
+                f"{name} is set (platform-injected)"
+                if value
+                else f"{name} is present but BLANK — a platform variable was emptied"
+            )
 
     for name in SERVING_HINT_VARS:
-        value = (os.environ.get(name) or "").strip()
-        if value:
+        if name in os.environ:
+            value = (os.environ.get(name) or "").strip()
             signals.append(
                 f"{name}={value} is set — a platform is telling this process where "
-                f"to listen. Unset it to run the §18 bypass locally."
+                f"to listen. Unset it (not blank it) to run the §18 bypass locally."
+                if value
+                else f"{name} is present but BLANK — a platform variable was emptied. "
+                f"Unset it entirely to run the §18 bypass locally."
             )
+
+    signals.extend(container_signals())
 
     url = (database_url or "").strip()
     host = (urlsplit(url).hostname or "").strip().lower()
@@ -1007,6 +1146,8 @@ assert_demo_bypass_is_local()
 
 __all__ = [
     "ALGORITHM",
+    "CONTAINER_OVERRIDE_VALUE",
+    "CONTAINER_OVERRIDE_VAR",
     "DEMO_CLERK_ID",
     "AuthConfig",
     "AuthSettings",
@@ -1019,6 +1160,7 @@ __all__ = [
     "assert_demo_bypass_is_local",
     "auth_config",
     "bearer_token",
+    "container_signals",
     "current_principal",
     "deployment_signals",
     "is_deployed_env_value",

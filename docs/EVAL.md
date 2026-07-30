@@ -2,23 +2,11 @@
 
 **The question this document answers:** §0 claims that a constrained LLM plus a pure-function gate yields reliably decodable stories. Does it?
 
-**Answer: YES on decodability, and the gate is the reason.** Of the 169 stories the model actually produced across all 12 stages and 3 themes, **169 reached the 95% gate and 0 did not**. The worst single story measured 95.0%. Median 100.0%, mean 99.4%. The rewrite loop did most of that work at depth 0 — p95 was 1, against §1's budget of 2 — so this is allowlist-constrained generation succeeding, not retry pressure grinding the model into compliance (§6's stated order of levers). No story in the matrix contained a single out-of-vocabulary word, and none exceeded the story-word cap.
+**Answer: YES on decodability, and the gate is the reason.** Of the 180 stories the model actually produced across all 12 stages and 3 themes, **180 reached the 95% gate and 0 did not**. The worst single story measured 95.0%. Median 100.0%, mean 98.9%. The rewrite loop did most of that work at depth 0 — p95 was 2, against §1's budget of 2 — which is the budget exactly, with no headroom. The gate held and no story shipped below it, but at p95 = 2 the rewrite loop is carrying weight §6 assigns to the allowlist, and a further prompt change that costs one more rewrite would breach §1 rather than merely crowd it. Read this as a pass with the margin spent, not as a comfortable one. No story in the matrix contained a single out-of-vocabulary word, and none exceeded the story-word cap.
 
-**`make eval` nonetheless exits non-zero, and the reason is availability, not decodability.** 11 of 180 cells never produced any text. The generation node's per-HTTP-attempt budget on this run was 30s (supplied to this document, not recorded by the run), and the SDK retry budget that multiplies it is **not recorded by this run** — see `docs/DEVIATIONS.md` 8.30-8.39. That is a real defect and it is reported as one. It is not evidence against §0's thesis, and this report is written so that neither reading can borrow the other's number: section 2 keeps the two kinds of criterion on separate lines, and section 7 keeps wall-clock latency on a separate line from the retries inside it — which the first version of this report did not do (AUDIT-PHASE7 F7, DEVIATIONS 8.35).
-
-**Total spend: $2.80** against a $15.00 cap, at 2026-07-29 prices. $0.0178 per accepted story, excluding enrichment (section 6).
+**Total spend: $5.41** against a $15.00 cap, at 2026-07-29 prices. $0.0315 per accepted story, excluding enrichment (section 6).
 
 Every figure below is read out of the run's own `reports/eval-<ts>.json` by `scripts/eval_doc.py`, not transcribed by hand. `reports/` is gitignored (run output, not source), which is why the numbers are duplicated into this committed file. The prose is a reading of them; the figures are not editable prose.
-
-**Provenance.** This matrix was generated in 2 sitting(s) (DEVIATIONS 7.51). The first invocation was killed by its launcher at cell 154 of 180. Every `eval_run_items` row is committed as its story completes, so `--resume` ran only the remainder. It is one matrix, not two runs stapled together.
-
-On a resume the matrix parameters — stages, themes, `n`, effort, pricing date, `--cold`, enrichment — are RESTORED from the stored config, which is enforcement because they are arguments. The values that come from the environment or from a module constant cannot be restored by passing them: the model ids, the price sheets, the gate, the rewrite budget, the prompt allowlist size, the timeouts and the vocabulary fingerprint. Those are VERIFIED against the stored config, and a difference REFUSES the resume with exit code 3 while any cell still has to run; when the run is already complete and only the report can change, the difference is printed instead (DEVIATIONS 8.31). `concurrency` and `budget_usd` belong to the sitting, not to the run, and are recorded on each trail entry.
-
-**This run predates that check.** Its resumes ran before DEVIATIONS 8.31, so the stored config was written back over freshly computed values without either enforcing or verifying them, and nothing in the record shows which model each half of the matrix used. That is AUDIT-PHASE7 F1, and it is why section 3 reports the per-item model census as not recorded (DEVIATIONS 8.30).
-
-A further 2 invocation(s) re-derived this report from the recorded measurements without calling the API at all. `--resume` on a complete run is idempotent, and re-finalising it reproduced the identical verdict and exit code. That checks that the **verdict** is a pure function of the recorded items — it is silent about the config table, which the same exercise proved could disagree with the process that produced it. Full trail: `[{"at": "2026-07-29T23:16:23+00:00", "git_commit": "559f102", "items_already_recorded": 154}, {"at": "2026-07-29T23:37:13+00:00", "git_commit": "559f102", "items_already_recorded": 180}, {"at": "2026-07-29T23:38:08+00:00", "items_already_recorded": 180, "git_commit": "559f102"}]`
-
-**This matrix is not comparable to a later one, and the record cannot say so by itself.** It measured against the vocabulary as it stood at the time: 33 sight words and a 92-GPC inventory. Both have since moved — `of`, `so`, `do`, `be` and `from` became sight words and `wh`→/w/ was added (DEVIATIONS 8.10-8.13) — along with the generation timeout (8.7), the length instruction (8.22), the grammar judge (8.20) and the blocklist (8.14). A run after those changes samples a different population, and every figure here should be read as the measurement of a different instrument rather than as a baseline to diff against. Runs from DEVIATIONS 8.33 onward carry `config.vocabulary`, so that judgement stops depending on someone remembering this paragraph.
 
 ---
 
@@ -27,23 +15,23 @@ A further 2 invocation(s) re-derived this report from the recorded measurements 
 ```
 cd services/api && python -m storyforge.eval run \
   --stages 1..12 --themes all --n 5 --cold \
-  --effort medium --pricing-date 2026-07-29 --budget 15.0 --concurrency 1
+  --effort medium --pricing-date 2026-07-29 --budget 15.0 --concurrency 6
 ```
 
 `make eval` runs the first two lines — the matrix and `--cold`. It does NOT pass `--effort`, `--budget` or `--concurrency` (the values above are the defaults it inherits) and it does NOT pass `--pricing-date`, which defaults to the day of the run: the date in the line above is the date THIS run priced at, not a constant. A run on or after 2026-09-01 will price at Sonnet 5's standard rate with no flag change, which is why the date is printed rather than assumed (AUDIT-PHASE7 F10).
 
 | what | value |
 |---|---|
-| `eval_runs.id` | 2 |
-| started / finished (UTC) | 2026-07-29T22:13:59+00:00 / 2026-07-29T23:38:08+00:00 |
+| `eval_runs.id` | 114 |
+| started / finished (UTC) | 2026-07-30T04:18:35+00:00 / 2026-07-30T04:36:24+00:00 |
 | status | `completed` |
-| pipeline time (summed per story) | 80 min |
-| git commit | `559f102` — whether the working tree was dirty is **not recorded by this run** — see `docs/DEVIATIONS.md` 8.30-8.39, so this commit is not evidence that it contains the code that ran |
-| harness code sha256 | **not recorded by this run** — see `docs/DEVIATIONS.md` 8.30-8.39 |
-| vocabulary the gate ran against | **not recorded by this run** — see `docs/DEVIATIONS.md` 8.30-8.39 — and this is the gap that already bit: 11 of this run's decodability figures stopped reproducing when a concurrent agent re-seeded `sight_words` 33 → 38 and added the `wh` GPC (AUDIT-PHASE7 F3) |
-| per-HTTP-attempt generation timeout | 30s — **supplied to this document**, not recorded by the run (DEVIATIONS 8.35) |
+| pipeline time (summed per story) | 76 min |
+| git commit | `83d1cc8` — **working tree DIRTY** (29 path(s), including the harness itself), so this commit is NOT the code that ran |
+| harness code sha256 | `72fe5998efa33b9b…` (`storyforge/eval.py`; verify with `git show <commit>:… | shasum -a 256`) |
+| vocabulary the gate ran against | 93 GPCs `acd967613cea…` · 38 sight words `2b450a0d4c0e…` · 64,296 allowed words · 126,052 CMUdict entries |
+| per-HTTP-attempt generation timeout | 240s x up to 3 attempts (`SDK_MAX_RETRIES=2`) |
 | generation model (config's claim) | `claude-sonnet-5` |
-| generation model (the items' record) | **not recorded by this run** — see `docs/DEVIATIONS.md` 8.30-8.39 (AUDIT-PHASE7 F1 — the claim above is unverifiable) |
+| generation model (the items' record) | `claude-sonnet-5` x180 — one model, confirmed per item |
 | fast model (moderation) | `claude-haiku-4-5` |
 | pricing date | `2026-07-29` — Sonnet 5 introductory rate, expires 2026-08-31 |
 | generation price | $2.0 in / $10.0 out per Mtok |
@@ -56,7 +44,7 @@ cd services/api && python -m storyforge.eval run \
 | rewrite budget (§7) | 3 |
 | prompt allowlist size (§6) | 400 |
 | output effort | medium |
-| concurrency | 1 (sequential — DEVIATIONS 7.48) |
+| concurrency | 6 concurrent cells, batched by stage so the per-stage cache prefix still pays — DEVIATIONS 8.100 |
 | cache bypassed (`--cold`) | True |
 | ENRICHING run | False (DEVIATIONS 7.45) |
 | python | 3.12.13 |
@@ -68,12 +56,12 @@ cd services/api && python -m storyforge.eval run \
 
 | criterion | result | evidence |
 |---|---|---|
-| every story reaches >=95% decodability | PASS | 169/169 stories at or above the gate (0 below) |
-| p95 rewrite depth <= 2 | PASS | p95 = 1, max = 2 |
+| every story reaches >=95% decodability | PASS | 180/180 stories at or above the gate (0 below) |
+| p95 rewrite depth <= 2 | PASS | p95 = 2, max = 3 |
 | the matrix completed | PASS | 180 of 180 planned cells attempted |
-| every planned cell produced a story | **FAIL** | 169 of 180 cells produced text (11 api_fail) |
+| every planned cell produced a story | PASS | 180 of 180 cells produced text (0 api_fail) |
 
-**Overall: FAIL.** `make eval` exited non-zero.
+**Overall: PASS.** `make eval` exited 0.
 
 A moderation rejection is deliberately *not* one of these criteria. It is a content verdict on a story that already met the decodability criterion, so folding it in would make a §13 judgement look like a decoder failure. It is reported in full in section 8 instead.
 
@@ -82,24 +70,24 @@ A moderation rejection is deliberately *not* one of these criteria. It is a cont
 | metric | value |
 |---|---|
 | stories attempted | 180 |
-| stories produced (the model returned text) | 169 |
-| stories ACCEPTED (cleared gate **and** moderation) | 157 |
-| gate + moderation pass rate | 87.2% |
-| fallback rate (§7 — a live request would have served the warm pool) | 12.8% |
-| mean decodability | 99.4% |
+| stories produced (the model returned text) | 180 |
+| stories ACCEPTED (cleared gate **and** moderation) | 172 |
+| gate + moderation pass rate | 95.6% |
+| fallback rate (§7 — a live request would have served the warm pool) | 4.4% |
+| mean decodability | 98.9% |
 | median decodability | 100.0% |
 | worst single story | 95.0% |
 | **stories that never reached the 95% gate** | 0 |
-| rewrite depth p50 / p95 / max | 0 / 1 / 2 |
-| attempts per accepted story | 1.153 |
-| total cost | **$2.7958** |
-| cost per accepted story | **$0.0178** |
-| cost per attempted story | $0.0155 |
-| cold generation p50 / p95 | 16.3s / 59.8s |
+| rewrite depth p50 / p95 / max | 0 / 2 / 3 |
+| attempts per accepted story | 1.471 |
+| total cost | **$5.4130** |
+| cost per accepted story | **$0.0315** |
+| cost per attempted story | $0.0301 |
+| cold generation p50 / p95 | 18.9s / 64.1s |
 | OOV word instances | 0 |
 | stories over the story-word cap | 0 |
 
-§7 outcome taxonomy: `{"accepted": 157, "api_fail": 11, "moderation_fail": 12}`
+§7 outcome taxonomy: `{"accepted": 172, "moderation_fail": 8}`
 
 ## 4. Decodability — the distribution, not the mean
 
@@ -107,7 +95,7 @@ A mean hides the shape: twenty stories at 100% and one at 20% has a healthy mean
 
 | min | p05 | p25 | p50 | mean | p95 | max |
 |---|---|---|---|---|---|---|
-| 95.0% | 96.0% | 100.0% | 100.0% | 99.4% | 100.0% | 100.0% |
+| 95.0% | 95.5% | 98.0% | 100.0% | 98.9% | 100.0% | 100.0% |
 
 | decodability bin | stories | share |
 |---|---|---|
@@ -115,35 +103,35 @@ A mean hides the shape: twenty stories at 100% and one at 20% has a healthy mean
 | 50-80% | 0 | 0.0% |
 | 80-90% | 0 | 0.0% |
 | 90-<95% | 0 | 0.0% |
-| 95-<100% | 32 | 18.9% |
-| 100% | 137 | 81.1% |
+| 95-<100% | 65 | 36.1% |
+| 100% | 115 | 63.9% |
 
-**No story finished below the gate.** Every one of the 169 stories the model produced reached >=95% decodability within the rewrite budget.
+**No story finished below the gate.** Every one of the 180 stories the model produced reached >=95% decodability within the rewrite budget.
 
 ### Per stage
 
 | stage | n | accepted | pass rate | min | p50 | mean | max | below gate | rw p95 | mean words | in length range | TTR | $/accepted | p95 latency |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 15 | 13 | 86.7% | 95.5% | 100.0% | 99.5% | 100.0% | 0 | 0 | 35.5 | 86.7% | 0.44 | $0.0150 | 20s |
-| 2 | 15 | 14 | 93.3% | 95.0% | 100.0% | 99.4% | 100.0% | 0 | 1 | 33.3 | 86.7% | 0.55 | $0.0114 | 16s |
-| 3 | 15 | 14 | 93.3% | 96.2% | 100.0% | 99.5% | 100.0% | 0 | 0 | 36.1 | 86.7% | 0.61 | $0.0116 | 15s |
-| 4 | 15 | 12 | 80.0% | 100.0% | 100.0% | 100.0% | 100.0% | 0 | 2 | 36.1 | 93.3% | 0.61 | $0.0151 | 16s |
-| 5 | 15 | 15 | 100.0% | 95.7% | 100.0% | 99.3% | 100.0% | 0 | 0 | 55.3 | 33.3% | 0.51 | $0.0175 | 30s |
-| 6 | 15 | 14 | 93.3% | 96.6% | 100.0% | 99.4% | 100.0% | 0 | 1 | 66.8 | 73.3% | 0.54 | $0.0198 | 50s |
-| 7 | 15 | 12 | 80.0% | 95.8% | 100.0% | 98.9% | 100.0% | 0 | 2 | 65.4 | 60.0% | 0.53 | $0.0246 | 29s |
-| 8 | 15 | 15 | 100.0% | 96.2% | 100.0% | 99.0% | 100.0% | 0 | 1 | 68.3 | 66.7% | 0.55 | $0.0135 | 28s |
-| 9 | 15 | 11 | 73.3% | 96.8% | 100.0% | 99.7% | 100.0% | 0 | 1 | 102.1 | 6.7% | 0.31 | $0.0219 | 91s |
-| 10 | 15 | 12 | 80.0% | 96.3% | 100.0% | 99.3% | 100.0% | 0 | 0 | 89.1 | 6.7% | 0.38 | $0.0229 | 91s |
-| 11 | 15 | 13 | 86.7% | 95.9% | 100.0% | 99.5% | 100.0% | 0 | 1 | 101.8 | 13.3% | 0.37 | $0.0212 | 91s |
-| 12 | 15 | 12 | 80.0% | 95.0% | 100.0% | 99.0% | 100.0% | 0 | 0 | 94.2 | 13.3% | 0.37 | $0.0222 | 91s |
+| 1 | 15 | 14 | 93.3% | 96.0% | 100.0% | 99.2% | 100.0% | 0 | 0 | 38.5 | 100.0% | 0.47 | $0.0173 | 16s |
+| 2 | 15 | 13 | 86.7% | 96.2% | 100.0% | 99.5% | 100.0% | 0 | 2 | 46.2 | 86.7% | 0.53 | $0.0202 | 22s |
+| 3 | 15 | 15 | 100.0% | 95.0% | 100.0% | 98.5% | 100.0% | 0 | 1 | 38.9 | 93.3% | 0.59 | $0.0137 | 23s |
+| 4 | 15 | 15 | 100.0% | 95.5% | 100.0% | 98.5% | 100.0% | 0 | 2 | 42.1 | 93.3% | 0.59 | $0.0201 | 38s |
+| 5 | 15 | 13 | 86.7% | 95.1% | 100.0% | 98.8% | 100.0% | 0 | 2 | 82.5 | 100.0% | 0.47 | $0.0432 | 52s |
+| 6 | 15 | 14 | 93.3% | 95.5% | 100.0% | 98.7% | 100.0% | 0 | 1 | 84.9 | 100.0% | 0.53 | $0.0250 | 40s |
+| 7 | 15 | 15 | 100.0% | 95.2% | 100.0% | 98.8% | 100.0% | 0 | 1 | 94.2 | 93.3% | 0.49 | $0.0283 | 45s |
+| 8 | 15 | 15 | 100.0% | 97.6% | 100.0% | 99.8% | 100.0% | 0 | 1 | 82.3 | 100.0% | 0.50 | $0.0217 | 29s |
+| 9 | 15 | 14 | 93.3% | 95.1% | 100.0% | 98.3% | 100.0% | 0 | 2 | 167.1 | 93.3% | 0.42 | $0.0469 | 76s |
+| 10 | 15 | 14 | 93.3% | 96.9% | 100.0% | 99.0% | 100.0% | 0 | 2 | 151.3 | 100.0% | 0.40 | $0.0458 | 65s |
+| 11 | 15 | 15 | 100.0% | 95.6% | 100.0% | 99.2% | 100.0% | 0 | 1 | 152.3 | 100.0% | 0.40 | $0.0521 | 82s |
+| 12 | 15 | 15 | 100.0% | 95.6% | 100.0% | 98.9% | 100.0% | 0 | 1 | 153.5 | 86.7% | 0.37 | $0.0439 | 62s |
 
 ### Per theme
 
 | theme | n | accepted | pass rate | min | p50 | mean | max | rw p95 | $/accepted |
 |---|---|---|---|---|---|---|---|---|---|
-| animals | 60 | 52 | 86.7% | 95.5% | 100.0% | 99.2% | 100.0% | 2 | $0.0169 |
-| dragons | 60 | 52 | 86.7% | 95.0% | 100.0% | 99.5% | 100.0% | 1 | $0.0190 |
-| space | 60 | 53 | 88.3% | 95.5% | 100.0% | 99.4% | 100.0% | 1 | $0.0175 |
+| animals | 60 | 56 | 93.3% | 95.0% | 100.0% | 99.0% | 100.0% | 2 | $0.0318 |
+| dragons | 60 | 56 | 93.3% | 95.1% | 100.0% | 99.2% | 100.0% | 2 | $0.0335 |
+| space | 60 | 60 | 100.0% | 95.3% | 100.0% | 98.7% | 100.0% | 2 | $0.0292 |
 
 ## 5. The rewrite loop — how much retry pressure the gate needed
 
@@ -151,50 +139,51 @@ A mean hides the shape: twenty stories at 100% and one at 20% has a healthy mean
 
 | rewrite depth | stories |
 |---|---|
-| 0 | 145 |
-| 1 | 17 |
-| 2 | 7 |
+| 0 | 108 |
+| 1 | 56 |
+| 2 | 15 |
+| 3 | 1 |
 
-mean 0.18 · p50 0 · p95 1 · max 2 · attempts per accepted story 1.153
+mean 0.49 · p50 0 · p95 2 · max 3 · attempts per accepted story 1.471
 
 ## 6. Cost
 
 | metric | value |
 |---|---|
 | pricing date (explicit, per `pricing.price_for`) | `2026-07-29` |
-| **total actually spent** | **$2.7958** |
+| **total actually spent** | **$5.4130** |
 | spend cap | $15.00 — not reached |
-| GENERATING + REWRITING (Sonnet) | $2.5174 |
-| MODERATING (Haiku) | $0.2784 |
-| per attempted story | $0.0155 |
-| **per ACCEPTED story** | **$0.0178** |
-| Sonnet uncached input tokens | 38,601 |
-| Sonnet cache-WRITE tokens (1.25x) | 21,162 |
-| Sonnet cache-READ tokens (0.1x) | 450,336 |
-| Sonnet output tokens | 229,721 |
-| Haiku input / output tokens | 237,009 / 8,274 |
+| GENERATING + REWRITING (Sonnet) | $4.7559 |
+| MODERATING (Haiku) | $0.6571 |
+| per attempted story | $0.0301 |
+| **per ACCEPTED story** | **$0.0315** |
+| Sonnet uncached input tokens | 114,866 |
+| Sonnet cache-WRITE tokens (1.25x) | 171,923 |
+| Sonnet cache-READ tokens (0.1x) | 549,950 |
+| Sonnet output tokens | 398,638 |
+| Haiku input / output tokens | 609,513 / 9,509 |
 
-**The pricing date matters.** Sonnet 5's introductory $2/$10 rate expires 2026-08-31. The same token counts re-priced at the standard $3/$15 (2026-09-01) cost **$4.0545**, a 1.45x increase — less than 1.5x because Haiku's price does not change, and the gap between the two ratios is the share of the bill that is generation rather than moderation.
+**The pricing date matters.** Sonnet 5's introductory $2/$10 rate expires 2026-08-31. The same token counts re-priced at the standard $3/$15 (2026-09-01) cost **$7.7909**, a 1.44x increase — less than 1.5x because Haiku's price does not change, and the gap between the two ratios is the share of the bill that is generation rather than moderation.
 
-Pre-flight projection (no API call, DEVIATIONS 7.44): $3.22 with no rewrites, $6.43 with one rewrite each, $12.86 worst case. Actual came in at $2.80.
+Pre-flight projection (no API call, DEVIATIONS 7.44): $3.25 with no rewrites, $6.49 with one rewrite each, $12.99 worst case. Actual came in at $5.41.
 
-**What this cost excludes.** The harness does not run §7's ENRICHING node (DEVIATIONS 7.45): no QUESTION_GEN, no SCENE_TAGGING, no question moderation. DEVIATIONS 5.15 measured enrichment at **45-48% of a warm story's total cost**, so the cost of a story a child could actually be *served* is close to double the $0.0178 above — call it $0.0338. Stated here rather than left for a reader to discover.
+**What this cost excludes.** The harness does not run §7's ENRICHING node (DEVIATIONS 7.45): no QUESTION_GEN, no SCENE_TAGGING, no question moderation. DEVIATIONS 5.15 measured enrichment at **45-48% of a warm story's total cost**, so the cost of a story a child could actually be *served* is close to double the $0.0315 above — call it $0.0598. Stated here rather than left for a reader to discover.
 
 ## 7. Latency per node
 
 | §7 node | p50 | p95 |
 |---|---|---|
-| GENERATING (wall clock, retries INCLUDED) | 13016 ms | 58279 ms |
-| REWRITING (per rewrite) | 7266 ms | 20832 ms |
-| VALIDATING (the gate — pure function) | 1.24 ms | 2.75 ms |
-| MODERATING (Haiku) | 1553 ms | 2867 ms |
-| **whole pipeline** | **16254 ms** | **59807 ms** |
+| GENERATING (wall clock, retries INCLUDED) | 8151 ms | 60224 ms |
+| REWRITING (per rewrite) | 11603 ms | 45514 ms |
+| VALIDATING (the gate — pure function) | 1.65 ms | 4.82 ms |
+| MODERATING (Haiku) | 1505 ms | 2790 ms |
+| **whole pipeline** | **18877 ms** | **64082 ms** |
 
-**Two GENERATING numbers, because one number was measuring two things.** The row above is wall clock around a single SDK call, and that call retries an unrecorded number of times, so it can contain several HTTP attempts. Against a per-attempt budget of 30s (**supplied to this document**, not recorded by the run), **23 of 169** generations (13.6%) ran longer than one attempt could — each of those contains at least one attempt that was killed by the clock and paid for. Over the 146 that did not, p50 is **11639 ms** and p95 **26433 ms**, against the wall-clock p95 of 58279 ms.
+**Two GENERATING numbers, because one number was measuring two things.** The row above is wall clock around a single SDK call, and that call retries up to 2 time(s), so it can contain several HTTP attempts. Against a per-attempt budget of 240s (recorded per item), **0 of 180** generations (0.0%) ran longer than one attempt could — each of those contains at least one attempt that was killed by the clock and paid for. Over the 180 that did not, p50 is **8151 ms** and p95 **60224 ms**, against the wall-clock p95 of 60224 ms.
 
 The subset is named *no clock-driven retry*, not *single attempt*: a fast 429 or 5xx retry still hides inside a fast call, so it is a bound on retry-free latency rather than a proof of one attempt (DEVIATIONS 8.35). Exact per-attempt counts need `x-stainless-retry-count` off the raw response, which is a change to the generation path and is named there as deferred.
 
-§1 item 6 asks for cold generation p95 < 12s. Measured p95 is **59.8s**, which **does NOT meet** it. Per-stage p95 is in the table in section 4. The miss is NOT attributed here to long stories: DEVIATIONS 8.6/8.8 measured latency as a function of output tokens (r = +0.997) and barely of stage (r = +0.50), and the split above shows how much of this figure is retry rather than generation. §1.6 is recorded as unmet and unreachable as written — 12s buys roughly 1,200 tokens and a stage-12 story is 1,700-3,300 — and the criterion is not relaxed to match. Warm-pool serving is unaffected either way: §7 makes the demo path a database read, and that latency is not measured here.
+§1 item 6 asks for cold generation p95 < 12s. Measured p95 is **64.1s**, which **does NOT meet** it. Per-stage p95 is in the table in section 4. The miss is NOT attributed here to long stories: DEVIATIONS 8.6/8.8 measured latency as a function of output tokens (r = +0.997) and barely of stage (r = +0.50), and the split above shows how much of this figure is retry rather than generation. §1.6 is recorded as unmet and unreachable as written — 12s buys roughly 1,200 tokens and a stage-12 story is 1,700-3,300 — and the criterion is not relaxed to match. Warm-pool serving is unaffected either way: §7 makes the demo path a database read, and that latency is not measured here.
 
 The VALIDATING row is the thesis's economics in one line: the gate that makes the guarantee is roughly four orders of magnitude cheaper than the generation it judges, and costs nothing per call.
 
@@ -202,11 +191,10 @@ The VALIDATING row is the thesis's economics in one line: the gate that makes th
 
 | verdict class | stories |
 |---|---|
-| approved | 157 |
-| blocklist | 3 |
-| content | 1 |
-| grammar | 8 |
-| not_reached | 11 |
+| approved | 172 |
+| blocklist | 1 |
+| content | 3 |
+| grammar | 4 |
 
 - `blocklist` — §13 layer 1, deterministic, free, no API call.
 - `grammar` — the well-formedness half of the verdict (DEVIATIONS 4.12), which `moderate()` folds into `approved` and marks with a reason prefix.
@@ -217,71 +205,65 @@ The VALIDATING row is the thesis's economics in one line: the gate that makes th
 
 | stage | theme | hazard? (heuristic) | reason (verbatim) |
 |---|---|---|---|
-| 3 | dragons | harm-shaped | The dragon sent fire at the man, which is a weapon used against a character. |
+| 2 | animals | harm-shaped | The rabbit and elephant hit a rock and fell, which describes injury and physical harm to characters. |
+| 2 | dragons | harm-shaped | A dog hit a rock next to the cat, which could be interpreted as the dog hitting the cat, causing harm. |
+| 5 | animals | suspect | The rabbit 'went off to get fire' is unsafe: fire is a hazard that is never resolved or explained. |
 
 ### Grammar rejections, verbatim
 
 | stage | theme | note |
 |---|---|---|
-| 1 | dragons | "Its wings sat" — sat should be replaced with are (wings cannot sit; should describe what they are). |
-| 1 | space | "Sam sat and it sat past the moon." — two subjects joined by 'and' need parallel structure; should be "Sam sat and went past the moon" or "Sam sat as it went past the moon." |
-| 2 | space | "The rocket ran fast." Rockets do not run; should be "went" or "flew". |
-| 4 | animals | "It went back off and ran in the forest." — 'back off' is incorrect; should be 'back out' or simply 'back'. |
-| 4 | dragons | "A dragon lived in a can." Should be "cave" not "can"; likely a word-list error, not a real word choice. |
-| 4 | dragons | "It had a big lot." Should be "It had a big lot of gold" or similar; "lot" alone is incomplete. |
-| 7 | animals | "The girl said, this rabbit got a home." Missing punctuation; should be a period or semicolon before "this". |
-| 7 | animals | "The girl said, come here, little rabbit." Missing comma after said; should be "The girl said, 'Come here, little rabbit.'" |
+| 1 | animals | "Sam and the rabbit spin." -> "Sam and the rabbit spins." Two subjects joined by 'and' require plural verb. |
+| 5 | dragons | "The dragon did not like the case." -> "The dragon did not like the cave." Homophone or sound-alike word error. |
+| 9 | dragons | The dragon use its wings. -> The dragon uses its wings. Subject-verb agreement: plural verb with singular subject. |
+| 10 | animals | "Now the rabbit had this place, and it and had its house." -> "it and had" is a stray word; should be "it had" (extra conjunction). |
 
 ### Blocklist rejections (layer 1)
 
 | stage | theme | blocked words |
 |---|---|---|
-| 6 | space | high |
-| 7 | dragons | fight |
-| 10 | animals | high |
+| 6 | dragons | fight |
 
 ## 9. The decoder's own disclosed limitations (§5.3, §18)
 
 §5.3 requires these to be *logged in the eval report, not silent behaviour*. §18 names the alignment/schwa problem as the highest technical risk and says a rising unalignable rate is the signal that the inventory is too small.
 
-**Denominator: SCORED words — 5,597 of 10,690 word tokens.** A sight or story word is classified before any alignment is attempted (`decoder/validate.py`), so it can carry none of these flags; the first version of this report divided by every word token, which put roughly twice as many words in the denominator as could ever appear in the numerator and reported §18's designated alarm at about half strength (AUDIT-PHASE7 F6, DEVIATIONS 8.34). The rates below are recomputed from this run's own recorded counts; the recorded rows were not edited. The population rate is flags over scored words; the mean-per-story column is beside it because a mean weights a 30-word stage-1 story equally with a 200-word stage-12 one.
+**Denominator: SCORED words — 9,568 of 17,005 word tokens.** A sight or story word is classified before any alignment is attempted (`decoder/validate.py`), so it can carry none of these flags; the first version of this report divided by every word token, which put roughly twice as many words in the denominator as could ever appear in the numerator and reported §18's designated alarm at about half strength (AUDIT-PHASE7 F6, DEVIATIONS 8.34). The rates below are recomputed from this run's own recorded counts; the recorded rows were not edited. The population rate is flags over scored words; the mean-per-story column is beside it because a mean weights a 30-word stage-1 story equally with a 200-word stage-12 one.
 
 | flag | what it means | total instances | rate over SCORED words | mean per story |
 |---|---|---|---|---|
-| `schwa_relaxed` | §5.2.6 let an unstressed vowel match its citation GPC | 443 | 7.9% | 7.3% |
-| `ambiguity_flag` | more than one legal alignment existed; any was taken | 1272 | 22.7% | 22.9% |
-| `heteronym_flag` | multiple pronunciations, only some decodable — §5.2.5 may over-credit | 377 | 6.7% | 6.0% |
-| `alignable=False` | **the §18 alarm** — the inventory cannot spell the word at any stage | 28 | 0.5% | 0.4% |
+| `schwa_relaxed` | §5.2.6 let an unstressed vowel match its citation GPC | 885 | 9.2% | 8.1% |
+| `ambiguity_flag` | more than one legal alignment existed; any was taken | 2384 | 24.9% | 25.0% |
+| `heteronym_flag` | multiple pronunciations, only some decodable — §5.2.5 may over-credit | 683 | 7.1% | 6.0% |
+| `alignable=False` | **the §18 alarm** — the inventory cannot spell the word at any stage | 71 | 0.7% | 0.5% |
 | non-minimal missing set | the minimal-missing-GPC search hit its bound and approximated | 0 | — | — |
 
-Words the inventory cannot spell at any stage, with occurrences: `{"of": 7, "around": 2, "be": 2, "come": 2, "from": 2, "gold": 2, "near": 2, "quiet": 2, "white": 2, "friends": 1, "hi": 1, "knew": 1, "old": 1}`
+Words the inventory cannot spell at any stage, with occurrences: `{"around": 10, "near": 7, "could": 5, "cold": 3, "hi": 3, "liked": 3, "many": 3, "tall": 3, "find": 2, "leaves": 2, "new": 2, "put": 2, "quiet": 2, "walk": 2, "above": 1, "astronaut": 1, "behind": 1, "come": 1, "feathers": 1, "friends": 1, "full": 1, "going": 1, "great": 1, "heard": 1, "knew": 1, "other": 1, "over": 1, "ready": 1, "scare": 1, "told": 1, "what": 1}`
 
-**The actionable item in that list was `of`, and it has since been fixed.** It is among the most frequent words in English and the GPC inventory cannot spell it at any stage — CMUdict gives it one pronunciation, `AH1 V`, so an alignment needs `f`→/v/, which no scope & sequence teaches and which `tests/decoder/test_anti_golden.py::NEVER_DECODABLE` forbids by name. At the time of this matrix it was **not a sight word at any stage** either, so every story reaching for it spent part of its 5% violation budget on a word a child meets constantly. `of` is now a stage-2 sight word, together with `so`, `do`, `be` and `from`, and `wh`→/w/ was added to the inventory (docs/DEVIATIONS.md 8.10–8.13). Re-scoring this run’s 169 stored stories against the corrected vocabulary improved 12 of them and made none worse; the figures ABOVE are the measurements as recorded at run time and are deliberately not restated. A future matrix should show `of` gone from this list.
-
-Of the other words above, only `come` is a sight word (stage 6), and it appears here at stage 5, before it unlocks, which is the list working correctly.
+**`of` is absent from that list, and that is the previous matrix's one actionable finding closing.** It was the most frequent word the 92-GPC inventory could not spell at any stage and was not a sight word either, so every story reaching for it spent part of its 5% violation budget; it is a stage-2 sight word now, with `so`, `do`, `be` and `from` (docs/DEVIATIONS.md 8.10–8.13). Whatever remains above is the honest residue — 8.18 records which of those words were measured against the inventory ratchet and deliberately NOT added.
 
 ### Per stage (every rate over SCORED words)
 
 | stage | scored words | schwa | ambiguity | heteronym | unalignable | unalignable words |
 |---|---|---|---|---|---|---|
-| 1 | 356 | 10.4% | 27.8% | 0.0% | 0.0% | — |
-| 2 | 302 | 5.0% | 16.2% | 1.3% | 0.0% | — |
-| 3 | 322 | 3.1% | 25.2% | 4.3% | 0.0% | — |
-| 4 | 302 | 7.3% | 29.8% | 7.6% | 0.0% | — |
-| 5 | 419 | 4.1% | 21.7% | 5.5% | 0.5% | come |
-| 6 | 542 | 8.7% | 24.0% | 10.1% | 0.2% | around |
-| 7 | 486 | 10.9% | 22.6% | 4.7% | 0.4% | hi, near |
-| 8 | 534 | 9.4% | 24.2% | 8.2% | 1.1% | be, friends, from, gold, of |
-| 9 | 568 | 7.7% | 22.7% | 7.9% | 0.5% | knew, of, old |
-| 10 | 543 | 6.8% | 21.5% | 6.4% | 0.6% | be, of |
-| 11 | 640 | 9.5% | 20.2% | 10.5% | 0.6% | around, of, quiet |
-| 12 | 583 | 8.6% | 20.2% | 7.5% | 1.2% | gold, near, of, quiet, white |
+| 1 | 376 | 10.4% | 29.8% | 0.0% | 0.0% | — |
+| 2 | 459 | 5.2% | 24.2% | 2.4% | 0.0% | — |
+| 3 | 356 | 1.7% | 29.8% | 2.0% | 0.0% | — |
+| 4 | 389 | 6.9% | 25.2% | 4.1% | 0.3% | heard |
+| 5 | 772 | 7.3% | 22.9% | 4.0% | 0.3% | cold, come |
+| 6 | 760 | 7.4% | 23.0% | 9.7% | 0.3% | near, what |
+| 7 | 809 | 14.3% | 28.7% | 7.0% | 0.6% | near, new, walk |
+| 8 | 682 | 5.9% | 22.9% | 7.9% | 0.1% | around |
+| 9 | 1436 | 11.4% | 26.0% | 8.6% | 1.7% | above, around, astronaut, behind, cold, could, friends, full, going, great, hi, knew, many, near, other, quiet, scare, tall, told |
+| 10 | 1171 | 8.8% | 23.2% | 7.7% | 0.9% | around, hi, leaves, liked, near, ready, tall |
+| 11 | 1216 | 11.3% | 25.7% | 8.9% | 0.9% | around, could, feathers, find, near, new, put |
+| 12 | 1142 | 10.2% | 22.7% | 9.7% | 1.1% | around, cold, could, leaves, liked, many, over, put, quiet, tall, walk |
 
 ## 10. OOV
 
 §5.3: CMUdict is an adult lexicon, so a missing entry fails the word — which is the conservative direction, but it is a real limit. §7's gate requires **zero** OOV, so any OOV word forces a rewrite or a rejection.
 
-0 OOV word instance(s) across 0 of 169 produced stories.
+0 OOV word instance(s) across 0 of 180 produced stories.
 
 ## 11. Story words (§4, §5.5)
 
@@ -290,28 +272,28 @@ The cap is 3 **distinct** words per story. STATE invariant 3: a decodable reader
 | metric | value |
 |---|---|
 | stories over the cap | **0** |
-| stories using no story word | 16 |
-| total story-word occurrences | 1475 |
+| stories using no story word | 23 |
+| total story-word occurrences | 1949 |
 
 | distinct story words used | stories |
 |---|---|
-| 0 | 16 |
-| 1 | 8 |
-| 2 | 17 |
-| 3 | 139 |
+| 0 | 23 |
+| 1 | 12 |
+| 2 | 20 |
+| 3 | 125 |
 
-- `animals`: {"rabbit": 48, "forest": 43, "burrow": 40, "whiskers": 1}
-- `dragons`: {"cave": 56, "dragon": 56, "fire": 36, "wings": 10, "treasure": 8}
-- `space`: {"moon": 52, "rocket": 52, "stars": 42, "astronaut": 12, "planet": 3}
+- `animals`: {"rabbit": 54, "forest": 48, "burrow": 45, "elephant": 1, "whiskers": 1}
+- `dragons`: {"cave": 41, "dragon": 41, "fire": 19, "wings": 19, "treasure": 5, "knight": 1}
+- `space`: {"rocket": 54, "moon": 44, "stars": 43, "astronaut": 10, "planet": 1}
 
 ## 12. Length compliance and register
 
 | metric | value |
 |---|---|
-| inside the stage's target range (of ATTEMPTED cells) | 52.2% |
-| inside the stage's target range (of PRODUCED stories) | 55.6% |
-| median word count | 59 |
-| mean type-token ratio | 0.512 |
+| inside the stage's target range (of ATTEMPTED cells) | 95.6% |
+| inside the stage's target range (of PRODUCED stories) | 95.6% |
+| median word count | 84 |
+| mean type-token ratio | 0.478 |
 
 Both denominators are printed because they answer different questions, and an unlabelled one is AUDIT-PHASE7 F9 (DEVIATIONS 8.34). A cell that produced no text is not length-compliant, so the ATTEMPTED figure is the one that counts availability honestly; the PRODUCED figure is the generation quality of the text that exists. The same caveat applies to the per-stage “pass rate” column in section 4, which is over attempted cells.
 
@@ -323,12 +305,12 @@ Both denominators are printed because they answer different questions, and an un
 
 | table | what |
 |---|---|
-| `eval_runs` | 1 row — id 2, status `completed` |
+| `eval_runs` | 1 row — id 114, status `completed` |
 | `eval_run_items` | 180 rows, one per attempted story |
-| `stories` | 169 rows at **`status='eval'`** (+ their `story_segments`) |
+| `stories` | 180 rows at **`status='eval'`** (+ their `story_segments`) |
 | `questions` / `readings` / `answers` / `gpc_stats` | **untouched** |
 
-**Nothing this run wrote can be served to a child, whether it passed or not.** That is structural, not a promise: `api/stories.py::SERVABLE_STATUSES` is the allowlist `("warm", "complete")` that both `_SERVE_SQL` and `GET /api/stories/{id}` filter on, and it does not name `eval` (DEVIATIONS 7.41). The servable pool measured **52 stories before this run and 52 after**.
+**Nothing this run wrote can be served to a child, whether it passed or not.** That is structural, not a promise: `api/stories.py::SERVABLE_STATUSES` is the allowlist `("warm", "complete")` that both `_SERVE_SQL` and `GET /api/stories/{id}` filter on, and it does not name `eval` (DEVIATIONS 7.41). The servable pool measured **119 stories before this run and 119 after**.
 
 Verified after the run rather than asserted: `tests/test_eval.py` plants an `eval` story alone at the top of the §7 ladder — the row `_SERVE_SQL` would pick first if the status were servable — and checks `POST /api/stories/request`, `GET /api/stories/{id}` and `POST /api/readings`. Adding `"eval"` to `SERVABLE_STATUSES` turns those tests red and the request endpoint hands back the fixture, which is what makes them an experiment. Separate tests assert that no `eval` row ever acquires a `last_served_at`, a question row or a reading.
 
@@ -350,12 +332,12 @@ Stated rather than omitted, because a report that lists only what it found is no
 
 ## 15. Re-running and comparing
 
-The run is reproducible in configuration, not in output — the model is not deterministic. For runs from DEVIATIONS 8.32-8.33 onward — which does NOT include this one, see section 1 — `eval_runs.config` holds the matrix, the model ids, the pricing date, the gate, the rewrite budget, the timeouts, the git commit **with a dirty-tree flag and a content hash of the code that ran**, and **a fingerprint of the vocabulary the gate was computed against** — so two runs are comparable as distributions, and a reader can tell when they are not (DEVIATIONS 8.32-8.33). Each item additionally records the model every call was made with and the price sheet applied to it, so no claim about the model rests on the config table alone (8.30). `--pricing-date` is explicit precisely so a cost figure regenerated later cannot silently disagree with the one printed here.
+The run is reproducible in configuration, not in output — the model is not deterministic. `eval_runs.config` holds the matrix, the model ids, the pricing date, the gate, the rewrite budget, the timeouts, the git commit **with a dirty-tree flag and a content hash of the code that ran**, and **a fingerprint of the vocabulary the gate was computed against** — so two runs are comparable as distributions, and a reader can tell when they are not (DEVIATIONS 8.32-8.33). Each item additionally records the model every call was made with and the price sheet applied to it, so no claim about the model rests on the config table alone (8.30). `--pricing-date` is explicit precisely so a cost figure regenerated later cannot silently disagree with the one printed here.
 
 `--resume RUN_ID` restores the matrix parameters and **verifies** everything it cannot restore, refusing with exit code 3 rather than continuing one matrix under a different model, gate, price sheet, timeout or vocabulary (8.31). Comparing two runs starts with their `config.vocabulary` and `config.provenance.code_sha256`: if either differs, the two distributions are measurements of different things.
 
 ```
-make eval                                  # the full §1 matrix, ~$2.80, ~80 min of pipeline time
+make eval                                  # the full §1 matrix, ~$5.41, ~76 min of pipeline time
 make eval EVAL_ARGS="--estimate-only"      # project the spend, no API call
 make eval-smoke                            # 4-story regression gate, ~$0.06
 
@@ -363,5 +345,5 @@ make eval-smoke                            # 4-story regression gate, ~$0.06
 services/api/.venv/bin/python scripts/eval_doc.py reports/eval-<ts>.json docs/EVAL.md
 ```
 
-_Generated by `scripts/eval_doc.py` from `eval-20260729T221359Z.json`, with the per-HTTP-attempt timeout supplied as 30s because the run recorded none._
+_Generated by `scripts/eval_doc.py` from `eval-20260730T041835Z.json`._
 

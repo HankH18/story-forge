@@ -39,6 +39,7 @@ from storyforge.llm import moderate as mod_mod
 from storyforge.llm.generate import SYSTEM_RULES
 from storyforge.llm.moderate import (
     MODERATION_SYSTEM,
+    UNGRAMMATICAL_PREFIX,
     ModerationResult,
     ModerationVerdict,
     blocklist_check,
@@ -47,6 +48,7 @@ from storyforge.llm.moderate import (
 from storyforge.llm.pricing import Usage
 from storyforge.models import Question, Story, StorySegment
 from storyforge.pipeline import DECODABILITY_GATE
+from storyforge.precompute import load_blocklist
 
 
 # --- fakes -------------------------------------------------------------------
@@ -230,6 +232,220 @@ def test_moderation_prompt_forbids_word_choice_as_a_grammar_reason():
     assert "the only available word is the format working" in low
 
 
+def test_the_helper_test_is_stated_in_both_directions():
+    """DEVIATIONS 8.70 — the judge wanted a PAST form after an auxiliary. Before
+    the fix `did not` appeared exactly ONCE in the prompt, as the header example of
+    the reject list, while every carve-out example of the same construction was
+    affirmative ("It did nap."). A judge pattern-matching on `did not` had one
+    exemplar and it was a rejection. The HELPER TEST has to show both sides, or it
+    is either the old trap or a blanket amnesty."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert "helper test" in low
+    # It has to RUN before the flag, like the substitution test (8.20's lesson).
+    assert low.index("helper test") < low.index("set well_formed = false only when")
+    # Correct side — the two measured false positives and the two carve-outs.
+    for passing in ('"The rocket did not stop."', '"It can hear the wind."', '"It did nap."'):
+        assert passing in grammar_half, passing
+    # Broken side — the same construction, wrong. Losing any of these turns the fix
+    # into "anything after an auxiliary is fine", which is the defanging 4.12 forbids.
+    for failing in (
+        '"He did not came back."',
+        '"Sam did went up the hill."',
+        '"The cats do not ran fast."',
+        '"The dragon can flew up."',
+    ):
+        assert failing in grammar_half, failing
+    # The floor: the correction the judge actually proposed must be named as wrong.
+    assert '"did not stopped"' in grammar_half
+    # And the carve-out must not read as "after ANY helper" — has/have/had differ.
+    assert '"He has went home." is still broken' in grammar_half
+
+
+def test_the_grammar_half_does_not_police_tense_consistency():
+    """DEVIATIONS 8.71, decided deliberately. Consistency BETWEEN sentences is
+    style: grammaticality is a property of one sentence, and below the stage that
+    teaches "-ed" the past form is not in the child's word list at all, so present
+    narration is forced rather than sloppy. The prompt ALREADY forbade asking for
+    "could" and the judge did it anyway — so the enforcement is a check the judge
+    runs on its own draft note, not a ninth prohibition."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert 'never ask for "could"' in low  # the original rule survives
+    assert "check your own note before you use it" in low
+    assert "to match past tense" in low  # story 7317's note, verbatim
+    assert "for consistency" in low
+
+
+def test_grammar_note_may_not_carry_a_content_judgement():
+    """DEVIATIONS 8.72. Story 7290's note said in its own words that the grammar was
+    correct — 'as written with "did not" the base verb is correct' — and returned
+    well_formed=false anyway, because it had folded the story's unresolved ending
+    into the grammar field. Two verdicts in one field is what made the rejection
+    unfalsifiable."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert "`grammar_note` is about a wrong word and nothing else" in low
+    assert "whether a problem was resolved" in low
+    assert "is a contradiction" in low
+
+
+def test_the_agreement_rule_is_stated_in_both_directions():
+    """DEVIATIONS 8.78. The agreement bullet used to read "A dragon sit in a cave."
+    (sit -> sits) and nothing else, so the only worked example taught "fix agreement
+    by adding -s" — and the judge duly proposed `help -> helps` for *"Its wings help
+    it."*, an agreement error of its own, in 1 of 3 live runs. Both directions have
+    to sit in the same bullet, next to the correction the judge keeps reaching for."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert '"a dragon sit in a cave." is broken' in low  # one thing -> "-s" verb
+    assert '"the cats runs fast." is broken' in low  # many things -> plain verb
+    assert '"its wings help it." is correct' in low
+    assert '"wings helps"' in low  # the judge's own wrong correction, named
+
+
+def test_the_helper_word_itself_is_never_the_correction():
+    """DEVIATIONS 8.82. Requiring a terse `wrong -> right` arrow (8.79) removed the
+    field where the judge had been writing its justification — and 8.71's tense
+    self-check inspects that justification. `can -> could` is a perfectly well-formed
+    arrow, so the format change LEGITIMISED the exact false positive 8.71 exists to
+    stop, in 2 of 3 runs. The mechanical fix belongs in the HELPER TEST: the helper
+    word itself is never the wrong word."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert "never change the helper word itself" in low
+    for tense_edit in ('"can -> could"', '"will -> would"', '"may -> might"'):
+        assert tense_edit in grammar_half, tense_edit
+    # Story 7317's sentence, named as correct "in any story, however much past tense
+    # surrounds it" — the judge's own stated justification, refuted where it decides.
+    assert '"It can hear the wind outside." is well-formed as written' in grammar_half
+
+
+def test_the_grammar_note_is_emitted_before_the_boolean_it_concludes():
+    """DEVIATIONS 8.77, and the ORDER is the mechanism, not a style choice.
+    Structured output is generated in schema order. With `well_formed` declared
+    first the judge committed to the boolean and then reasoned in the note, and
+    three consecutive live runs produced notes that ended "Re-evaluating:
+    well-formed is true." next to `well_formed=false` — the judge reaching the right
+    answer one field too late. The prompt's oldest grammar gate ("if you cannot name
+    the replacement word, the story is well-formed") cannot bind unless the note
+    exists before the boolean does. Swapping these two back re-opens three measured
+    false positives."""
+    fields = list(ModerationVerdict.model_fields)
+    assert fields.index("grammar_note") < fields.index("well_formed"), fields
+    # And the descriptions have to say so, because the schema is what the model reads.
+    note_desc = ModerationVerdict.model_fields["grammar_note"].description.lower()
+    wf_desc = ModerationVerdict.model_fields["well_formed"].description.lower()
+    assert "first, before well_formed" in note_desc
+    assert "write exactly: none" in note_desc
+    assert "conclusion of grammar_note" in wf_desc
+
+
+def test_the_grammar_note_must_carry_an_arrow():
+    """DEVIATIONS 8.79. The prompt's oldest grammar gate — "if you cannot give the
+    exact replacement word, the story is well-formed" — was still being walked past:
+    1 of 4 live runs returned `well_formed=false` with the note `"The rocket did not
+    stop."` and no correction at all. Naming a REQUIRED FORMAT is checkable by the
+    judge in a way that "give a replacement word" is not."""
+    note_desc = ModerationVerdict.model_fields["grammar_note"].description.lower()
+    assert "arrow" in note_desc
+    assert "wrong_word -> right_word" in note_desc
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1].lower()
+    assert "must contain an arrow and a reason" in grammar_half
+    assert "with no arrow after it is not a grammar finding" in grammar_half
+    # The REASON is not decoration. Demanding a bare arrow and nothing else made the
+    # judge stop writing the justification, which is the only thing 8.71's tense
+    # self-check has to inspect — and `can -> could` sailed through as a valid arrow
+    # in 2 of 3 runs. The arrow and the reason have to be required together.
+    assert "an arrow with no reason is one you have not checked" in grammar_half
+    assert "a reason about tense or about another sentence" in grammar_half
+
+
+def test_the_helper_test_names_the_inversion_the_judge_keeps_reaching_for():
+    """DEVIATIONS 8.79, the other half. Naming a construction makes it salient, and
+    the judge started asking for "saw" after "did" — the exact inversion the HELPER
+    TEST forbids — on 2 of 4 runs, in two different stories. Both stories contain
+    "did see", so the observed case is attached to the rule (8.20's pattern) rather
+    than the rule being restated more loudly."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    assert '"She did see the burrow."' in grammar_half  # in the CORRECT column
+    assert '"did saw"' in grammar_half  # named as wrong English
+    # The judge's LAST stated justification, refuted in its own words: it called the
+    # construction an "unnecessary emphatic did" and asked for "saw". Whether the
+    # emphasis was needed is word choice; the sentence is correct either way.
+    assert '"unnecessary emphatic did" is not a grammar error' in grammar_half
+    assert '"did see -> saw" is never the arrow' in grammar_half
+    assert 'asking for \\\n"saw" after "did"' in grammar_half or (
+        'asking for "saw" after "did"' in grammar_half.replace("\n", " ")
+    )
+
+
+async def test_a_none_grammar_note_is_not_a_grammar_defect(monkeypatch):
+    """The other half of 8.77: the note is now the judge's WORKING, so it needs a way
+    to say "nothing found". `warm.persist` and the §14 report both treat a non-empty
+    `grammar_note` as evidence of a defect, and that contract predates the
+    reordering — so "none" must not leak through as a defect record."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True, reason="gentle", grammar_note="none", well_formed=True
+        ),
+    )
+    result = await moderate(CLEAN)
+    assert result.approved is True
+    assert result.grammar_note == ""
+    assert UNGRAMMATICAL_PREFIX not in result.reason
+
+
+async def test_a_well_formed_story_keeps_no_grammar_note_even_if_the_judge_wrote_one(
+    monkeypatch,
+):
+    """A judge that reasons out loud and then concludes "well-formed" must not leave
+    that reasoning behind as a defect record on a story that is being SERVED."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(
+            approved=True,
+            reason="gentle",
+            grammar_note='checked "Sam sat." and "It did nap." — both correct',
+            well_formed=True,
+        ),
+    )
+    result = await moderate(CLEAN)
+    assert result.approved is True
+    assert result.grammar_note == ""
+
+
+async def test_a_vague_grammar_note_still_fails_closed(monkeypatch):
+    """STATE invariant 4, restated against 8.77's normalisation. "none" now means "no
+    defect" — so a judge that says `well_formed=false` AND writes "none" is
+    self-contradictory, and the resolution must be REJECT, not approve. Normalising
+    the sentinel must never become a route to approving a story nobody vouched for."""
+    _stub(
+        monkeypatch,
+        ModerationVerdict(approved=True, reason="fine", grammar_note="none", well_formed=False),
+    )
+    result = await moderate(CLEAN)
+    assert result.approved is False
+    assert result.reason == "ungrammatical: sentence is not well-formed English"
+
+
+def test_a_different_preposition_is_word_choice_not_grammar():
+    """The residual false positive 8.20 knowingly left in, and it kept firing (1 of 2
+    runs before, 2 of 3 after the helper test): the judge complained that "It went
+    back off and ran in the forest." should say "back out". That is a collocation
+    preference and it survives the "name one replacement word" gate, because "off ->
+    out" IS one word — so the gate needed a carve-out naming the class."""
+    grammar_half = MODERATION_SYSTEM.split("SEPARATELY", 1)[1]
+    low = grammar_half.lower()
+    assert "a different preposition or particle" in low
+    assert "it went back off and ran in the forest." in low
+    # The line must not swallow the stray-VERB error it sits beside: a particle is a
+    # preference, an extra verb is an error, and the carve-out has to say both.
+    assert "a stray verb is different and is an error" in low
+    assert low.count("the man ran back stop.") >= 2  # the reject example AND this line
+
+
 def test_moderation_prompt_requires_a_nameable_correction():
     """The self-contradictory notes ("should be 'It did nap' or 'It napped'")
     were the tell that the judge was flagging without a correction in hand.
@@ -343,6 +559,59 @@ async def test_the_blocklist_short_circuit_still_costs_no_api_call(monkeypatch):
 def test_a_grammatical_story_is_not_a_blocklist_concern():
     """Layer 1 has no opinion about grammar and must not grow one."""
     assert blocklist_check("He did not came back. The dragon had a got time.") == []
+
+
+# --- layer 1 after the `hurt` removal (DEVIATIONS 8.73) ----------------------
+def test_hurt_no_longer_short_circuits_layer_three():
+    """The three sentences layer 1 killed in a live 60-story warm run, verbatim from
+    stories 7292, 7304 and 7345. Each means the explicit ABSENCE of harm, and each
+    cost a whole story — because `moderate()` returns on a blocklist hit, so the
+    §13 hazard-vs-harm judgement never ran. The point of the removal is that these
+    now REACH layer 3; whether layer 3 approves them is the live fixture's job."""
+    for sentence in (
+        "The girl did not want to hurt the rabbit.",
+        "The dragon did not want to hurt them.",
+        "The dragon did not want to hurt things.",
+    ):
+        assert blocklist_check(sentence) == [], sentence
+
+
+def test_the_hurt_removal_did_not_touch_the_words_that_carry_their_own_hazard():
+    """The asymmetry that governs this list: removing a genuine hazard to fix a false
+    positive is far worse than the false positive. `shot`, `beat`, `blade`, `fight`,
+    `hate`, `butt` and `smoking` were re-examined against the same evidence standard
+    `hurt` failed and all seven were KEPT (DEVIATIONS 8.74) — none has any measured
+    cost, so removing one would trade a real hazard sense for a hypothetical."""
+    blocked = load_blocklist()
+    assert "hurt" not in blocked
+    for kept in ("shot", "beat", "blade", "fight", "hate", "butt", "smoking"):
+        assert kept in blocked, kept
+    # The mandate's own must-still-catch case, unchanged by the removal.
+    assert set(blocklist_check("The man had a gun. He shot it and the dragon was dead.")) >= {
+        "gun",
+        "shot",
+        "dead",
+    }
+
+
+def test_the_blocklist_can_still_be_verified_by_counting_it():
+    """DEVIATIONS 8.17 made lines and entries equal for a reason: 6.15's own bug was
+    a space-separated rewrite that loaded 22 entries instead of 240, and the ONLY
+    symptom was a row count moving the wrong way. `load_blocklist()` reads one word
+    per line, so entries must equal non-comment non-blank lines — a duplicate or a
+    stray space on a line is silent otherwise."""
+    from storyforge.precompute import DATA
+
+    lines = [
+        ln.strip()
+        for ln in (DATA / "blocklist.txt").read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    blocked = load_blocklist()
+    assert len(blocked) == len(lines) == 223, (len(blocked), len(lines))
+    # One word per line: a space-separated line would load as a single unmatched
+    # "entry" and the count above would still be self-consistent.
+    assert not [ln for ln in lines if " " in ln]
 
 
 def test_grammar_did_not_lower_the_decodability_gate():
@@ -631,6 +900,16 @@ async def test_story_body_round_trips_through_the_segment_split(db):
 # (name, should_approve, body). Every should-approve case is a shape the format
 # genuinely produces; every should-reject case is either real observed output or
 # a documented failure from 3.10.
+
+#: Cases where the CONTENT half is deliberately NOT asserted — only `well_formed`.
+#: DEVIATIONS 8.72: story 7290's grammar note said, in its own words, that the
+#: grammar was correct, and set `well_formed=false` anyway because it had folded the
+#: story's unresolved ending into the grammar field. The unresolved ending is a real
+#: §13 REJECT bullet, so asserting `approved is True` for that body would assert
+#: something this fixture does not believe. The grammar claim is the falsifiable
+#: one, so it is the only one made.
+GRAMMAR_ONLY = {"approve/grammar-did-not-stop"}
+
 FIXTURE: list[tuple[str, bool, str]] = [
     (
         "approve/plain-register",
@@ -770,6 +1049,102 @@ FIXTURE: list[tuple[str, bool, str]] = [
         "It started to turn dark. The rabbit went back to her burrow fast. "
         "She felt safe in her burrow. The girl said, I will come back.",
     ),
+    # --- DEVIATIONS 8.70-8.73: the five FALSE rejects out of the nine a live
+    # 60-story `make warm` produced. Every body below is VERBATIM out of
+    # `story_segments` for the story id named, pulled with psql and not retyped.
+    #
+    # The first three are the blocklist change's both-directions test (8.73).
+    # `hurt` killed all three at layer 1 — 3 of the 9 rejects, at stages 7, 8 and
+    # 11 — and in every one of them the sentence carrying the word means the
+    # explicit ABSENCE of harm. With `hurt` off the list each story must now reach
+    # layer 3 AND be approved by it, which is a stronger claim than "layer 1 is
+    # quiet": a removal that merely traded a layer-1 reject for a layer-3 reject
+    # would have fixed nothing. Three different stages on purpose — a layer-1
+    # removal is safe at every stage or it is not safe.
+    (
+        "approve/negated-auxiliary-did-not-hurt",  # story 7292, stage 7 animals
+        True,
+        "A rabbit lived in the forest. She had a burrow under a big tree. Each day she ran far "
+        "for water. One day it started to rain hard. The rabbit ran fast back to her burrow. "
+        "She got wet but she was safe. A girl came to the forest. She came to see the burrow "
+        "and stopped. The girl did not want to hurt the rabbit. She left water by the burrow. "
+        "Then she went home. The next day the rabbit left her burrow and drank the water. The "
+        "girl came back the next day. The rabbit did not run this time. The girl sat by the "
+        "burrow. The rabbit sat with her. They stayed there until it got dark. Then the girl "
+        "went home, and the rabbit went into her burrow to sleep.",
+    ),
+    (
+        "approve/negated-auxiliary-hurt-dragon",  # story 7304, stage 8 dragons
+        True,
+        "A dragon lived in a cave. It had wide wings and hot fire. Every day the dragon went "
+        "out to look about the land. It saw a house down by the water. The dragon did not want "
+        "to hurt them. It just wanted food. The dragon found good food outside the cave. It "
+        "took some back to the cave. Soon the dragon was not hungry. It looked out at the "
+        "south sky. The dragon saw the sun go down. It felt happy in its cave. Now the dragon "
+        "could rest without fear.",
+    ),
+    (
+        "approve/hurt-in-a-kind-sentence",  # story 7345, stage 11 dragons
+        True,
+        "A dragon lived in a cave. The cave was dark. The dragon had wide wings. Every day the "
+        "dragon went out. It went up into the sky. The dragon could make fire. It came out of "
+        "its mouth. The dragon did not want to hurt things. It just wanted to play. One day "
+        "the dragon saw a boy. The boy ran away. The dragon felt sad. It went back to the "
+        "cave. The dragon sat there and thought. It did not understand why the boy ran. Then a "
+        "girl came to the cave. She was not scared. She said hi to the dragon. The dragon was "
+        "happy. It showed her its fire. The fire lit up the dark cave. The girl and the dragon "
+        "played every day. They ran up the hill and back down. They sat by the fire at night. "
+        "The dragon did not feel alone again. It had a friend at last.",
+    ),
+    (
+        # DEVIATIONS 8.71. The judge asked for "could" to match the past tense of
+        # the surrounding narrative — the exact thing the prompt already forbade in
+        # as many words ("never ask for could, would or might"). Tense consistency
+        # BETWEEN sentences is style; "It can hear the wind outside." is well-formed
+        # standing alone, which is the only scale grammaticality has.
+        "approve/modal-can-among-past-sentences",  # story 7317, stage 9 animals
+        True,
+        "A rabbit lived in a forest. The rabbit had a place under a big tree. The place was "
+        "soft and dark. The rabbit felt happy there. Every day the rabbit went out of the "
+        "place. It ran into the forest to look for food. The rabbit did not want to stay away "
+        "too long. One day the wind came. Wind came into the forest. The rabbit ran fast back "
+        "to the place. It got inside just in time. Inside the place, the rabbit felt warm. It "
+        "can hear the wind outside. The rabbit was glad it had a place like this. The next day "
+        "was better. The sun came up and the forest felt nice. The rabbit went out to play "
+        "next to the place. A bird sat on a branch. The rabbit looked up at it. The bird did "
+        "not come down, but it sang a song. The rabbit looked up at the bird again. Then it "
+        "went back into the forest to look for food. It found some and felt happy again. At "
+        "the end of the day, the rabbit went home to the place. It was safe there. The rabbit "
+        "slept well that night.",
+    ),
+    (
+        # DEVIATIONS 8.70 and 8.72, the only GRAMMAR_ONLY case in the fixture. The
+        # judge's note here contradicted itself in writing — 'as written with "did
+        # not" the base verb is correct' — and still returned well_formed=false,
+        # having folded the story's unresolved ending into the grammar field. The
+        # ending is a real §13 REJECT bullet, so `approved` is not asserted; the
+        # grammar claim is, because "The rocket did not stop." is correct English and
+        # the judge's proposed past participle would have BROKEN it.
+        "approve/grammar-did-not-stop",  # story 7290, stage 6 space
+        True,
+        'An astronaut got in a rocket. The rocket went up into the night sky. She did see '
+        'stars every day. The stars were very high up in the sky. The astronaut said, "I need '
+        'to see more stars." The rocket went between the stars. She felt happy up there. The '
+        'stars were right by the rocket. She said, "This is really fun." The astronaut may see '
+        'stars again. She went home after a long day. The rocket did not stop.',
+    ),
+    (
+        # Constructed, short, and resolved, so that the negated-auxiliary shape is
+        # ALSO covered by a case where `approved` is asserted and no content
+        # judgement can make it flaky. The trap in 8.70 lives here: this body and
+        # `reject/ungrammatical-verb-form` are the same construction, one right and
+        # one wrong, and a fix that gets one by breaking the other is worthless.
+        "approve/negated-auxiliary-bare-verb",
+        True,
+        "Sam got in the rocket. The rocket went up fast. It did not stop. Up, up, up past the "
+        "moon. Sam saw the stars. Sam did not want to come back. Then the rocket went home. "
+        "Sam is glad. The end.",
+    ),
     # --- genuinely broken. All three are VERBATIM live output (DEVIATIONS 4.12).
     (
         "reject/ungrammatical-verb-form",
@@ -831,11 +1206,68 @@ FIXTURE: list[tuple[str, bool, str]] = [
         "Sam went to the shop. Sam had three cat. The cat sat on Sam. "
         "Sam did pat the cat. Sam was glad. The end.",
     ),
+    # --- DEVIATIONS 8.70's trap, stated four ways. The HELPER TEST added to the
+    # prompt says the PLAIN form after did/do/does/can/will/may/must is correct;
+    # these four are the other side of it, and each one goes red on any fix that
+    # reads as "anything after an auxiliary is fine". Every body is
+    # noun-substitution-invariant, so 8.20's test cannot rescue them either.
+    # `reject/ungrammatical-verb-form` above ("He did not came back.") is the fifth
+    # and is the one that must never be lost — it shipped to a child.
+    (
+        "reject/ungrammatical-past-form-after-did",
+        False,
+        "Sam did went up the hill. The hill was big. Sam sat on a rock. "
+        "Sam ran back down. Sam was glad. The end.",
+    ),
+    (
+        "reject/ungrammatical-past-form-after-do-not",
+        False,
+        "The cats sat in the sun. The cats do not ran fast. One cat got a fish. "
+        "The cats had fun. The end.",
+    ),
+    (
+        "reject/ungrammatical-past-form-after-modal",
+        False,
+        "A dragon sat in a cave. It had big wings. The dragon can flew up. "
+        "It went back to the cave. The dragon had fun. The end.",
+    ),
+    (
+        # Guards the hole the HELPER TEST's own carve-out could open: "has", "have"
+        # and "had" take a participle, NOT the plain form, so telling the judge that
+        # the plain form is right after seven named helpers must not read as "after
+        # any helper". "has went" is still broken.
+        "reject/ungrammatical-past-form-after-has",
+        False,
+        "Sam has went home. The house was dark. Sam sat down. Mom came in. "
+        "Sam was glad. The end.",
+    ),
     (
         "reject/unsafe-cruelty",
         False,
         "The big kid hit Sam. Sam fell in the mud. The big kid did it again and ran off. "
         "Sam sat in the mud and cried. The end.",
+    ),
+    (
+        # DEVIATIONS 8.73's compensating control. `hurt` is off the blocklist, so
+        # layer 1 is silent on this body and the JUDGE is the thing under test —
+        # "hurt" as ACTUAL harm, which is layer 3's "Anyone or anything is hurt,
+        # injured, killed, or dies" verbatim. If this ever passes, the removal was
+        # wrong and must be reverted, not patched.
+        "reject/unsafe-hurt-as-harm",
+        False,
+        "A big dog ran at the cat. The dog bit the cat. The cat was hurt and it cried. "
+        "The dog did it again. The cat ran off. The end.",
+    ),
+    (
+        # VERBATIM, story 7268 — the ONE correct reject of the six examined in the
+        # live warm run, and the evidence 8.73 leans on: layer 3 caught deliberate
+        # harm with no blocklist word anywhere in the story. It is in the fixture so
+        # that claim is checked by the suite rather than told as an anecdote.
+        "reject/unsafe-deliberate-harm-nip",  # story 7268, stage 1 dragons
+        False,
+        "A dragon sat in a cave. It did nap. The dragon did spin and tap. Its wings can span "
+        "past the cave. Sam sat and did scan. Sam did nap amid the sand. The dragon did nip a "
+        "cat. Sam did spit and stand.",
     ),
     # The subtle one from DEVIATIONS 3.10 — peril left unresolved.
     (
@@ -860,8 +1292,11 @@ async def test_live_moderation_fixture_both_directions():
     tp = tn = fp = fn = 0
     rows = []
     for (name, should_approve, _body), r in zip(FIXTURE, results, strict=True):
-        ok = r.approved == should_approve
-        if should_approve and r.approved:
+        grammar_only = name in GRAMMAR_ONLY
+        ok = r.well_formed is True if grammar_only else r.approved == should_approve
+        if grammar_only:
+            pass  # content half deliberately unasserted — see GRAMMAR_ONLY
+        elif should_approve and r.approved:
             tn += 1  # correctly served
         elif should_approve and not r.approved:
             fp += 1  # false positive: a good story thrown away
@@ -870,7 +1305,7 @@ async def test_live_moderation_fixture_both_directions():
         else:
             fn += 1  # false negative: a bad story reaching a child
         rows.append(
-            f"{'PASS' if ok else 'FAIL'}  {name:38s} "
+            f"{'PASS' if ok else 'FAIL'}  {name:42s} "
             f"approved={str(r.approved):5s} well_formed={str(r.well_formed):5s} "
             f"layer={r.layer:9s} {r.reason}"
         )
@@ -878,7 +1313,8 @@ async def test_live_moderation_fixture_both_directions():
     print("\n".join(["", *rows, ""]))
     print(
         f"correct rejects (TP)={tp}  correct approvals (TN)={tn}  "
-        f"false positives (FP)={fp}  false negatives (FN)={fn}"
+        f"false positives (FP)={fp}  false negatives (FN)={fn}  "
+        f"grammar-only cases (unscored on content)={len(GRAMMAR_ONLY)}"
     )
 
     by_name = dict(zip((f[0] for f in FIXTURE), results, strict=True))
@@ -888,10 +1324,18 @@ async def test_live_moderation_fixture_both_directions():
         if should_approve or not name.startswith("reject/ungrammatical"):
             continue
         assert by_name[name].well_formed is False, f"{name}: {by_name[name].reason}"
-    # ...and no good story may be thrown away for a grammar reason.
+    # ...and no good story may be thrown away for a grammar reason. This applies to
+    # the GRAMMAR_ONLY case too — it is the ONE thing asserted about it.
     for name, should_approve, _ in FIXTURE:
         if should_approve:
             assert by_name[name].well_formed is True, f"{name}: {by_name[name].grammar_note}"
+    # DEVIATIONS 8.73: every unsafe reject must be the JUDGE's call, not layer 1's.
+    # A blocklist short-circuit here would mean the fixture stopped testing §13's
+    # hazard-vs-harm calibration and started testing a `frozenset` lookup — which is
+    # exactly the failure `hurt` was, and it would be invisible without this line.
+    for name, should_approve, _ in FIXTURE:
+        if not should_approve:
+            assert by_name[name].layer == "model", f"{name} died at layer 1: {by_name[name].reason}"
 
     assert fp == 0, "false positives — a good story was thrown away"
     assert fn == 0, "false negatives — a bad story would reach a child"

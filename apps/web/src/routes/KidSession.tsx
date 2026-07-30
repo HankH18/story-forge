@@ -7,12 +7,34 @@
  * page turn and the question screen), which story words have already announced
  * themselves, and the reading id that every telemetry call hangs off.
  *
- * **There is no error state.** §01: "Kid mode has no error state — the warm
- * pool guarantees a story." The server's fallback ladder (stories.py) already
- * turns an empty (stage, theme) pool into a different story rather than a 404,
- * so the only thing left that can fail is the network. That retries three times
- * behind the "the printer is working" screen and then offers a big Try again —
- * still a friendly sentence and a button, never a stack trace, never a red box.
+ * **There is no error state, and there is no dead end either.** §01: "Kid mode has
+ * no error state — the warm pool guarantees a story." The server's fallback ladder
+ * (stories.py) already turns an empty (stage, theme) pool into a different story
+ * rather than a 404, so the only thing left that can fail is the network. That
+ * retries three times behind the "the printer is working" screen — still a
+ * friendly sentence, never a stack trace, never a red box.
+ *
+ * §01 has a second clause and this component used to fail it: a child must never
+ * get **stuck**. "Try again" returned to the picker, which re-entered the same
+ * loop, so against a failing API the printer screen was permanent — and it said
+ * the printer was working while nothing was (audit C10). §9's limiter is 10 story
+ * requests a minute, and an eleventh tap of "Read another" is ordinary behaviour
+ * for a five-year-old who wants a *different* dragon, so this was reachable
+ * without a single thing being broken.
+ *
+ * The path is now bounded, and every rung of it is a screen this app already has:
+ *
+ *   3 network attempts
+ *     → re-serve the last story THIS reader was served, if there is one
+ *       (`lib/lastStory.ts` — the server chose it, at this reader's stage, and
+ *       §5.7c monotonicity means a lower stage stays decodable, DEVIATIONS 8.62)
+ *     → otherwise the printer plus ONE "Try again"
+ *     → and on a second stall, `/app`: the adult's own screen, which is where a
+ *       problem a child cannot solve belongs (the same route a reader that does
+ *       not resolve already takes, 7.24).
+ *
+ * Nothing on that path renders an error string to a child, and nothing on it
+ * waits forever.
  *
  * **The stage is the reader's, and there is no session without one.** §9's
  * request body is `{kid_id, theme_id}` and the server maps kid → stage. This
@@ -70,6 +92,7 @@ import {
   type Theme,
 } from '../lib/api'
 import { branchFixture, isFixtureRequested } from '../lib/fixtures'
+import { loadLastStory, saveLastStory } from '../lib/lastStory'
 import {
   buildPlan,
   expectedSegmentCount,
@@ -91,6 +114,13 @@ import ThemePicker from './ThemePicker'
 
 const REQUEST_ATTEMPTS = 3
 const SIZE_KEY = 'sf.readingSize'
+/**
+ * How many times a child may land on the printer screen before the tablet goes
+ * back to the adult (§01: never stuck). One retry, then hand over — a second
+ * failure means the API is not having a moment, it is unavailable, and no number
+ * of taps by a five-year-old will change that.
+ */
+const MAX_STALLS = 2
 
 type Phase = 'picker' | 'loading' | 'reading' | 'questions' | 'celebration'
 
@@ -130,6 +160,8 @@ export default function KidSession() {
 
   /** Story words that have already auto-announced (§07: once per story). */
   const announced = useRef<Set<string>>(new Set())
+  /** Printer screens this session has parked on. See `MAX_STALLS`. */
+  const stalls = useRef(0)
 
   useEffect(() => {
     primeVoices()
@@ -166,8 +198,10 @@ export default function KidSession() {
   }, [size])
 
   const beginStory = useCallback(
-    (fresh: Story) => {
+    (fresh: Story, remember = true) => {
       announced.current = new Set()
+      stalls.current = 0
+      setStalled(false)
       setStory(fresh)
       setPlan(buildPlan(fresh.segments))
       setStep(0)
@@ -178,7 +212,14 @@ export default function KidSession() {
       // `kid` is non-null by construction here — nothing can reach this without
       // a resolved reader — but the guard stays, because the alternative is a
       // reading filed against `undefined`.
-      if (fresh.id > 0 && kid) void startReading(kid.id, fresh.id).then(setReadingId)
+      if (fresh.id > 0 && kid) {
+        void startReading(kid.id, fresh.id).then(setReadingId)
+        // `remember` is false only when this story CAME from the cache: re-saving
+        // it would roll its own seven-day expiry forward every time it is
+        // re-served, and that expiry is what stops a retracted story being
+        // re-served forever (DEVIATIONS 8.62).
+        if (remember) saveLastStory(kid.id, fresh)
+      }
       if (import.meta.env.DEV && fresh.fallback) {
         // Never shown to the child (§10 fixes the reading chrome at three
         // controls), but the operator should see which pool needs refilling.
@@ -212,10 +253,35 @@ export default function KidSession() {
           if (attempt < REQUEST_ATTEMPTS - 1) await delay(600 * 2 ** attempt)
         }
       }
+
+      // Every attempt failed. Before the printer screen: the last story the
+      // SERVER served this same reader, if it is still fit to re-serve. The child
+      // re-reads something decodable instead of watching a printer that is not
+      // printing, and the theme may be the previous one — which is exactly what
+      // §7's ladder does server-side when a pair is empty (DEVIATIONS 8.62).
+      const previous = loadLastStory(kid.id, kid.stage_id)
+      if (previous) {
+        if (import.meta.env.DEV) {
+          console.info('[kid] request failed; re-serving the last story', previous.id)
+        }
+        beginStory(previous, false)
+        return
+      }
+
+      stalls.current += 1
+      if (stalls.current >= MAX_STALLS) {
+        // Nothing to read and the API is not answering. A child cannot fix this
+        // and must not be left in front of it, so the tablet goes back to the
+        // adult — `/app` is a real screen with a real explanation, not an error
+        // page, and `RequireParent` sends a signed-out visitor to sign-in
+        // (DEVIATIONS 7.24, 8.62).
+        navigate('/app', { replace: true })
+        return
+      }
       // Still the printer screen — plus a way to ask again. Not an error state.
       setStalled(true)
     },
-    [beginStory, kid],
+    [beginStory, kid, navigate],
   )
 
   const finish = useCallback(
