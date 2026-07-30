@@ -68,6 +68,19 @@ REPLACES question rows rather than only filling gaps. The one thing it will not
 replace is a row a child has answered: `answers.question_id` cascades, so those
 stories take `_remoderate_questions`, which judges the text that is already
 there.
+
+**And it came back a third time, for the question type with no pure repair.**
+11.64 taught `check_mcq2` to refuse a two-choice question that contains the word
+distinguishing its own two answers, and refusing it at generation time reached
+none of the 37 servable rows already doing it — `_UNENRICHED_SQL` selected
+**zero** stories, because all three of its clauses ask whether something is
+MISSING and a leaking question is present, moderated and countable. The same
+shape as the grammar verdict (6.24), which went on being served on 4 of 28
+stories after the fix. `repair_leaky_mcq2` is the reach-back, and unlike every
+other repair here it DELETES: an `mcq2` prompt is free text about a plot and
+nothing can re-derive one, so the sweep removes what it cannot repair and hands
+the stripped story ids straight to the enrichment selection, which is the only
+route back to a comprehension screen (11.86-11.89).
 """
 
 from __future__ import annotations
@@ -100,7 +113,9 @@ from storyforge.llm.questions import (
     cue_candidates,
     cue_leaks,
     generate_questions,
+    mcq2_pair,
     prompt_is_current,
+    prompt_leaks_answer,
     story_word_tokens,
     tap_word_prompt,
     word_graphemes,
@@ -1689,6 +1704,26 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
 # so a story this sweep has already tried and failed on carries the key with a null
 # value and is excluded. A selected story therefore either gains a `tap_word` or
 # records that it cannot have one — a second run selects nothing either way.
+#: The stories THIS run stripped, fetched by id.
+#:
+#: `_UNENRICHED_SQL` is structurally unable to select them: it asks what a story
+#: LACKS, and a story whose bad questions were just deleted still carries its
+#: `questions_moderation` receipt from the run that wrote them. The receipt is
+#: true — those questions were moderated — it is simply about questions that no
+#: longer exist. So the ids are carried forward explicitly rather than inferred,
+#: and the same `:statuses` filter applies: a story stripped and then rejected
+#: must not be re-enriched.
+_STRIPPED_STORY_SQL = text(
+    """
+    SELECT s.id, t.slug AS theme_slug
+    FROM stories s
+    JOIN themes t ON t.id = s.theme_id
+    WHERE s.status = ANY(:statuses)
+      AND s.id = ANY(CAST(:ids AS int[]))
+    """
+)
+
+
 _UNENRICHED_SQL = text(
     """
     SELECT s.id, t.slug AS theme_slug
@@ -1722,6 +1757,21 @@ _UNENRICHED_SQL = text(
                    s.gen_meta -> 'enrichment' -> 'tap_word_target' ? 'source'
                    AND s.gen_meta -> 'enrichment' -> 'tap_word_target' ->> 'source' IS NULL,
                    false
+                 )
+               )
+            -- ...or `repair_leaky_mcq2` took this story's comprehension question
+            -- away because the question named its own answer (11.86). The other
+            -- three clauses cannot see that story: it has questions, a §13
+            -- receipt and a `tap_word`, so it is fully enriched by every measure
+            -- they take, and §11.3's second screen is simply gone. The receipt IS
+            -- the idempotence, as in the clause above and in `_UNGRADED_BODY_SQL`
+            -- — `_record_enrichment` replaces `gen_meta.enrichment` wholesale, so
+            -- one enrichment erases the key and the story is never selected for
+            -- this reason again, whether or not the model managed a new `mcq2`.
+            OR (
+                 s.gen_meta -> 'enrichment' ? 'mcq2_leak_removed'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM questions q WHERE q.story_id = s.id AND q.qtype = 'mcq2'
                  )
                )
           )
@@ -1873,6 +1923,264 @@ async def repair_leaky_cues(
         if row.n_answers:
             answered.append(row.id)
     return repaired, stuck, answered
+
+
+# --- the mcq2 half of the same defect (DEVIATIONS 11.86-11.89) ----------------
+#: Every two-choice comprehension row, with what a leak test needs and what a
+#: DELETE is not allowed to destroy: whether a child has answered it, and whether
+#: the story has any OTHER question to fall back on.
+_MCQ2_ROWS_SQL = text(
+    """
+    SELECT q.id, q.prompt, q.payload, q.answer,
+           s.id AS story_id, s.stage_id, s.status, t.slug AS theme_slug,
+           (SELECT count(*) FROM answers a WHERE a.question_id = q.id) AS n_answers,
+           (SELECT count(*) FROM questions o
+             WHERE o.story_id = s.id AND o.id <> q.id) AS n_other
+    FROM questions q
+    JOIN stories s ON s.id = q.story_id
+    JOIN themes t ON t.id = s.theme_id
+    WHERE q.qtype = 'mcq2'
+      AND (CAST(:statuses AS text[]) IS NULL OR s.status = ANY(CAST(:statuses AS text[])))
+      AND (CAST(:only AS int[]) IS NULL OR s.id = ANY(CAST(:only AS int[])))
+    ORDER BY q.id
+    """
+)
+
+
+@dataclass(frozen=True)
+class LeakyMcq2:
+    """One `mcq2` row whose QUESTION contains the word that answers it."""
+
+    question_id: int
+    story_id: int
+    stage_id: int
+    status: str
+    prompt: str
+    correct: str
+    incorrect: str
+    leaked: tuple[str, ...]
+    n_answers: int
+    n_other: int
+    #: True when the leaked word appears only in the FALSE answer, so a child who
+    #: matches the question's letters against the two cards is steered at the
+    #: WRONG one and the server grades them incorrect. 7.14's row 696 with the
+    #: opposite sign, and the reason this is a defect rather than a missed
+    #: opportunity to teach.
+    points_wrong: bool
+
+    @property
+    def removable(self) -> bool:
+        """May the sweep DELETE this row?
+
+        Two conditions, both refusals rather than permissions. A row a child has
+        answered stays (`answers.question_id` is ON DELETE CASCADE), and a row
+        that is its story's only question stays, because removing it would leave
+        a servable story with no question at all — STATE invariant 14's dead-end
+        session, manufactured by a repair.
+        """
+        return self.n_answers == 0 and self.n_other > 0
+
+
+#: The DELETE, with both refusals expressed as SQL predicates rather than as a
+#: Python `if` — the same reasoning `_DELETE_UNANSWERED_SQL` is written out of:
+#: the statement is structurally incapable of cascading an answer away or of
+#: emptying a story, whatever the caller believes about the ids it passed.
+_DELETE_LEAKY_MCQ2_SQL = text(
+    """
+    DELETE FROM questions q
+    WHERE q.id = ANY(CAST(:ids AS int[]))
+      AND q.qtype = 'mcq2'
+      AND NOT EXISTS (SELECT 1 FROM answers a WHERE a.question_id = q.id)
+      AND EXISTS (SELECT 1 FROM questions o WHERE o.story_id = q.story_id AND o.id <> q.id)
+    RETURNING q.id, q.story_id
+    """
+)
+
+#: The receipt the DELETE above leaves on the story, and the only route back to a
+#: comprehension screen: `_UNENRICHED_SQL`'s fourth clause reads this key. Written
+#: as a fact in the database rather than as a variable in `run_backfill`, because
+#: a repair whose follow-up works only if the operator happened to run the two
+#: halves in one command is the same forward-only trap this module keeps falling
+#: into. `--mcq2-repair` on Monday and `--backfill` on Friday must compose.
+_RECORD_MCQ2_REMOVAL_SQL = text(
+    """
+    UPDATE stories s
+    SET gen_meta = jsonb_set(
+        coalesce(s.gen_meta, '{}'::jsonb),
+        '{enrichment}',
+        coalesce(s.gen_meta -> 'enrichment', '{}'::jsonb)
+          || jsonb_build_object('mcq2_leak_removed', removed.question_ids),
+        true
+    )
+    FROM (
+      SELECT CAST(kv.key AS int) AS story_id, kv.value AS question_ids
+      FROM jsonb_each(CAST(:removed AS jsonb)) kv
+    ) removed
+    WHERE s.id = removed.story_id
+    RETURNING s.id
+    """
+)
+
+
+async def leaky_mcq2(
+    session,
+    target_status: Sequence[str] | None = SERVABLE_STATUSES,
+    only: Sequence[int] | None = None,
+) -> list[LeakyMcq2]:
+    """Every `mcq2` row in the pool whose question gives one of its answers away.
+
+    Read-only, and the predicate is `questions.prompt_leaks_answer` itself —
+    imported, not restated — so this sweep and the `check_mcq2` that refuses the
+    same shape at generation time cannot drift apart. `mcq2_pair` reverses the
+    option shuffle so the pure function is handed exactly what a draft hands it.
+
+    A row whose pair cannot be read out (`mcq2_pair` returns None) is skipped and
+    NOT reported as clean: it is malformed, and this function has no opinion
+    about malformed rows.
+    """
+    rows = (
+        await session.execute(
+            _MCQ2_ROWS_SQL,
+            {
+                "statuses": list(target_status) if target_status else None,
+                "only": list(only) if only else None,
+            },
+        )
+    ).all()
+
+    vocab_cache: dict[tuple[int, str], object] = {}
+    found: list[LeakyMcq2] = []
+    for row in rows:
+        pair = mcq2_pair(row.payload, row.answer)
+        if pair is None:
+            continue
+        correct, incorrect = pair
+        key = (row.stage_id, row.theme_slug)
+        if key not in vocab_cache:
+            vocab_cache[key] = await load_vocabulary(session, row.stage_id, row.theme_slug)
+        # The stage's OWN sight words, the same set `check_mcq2` excludes: "a" and
+        # "the" are shared by every English sentence and discriminate nothing.
+        sight = frozenset(w.strip().lower() for w in vocab_cache[key].sight_words)
+        leaked = prompt_leaks_answer(row.prompt or "", correct, incorrect, sight)
+        if not leaked:
+            continue
+        false_only = {w for w in story_word_tokens(incorrect) if w not in sight} - {
+            w for w in story_word_tokens(correct) if w not in sight
+        }
+        found.append(
+            LeakyMcq2(
+                question_id=row.id,
+                story_id=row.story_id,
+                stage_id=row.stage_id,
+                status=row.status,
+                prompt=row.prompt or "",
+                correct=correct,
+                incorrect=incorrect,
+                leaked=tuple(leaked),
+                n_answers=int(row.n_answers),
+                n_other=int(row.n_other),
+                points_wrong=bool(false_only & set(leaked)),
+            )
+        )
+    return found
+
+
+async def repair_leaky_mcq2(
+    session,
+    target_status: Sequence[str] | None = SERVABLE_STATUSES,
+    only: Sequence[int] | None = None,
+) -> tuple[list[int], list[LeakyMcq2], list[int]]:
+    """Remove every servable two-choice question that answers itself (11.64).
+
+    **This one DELETES where `repair_leaky_cues` moves a hint, and the asymmetry
+    is the design.** A leaking cue can be replaced by a pure function of
+    (grapheme, options, stage vocabulary), so that repair never has to touch
+    `options`, `answer` or the row. An `mcq2` prompt is free text a model wrote
+    about this story's plot; nothing in this codebase can re-derive one, and the
+    only generic frame that would fit every row ("Which one did the story say?")
+    fails the decodability gate at exactly the stages most of the pool lives at —
+    measured, stage by stage, in DEVIATIONS 11.87. So the choice is between
+    leaving the question in front of children and removing it, and §11.3's
+    comprehension screen is worth less than nothing when it is answerable by
+    letter-matching and, for the rows that echo the FALSE answer, actively
+    punishes the child who reads it.
+
+    Two things it will not do, both enforced in SQL (`_DELETE_LEAKY_MCQ2_SQL`):
+    delete a row a child has answered, and delete a story's last question. Those
+    rows are RETURNED instead, for the caller to report — one of them is live
+    today and has two recorded wrong answers on it.
+
+    Servable-only by default, which is the other way round from
+    `repair_leaky_cues`: that sweep is status-blind because moving a hint
+    destroys nothing, and this one removes a row, so it stays off `rejected`
+    stories — they are never served and they are the eval evidence for why a
+    (stage, theme) pair is hard (this module's own docstring).
+
+    Returns (deleted question ids, rows left in place, story ids stripped).
+    Idempotent: a deleted row cannot leak twice, and a kept row is refused for
+    the same reason on every run.
+    """
+    leaking = await leaky_mcq2(session, target_status, only)
+    if not leaking:
+        return [], [], []
+
+    removable = [row.question_id for row in leaking if row.removable]
+    deleted = (
+        (await session.execute(_DELETE_LEAKY_MCQ2_SQL, {"ids": removable})).all()
+        if removable
+        else []
+    )
+    gone = {r.id for r in deleted}
+    kept = [row for row in leaking if row.question_id not in gone]
+    return sorted(gone), kept, sorted({r.story_id for r in deleted})
+
+
+def _render_leaky_mcq2(rows: Sequence[LeakyMcq2], limit: int = 12) -> list[str]:
+    """The questions themselves, not just a count — 8.43's rule for a gap."""
+    out = []
+    for row in rows[:limit]:
+        why = "points at the WRONG card" if row.points_wrong else "gives the true card away"
+        out.append(
+            f"    q{row.question_id} story {row.story_id} stage {row.stage_id} "
+            f"[{row.status}]: {row.prompt!r} names {sorted(row.leaked)} — {why}; "
+            f"true {row.correct!r} / false {row.incorrect!r}"
+        )
+    if len(rows) > limit:
+        out.append(f"    ... and {len(rows) - limit} more")
+    return out
+
+
+def _report_mcq2_repair(
+    deleted: Sequence[int], kept: Sequence[LeakyMcq2], stripped: Sequence[int]
+) -> None:
+    """Print what `repair_leaky_mcq2` did — including what it could not do."""
+    if deleted:
+        print(
+            f"  removed {len(deleted)} two-choice question(s) whose prompt named the word "
+            f"that answers them (11.64): {sorted(deleted)}"
+        )
+        print(
+            f"    {len(stripped)} story/stories lost their comprehension screen and keep "
+            f"their phonics question: {sorted(stripped)}. `--backfill` re-enriches them."
+        )
+    if kept:
+        answered = [r for r in kept if r.n_answers]
+        last = [r for r in kept if not r.n_answers]
+        print(f"  could NOT remove {len(kept)} leaking two-choice question(s):")
+        for line in _render_leaky_mcq2(kept):
+            print(line)
+        if answered:
+            print(
+                f"    {len(answered)} carry recorded answers "
+                f"({sum(r.n_answers for r in answered)} in total) and `answers.question_id` "
+                "is ON DELETE CASCADE — deleting them would erase a child's own reading "
+                "history to fix our defect. An operator decides, not this sweep."
+            )
+        if last:
+            print(
+                f"    {len(last)} is/are their story's only question — removing it would "
+                "leave a servable story a child reads and then just stops (invariant 14)."
+            )
 
 
 async def refresh_tap_word_prompts(
@@ -2078,6 +2386,40 @@ async def run_cue_repair(only: Sequence[int] | None = None) -> None:
     _report_cue_repair(repaired, stuck, answered)
 
 
+async def run_mcq2_repair(only: Sequence[int] | None = None) -> None:
+    """`--mcq2-repair`: remove servable two-choice questions that answer themselves.
+
+    Free — one query per (stage, theme) for the sight words, one DELETE, no API
+    call — and it is its own check: run it twice and the second run reports what
+    is left rather than what it did.
+
+    It refuses at the END, and only over rows it could have removed and did not.
+    That distinction is 11.84's, argued there and kept here: a run that exits
+    non-zero over a row whose only remedy is "a human decides whether to erase a
+    child's answer" teaches an operator to ignore the exit code.
+    """
+    async with SessionLocal() as session:
+        deleted, kept, stripped = await repair_leaky_mcq2(session, SERVABLE_STATUSES, only)
+        await session.commit()
+        # The postcondition, read back from the pool rather than taken from the
+        # counters above (11.84): the grammar backfill printed success while
+        # writing three of five verdict fields, so a repair checks its own work.
+        left = await leaky_mcq2(session, SERVABLE_STATUSES, only)
+
+    if not deleted and not kept:
+        print("  no servable two-choice question names the word that answers it — nothing to fix")
+        return
+    _report_mcq2_repair(deleted, kept, stripped)
+    unfixed = [row for row in left if row.removable]
+    if unfixed:
+        raise SystemExit(
+            f"\n{len(unfixed)} two-choice question(s) this sweep could have removed are "
+            "still in the pool after its own pass:\n"
+            + "\n".join(_render_leaky_mcq2(unfixed))
+            + "\nThat is a defect in the repair, not in the pool."
+        )
+
+
 async def run_backfill(
     target_status: Sequence[str] = SERVABLE_STATUSES,
     only: Sequence[int] | None = None,
@@ -2103,6 +2445,15 @@ async def run_backfill(
         # Before the prompt refresh: a repaired cue produces a new prompt, and
         # the refresh below would otherwise re-derive the OLD one.
         _report_cue_repair(*await repair_leaky_cues(session, None, only))
+        # The mcq2 half (11.86). It runs HERE, before the selection below, for a
+        # reason the selection cannot express: a story that loses its leaking
+        # comprehension question still has its `tap_word`, a §13 receipt and a
+        # `MASTERY_QTYPES` row, so all three clauses of `_UNENRICHED_SQL` are
+        # satisfied and it would never be enriched again. `stripped` is that
+        # story's ONLY way back to a comprehension screen, which is why the free
+        # repair hands its ids to the paid one in the same transaction.
+        removed_mcq2, kept_mcq2, stripped = await repair_leaky_mcq2(session, target_status, only)
+        _report_mcq2_repair(removed_mcq2, kept_mcq2, stripped)
         rewritten, unchanged = await refresh_tap_word_prompts(session, target_status, only)
         if rewritten:
             print(f"  re-derived {rewritten} tap-a-word prompt(s) from the current frame ladder")
@@ -2127,16 +2478,33 @@ async def run_backfill(
         left_stale = await stale_tap_word_prompts(session, target_status, only)
         stale = [s for s in left_stale if s.repairable]
 
-        rows = (
-            await session.execute(
-                _UNENRICHED_SQL,
-                {
-                    "statuses": list(target_status),
-                    "only": list(only) if only else None,
-                    "mastery_qtypes": list(MASTERY_QTYPES),
-                },
-            )
-        ).all()
+        rows = list(
+            (
+                await session.execute(
+                    _UNENRICHED_SQL,
+                    {
+                        "statuses": list(target_status),
+                        "only": list(only) if only else None,
+                        "mastery_qtypes": list(MASTERY_QTYPES),
+                    },
+                )
+            ).all()
+        )
+        # ...plus the stories this run just stripped, which `_UNENRICHED_SQL` is
+        # structurally unable to select (see above). A separate statement rather
+        # than a fourth clause: the three clauses are properties a story HAS, and
+        # this one is a fact about what happened seconds ago in this transaction.
+        selected = {row.id for row in rows}
+        rows += [
+            row
+            for row in (
+                await session.execute(
+                    _STRIPPED_STORY_SQL,
+                    {"statuses": list(target_status), "ids": stripped},
+                )
+            ).all()
+            if row.id not in selected
+        ]
         if not rows:
             print(
                 "  every servable story has questions, a §13 verdict on them and a "
@@ -2459,6 +2827,15 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--mcq2-repair",
+        action="store_true",
+        help=(
+            "remove servable two-choice questions whose prompt contains the word "
+            "that distinguishes their two answers, then exit. Free, no API call, "
+            "and never touches a row a child has answered (DEVIATIONS 11.64/11.86)"
+        ),
+    )
+    p.add_argument(
         "--only", help="restrict --backfill / --grammar-backfill to these comma-separated ids"
     )
     a = p.parse_args()
@@ -2472,6 +2849,8 @@ def main() -> None:
             asyncio.run(run_prompt_check())
         elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
+        elif a.mcq2_repair:
+            asyncio.run(run_mcq2_repair(only=only))
         elif a.grammar_backfill:
             asyncio.run(run_grammar_backfill(only=only))
         elif a.backfill:
