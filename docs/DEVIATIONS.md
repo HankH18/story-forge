@@ -6736,6 +6736,205 @@ headroom), length compliance below 100%, or cost per accepted story up by more
 than the cache-write cost of the one-off prefix invalidation. Stated here so the
 Gates section cannot grade itself.
 
+### PROVED — the cheap structural proxy does not work
+
+**11.53 — a MEASURED NEGATIVE RESULT, and it is the reason the shipped instrument
+is a paid judge and not a free function.** A structural proxy was tried first,
+because free and deterministic beats paid and stochastic. Five candidate signals
+were computed over 19 servable pool stories that I read and labelled myself
+(9 word-list, 10 story) before any judge saw them. **None separated the labels:**
+
+| signal | word-list mean | story mean |
+|---|---|---|
+| same-opening share (first two words) | 0.363 | 0.301 |
+| late-third word novelty | 0.274 | 0.290 |
+| an intent or adversative word present | 0.44 | 0.70 |
+| connective share | 0.087 | 0.103 |
+| max repeated-bigram share | 0.076 | 0.075 |
+
+Two of the five point the WRONG WAY. The mechanism is that the two failure modes
+look opposite to a surface metric: story 1670 repeats one frame seven times and
+reads as repetitive, story 7274 tours four locations with varied openings and no
+repetition at all, and both are word lists. A metric that catches one misses the
+other.
+
+**The before/after run then confirmed it from the other direction, which is the
+part worth keeping.** Same-opening share went **UP** 0.310 -> 0.415 across the
+change while the judge's narrative score went **UP** 3.77 -> 4.43 — the proxy is
+anti-correlated with the thing it was built to proxy on this very sample. The
+cause is legible in the text: the after arm writes "Rabbit did… Rabbit ran…
+Rabbit felt…" (a bare name, no determiner) inside genuinely well-structured
+stories. So the three functions ship as named DIAGNOSTICS with no composite score
+and no threshold, and `tests/test_narrative.py` asserts there is no `score` field
+on `NarrativeSignals` — a 0-3 number built out of signals measured not to work
+would read as coverage, which is the whole failure being fixed.
+
+**11.54 — a second MEASURED NEGATIVE RESULT, on the judge prompt, reverted.** The
+first probe showed one persistent false positive: story 24 ("Sam got in the rocket.
+Up, up, up. Sam got to the moon… Sam got back. Sam felt glad.") scored 4 three
+times out of three, the judge inferring a want the text never states — the same
+"could be interpreted as" defect 9.50 fixed on the safety half. A clause was added
+saying a want must be IN the text and that a trip out and back is a list. It did
+not work and it cost true positives: the label gap **shrank from 1.76 to 1.38**,
+story 7273 fell 4 -> 2 and 6416 4 -> 2.5, while story 24 stayed at 4/4. Reverted.
+This is the fourth time on this codebase that a pass at a judge prompt broke a case
+that had been passing (8.70-8.82's four, 9.53's one), and the only reason it was
+caught is that the probe ran the WHOLE labelled set both times rather than the case
+being worked on. Story 24 is recorded as a known residual, not fixed.
+
+### PROVED — the judge, both directions, multiple runs (STATE invariant 5)
+
+**11.55 — the judge separates the labels, and the metric is installed where a
+regression would be seen rather than only in a script.** Two independent whole-
+fixture runs, each three runs per case (six judgements per text), via
+`STORYFORGE_LIVE_NARRATIVE=1 pytest tests/test_narrative.py`:
+
+| run | word-list mean (max) | story mean (min) | gap |
+|---|---|---|---|
+| 1 | 1.93 (4) | 4.40 (3) | **2.47** |
+| 2 | 1.67 (2) | 4.33 (3) | **2.67** |
+
+Both directions asserted, and the second direction is the one that matters: the
+labelled STORIES are written in the same tiny register with the same short
+sentences and the same repetition, so a judge that scored everything low would pass
+a gap test by accident. The fixture therefore also requires the stories to land
+above the scale midpoint and the lists below it. `make eval-smoke` now prints a
+narrative score per story and the run's mean, and **exits on nothing** — §18's
+register point is correct at the bottom of the ladder, so there is no floor that
+could refuse a legitimately spare stage-1 story.
+
+### PROVED — the before/after, 60 stories through the real pipeline
+
+**11.56 — the headline: narrative up at every stage above 2, and no decodability,
+gate, rewrite-budget or length cost.** 30 stories an arm, stages 1/2/6/9/12 x 3
+themes x 2, through `run_pipeline` (gate, rewrite loop and moderation, the same
+function `warm` and `eval` call), scored afterwards by ONE ruler at three runs a
+story and the median taken. The `before` arm is not a paraphrase: it reconstructs
+`SYSTEM_RULES` in-process and asserts the result is **byte-identical to
+`git show HEAD:…/llm/generate.py`**, then refuses to run if it is not.
+
+| | before | after |
+|---|---|---|
+| produced / attempted | 30/30 | 30/30 |
+| **narrative mean (1-5)** | **3.77** | **4.43** |
+| narrative histogram | {1:2, 2:4, 3:3, 4:11, 5:10} | {1:2, 2:1, 3:3, 4:0, 5:24} |
+| decodability mean / median / min | 0.9914 / 1.0000 / 0.9545 | **0.9922 / 1.0000 / 0.9559** |
+| stories below the 95% gate | 0 | **0** |
+| FIRST-DRAFT decodability mean | 0.9654 | **0.9690** |
+| first drafts below the gate | 9/30 | **7/30** |
+| rewrite depth mean | 0.333 | **0.233** |
+| rewrite depth p95 (raw / decodability-driven) | 1 / 1 | **1 / 1** |
+| length compliance | 100.0% | **100.0%** |
+| OOV instances · over the story-word cap · zero story words | 0 · 0 · 0 | **0 · 0 · 0** |
+| accepted | 28 (93.3%) | 27 (90.0%) |
+| **cost per accepted story** | **$0.0323** | **$0.0477** |
+| mean output tokens | 2343 | 3586 |
+
+Per stage, narrative mean:
+
+| stage | 1 | 2 | 6 | 9 | 12 |
+|---|---|---|---|---|---|
+| before | 2.00 | 4.33 | 3.67 | 4.17 | 4.67 |
+| after | 2.50 | 4.67 | **5.00** | **5.00** | **5.00** |
+
+**Stage 6 — the stage the user named and the one §18 does not excuse — went from
+3.67 to 5.00, all six stories at 5/5/5.** The decision §10 asks for shows up
+verbatim in the prose: *"Rabbit can stay by a rock, or rabbit can try to find the
+burrow again. Rabbit did not want to stay."* The stage-9 padding failure 11.41
+diagnosed is gone: the before arm's stage-9 animals story is 20 sentences of which
+18 begin "The rabbit", and the after arm's is one arc that tries two paths in turn.
+
+**§0 is not merely intact, it moved the right way, and that was not guaranteed.**
+Richer narrative means more words and more chances to fall below 95%; the measured
+result is the opposite — first drafts below the gate fell 9 -> 7 and mean rewrite
+depth fell 0.333 -> 0.233, so the change spends LESS of §1's rewrite budget than
+before rather than the one rewrite of headroom it was allowed. The mechanism is
+plausible and is NOT proved: a story with a plan reaches for fewer words it does
+not have, because "say a different next thing" is easier when there is a next
+thing. n = 30 an arm, so read the rewrite numbers as a distribution that did not
+worsen, not as a proved improvement.
+
+**11.57 — a REGRESSION this change CAUSED at stage 1, its measured cause, and the
+fix.** Stage 1 went from 6 of 6 accepted to **4 of 6**, and both losses are grammar
+rejections of the same word: *"Rabbit cant nap."* and *"Dragon cant spin."*
+
+The cause is an inventory fact, PROVED with `validate_word(w, mastered_ids(1))`
+rather than assumed: at stage 1 **`not`, `no`, `cannot`, `never` and `nope` are all
+violations**, and the stage-1 allowlist contained no word with the letter `o` in it
+at all. A stage-1 story cannot say that something did not happen. The band asked
+for "something that is wrong", the model complied, and the only stage-1-decodable
+approximation to a negation was `cant` — a real English word, then in the
+allowlist, and decodable as c-a-n-t, so **the gate passed it at 100% and §13's
+grammar half caught it**. Two layers behaved exactly as designed and the story
+still died.
+
+The fix is a stage-1-only clause stating the inventory fact and showing a problem
+said forwards ("A cat sat on the map. Sam did tap the cat. The cat ran."). It does
+NOT name `cant`: the word has since left the allowlist under another agent's
+vocabulary work, and naming a construction raises its salience in both directions,
+which is the lesson invariant 5 is built out of. A test asserts the premise as well
+as the clause, so an inventory change that gives stage 1 a negation turns the suite
+red instead of leaving a stale instruction in a live prompt.
+
+**And the honest answer for stage 1 is that it cannot get much better.** 2.00 ->
+2.50 on a 1-5 scale is inside the run-to-run noise of this judge, and §18's excuse
+is not merely rhetorical at this stage: with no `o` and no negation there is no way
+to state an obstacle, so the ceiling is a want that is met. That is a 3 at best on
+a scale where 4 requires a want and a resolution and 5 requires something in the
+way. Stage 2 is where the ladder starts, and stage 2 measured 4.33 -> 4.67.
+
+**11.58 — the cost, which IS a regression by 11.52's own pre-registered
+criterion.** Cost per accepted story **$0.0323 -> $0.0477, +47.7%**; per produced
+story $0.0302 -> $0.0429, +42%. It is not the input side — the block is in the
+cached prefix and costs 0.1x after the first request at a stage — it is **output
+tokens, +53% (2343 -> 3586)**, and on Sonnet 5 with adaptive thinking on
+(invariant 9) those are thinking tokens, not story tokens: a 150-word story is
+about 200 tokens.
+
+Per stage: +94% (1), +112% (2), +121% (6), +18% (9), +52% (12). **The doubling
+happens at stages 1 and 2, where the ask is four sentences long and contains no
+planning verb at all** — which is the evidence that the driver is the existence of
+an additional quality dimension to satisfy and not the block's phrasing. A leaner
+rewrite of the upper bands was therefore NOT attempted: the measurement says it
+would not pay, and the honest report of a +42% cost is better than an unmeasured
+claim that it was optimised away. Extrapolated, a full `make eval` moves from
+$5.41 to roughly $7.7 at the same 180-story matrix, and a `make warm` refill costs
+about half again as much per story.
+
+**11.59 — two things that happened to the measurement environment, recorded because
+they bound what these numbers mean.**
+
+* **The allowlist changed underneath the run.** `allowed_words` went from **64,296
+  rows to 34,366** partway through this pass (another agent's vocabulary work;
+  `precompute.py` and `data/` are theirs). Both arms are PROVED to have run against
+  the 64,296-row table — stage-1 stories in both arms use `amid`, `scan` and
+  `admit`, which are absent from the current 78-word stage-1 list — so the arms
+  remain comparable **to each other**, which is what a before/after needs. They are
+  NOT comparable to anything measured after the change, and `make eval-smoke`'s
+  numbers below were taken after it. Sight words (38), `data/blocklist.txt` and
+  `gpcs.csv` were unchanged across the whole pass, verified by hash.
+* **The working tree was reverted out from under this pass twice, and then this
+  pass's code was committed by another agent.** Twice during the run every one of
+  my files read back as its HEAD version — three new files gone, four files' edits
+  gone, this whole DEVIATIONS section gone — and both times the content returned a
+  few minutes later: a concurrent agent's `git stash` / `stash pop` window. The
+  work then landed in **`8979cc0` "fix: the four defects the user found by actually
+  using the app"**, which is not my commit: `llm/narrative.py`,
+  `tests/test_narrative.py`, `scripts/measure_narrative.py` and the edits to
+  `generate.py`, `pipeline.py`, `eval.py` and `test_llm.py` were all swept in with
+  someone else's change.
+  This is the SECOND time — 9.52's process note is the first, and it made exactly
+  this prediction: "a shared tree with two agents in it has no commit boundary, and
+  the F9 revert in 9.53 could as easily have been committed in its broken state."
+  With three agents it now also has no *file* boundary: during the stash window a
+  `pytest` run or a `git diff` would have reported honestly on code that was not
+  the code being worked on. Nothing was lost here only because every measurement
+  artefact lives in `/tmp` and every source file was copied to `/tmp/nar_backup`
+  as it was written, and the recovery check was a `diff` against those copies
+  rather than a glance at the file. **A measurement that costs real money must not
+  live only in the working tree, and "the file looks right" is not a check when
+  another process can rewrite it between two commands.**
+
 ## Phase 8 — the two visual defects a live test of the app surfaced: no art at all, and marking that reads as errors
 
 Written before the changes, per §0. Two defects, reported by the user after
@@ -7613,3 +7812,51 @@ the runs: live model, stages 2/3/6/10, before and after, reporting question text
 verbatim plus leak rate, drop rate, derived rate and cost. A leak-rate
 improvement bought with a higher drop rate is a regression and is reported as
 one.
+
+### Gates — the narrative pass (11.40-11.59)
+
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **994 passed,
+  3 skipped, 0 failed, exit 0.** Against the stated baseline of 855 + 2, **26 of the
+  delta are mine** (`tests/test_narrative.py` 15, one of which is the opt-in live
+  fixture and is the third skip; `tests/test_llm.py` +11) and the rest belongs to
+  the two agents working in `apps/web/**`, `precompute.py` and the vocabulary
+  filters.
+  **Measured in an isolated copy of the tree at `/tmp/sf-noNarr` against a private
+  `pg_dump` database (`sfnarr3`), per `docs/STATE.md`, and the isolation was
+  necessary rather than cautious.** A run in the shared tree reported 4 failures in
+  `tests/test_questions.py` and `tests/test_enrich.py`; seconds later one of those
+  test functions did not exist, because another agent was mid-edit in that file.
+  Those failures were then shown NOT to be mine by a controlled experiment in ONE
+  snapshot: the same two modules pass with my changes reverted (98 tests) and pass
+  with my changes restored (98 tests), so the variable was their editing and not my
+  code. Sabotage-checked in the same spirit as 8.47's recipe.
+  One failure in the isolated tree is an artefact of the isolation itself and is the
+  same one 9.x records: `test_eval.py::test_a_fresh_run_records_everything_a_later_
+  reader_needs` asserts `provenance.git_dirty in (True, False)` and a `tar` copy is
+  not a checkout. `git init` in the copy makes it pass, which is the proof it is
+  environmental; the 994 above is the post-`git init` run.
+- `.venv/bin/ruff check storyforge tests scripts` — All checks passed.
+- `make eval-smoke` — **PASSED, 4/4, mean decodability 99.4%, p95 rewrite depth 0,
+  narrative mean 5.00 of 5.** Cost **$0.1791**, plus **$0.0059** of narrative
+  judging, = $0.1850. Taken AFTER the allowlist change described in 11.59, so it is
+  not comparable to the $0.1148 in 9.x.
+- STATE invariant 10: `SYSTEM_RULES` is edited in exactly ONE clause (11.42) and
+  gains no digit, no theme, no stage name and no brace, so
+  `test_system_rules_are_frozen_of_request_detail` and
+  `test_the_length_rule_carries_no_per_request_detail` are unchanged and still
+  assert what they always asserted. Everything stage-scaled is in the cached
+  per-stage block; there is still exactly ONE `cache_control` breakpoint and a test
+  asserts it sits on the last block.
+- No `make warm`, no full `make eval`, nothing touched on DigitalOcean.
+
+**Live spend: $2.84**, itemised — judge calibration probes $0.154 (three rounds
+including the reverted clause of 11.54), the `before` arm $0.9051, the `after` arm
+$1.2867, judging both arms with one ruler at 3 runs a story $0.2746, two live
+fixture runs $0.037, `make eval-smoke` $0.1850.
+
+**What is NOT proved.** The narrative gain is measured on 6 stories per stage at 5
+of 12 stages; stages 3-5, 7-8 and 10-11 were never generated in either arm and
+inherit their band's wording from the stages that were. The rewrite-depth
+IMPROVEMENT is a distribution that did not worsen at n=30, not a proved effect. The
+judge's own accuracy is bounded by 11.54's known residual. And no story from either
+arm was persisted, so nothing here changed the pool a child reads from.
