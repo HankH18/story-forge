@@ -62,7 +62,7 @@ from sqlalchemy import text
 
 from storyforge.db import SessionLocal
 from storyforge.decoder import MAX_STAGE, load_lexicon, mastered_ids
-from storyforge.decoder.lexicon_util import min_syllables
+from storyforge.decoder.lexicon_util import aligned_syllables
 from storyforge.decoder.search import align
 
 DATA = Path(__file__).resolve().parents[3] / "data"
@@ -301,8 +301,6 @@ def compute_rows(max_syllables: dict[int, int]) -> list[dict]:
         if not prons:
             continue  # OOV against the pinned dictionary — conservative, per §18
 
-        syllables = min_syllables(prons)
-
         # min_stage: first stage whose mastered set admits a complete alignment.
         # One lattice per word answers all eleven stages (the lru_cache is why
         # this loop is word-outer).
@@ -314,7 +312,16 @@ def compute_rows(max_syllables: dict[int, int]) -> list[dict]:
             continue  # the inventory cannot spell it at any stage
 
         for stage in range(first, MAX_STAGE + 1):
-            if syllables > max_syllables.get(stage, 2):
+            # DEVIATIONS 21.2. Counted PER STAGE and only over the pronunciations
+            # that align there — the cap is about the reading the child produces,
+            # and `min_syllables(prons)` was the fewest syllables in any CMUdict
+            # entry for the word, including the ones the aligner could not use.
+            # `every` was a 2-syllable word under a cap of 2 at stage 5 while the
+            # only alignment available there is three syllables long. Never None
+            # inside this loop: `stage >= first` and alignability is monotone in
+            # the mastered set, so at least one pronunciation aligns.
+            syllables = aligned_syllables(word, prons, mastered_ids(stage))
+            if syllables is None or syllables > max_syllables.get(stage, 2):
                 continue
             # 11.8/11.11: the register filter is per-STAGE, because stage 1 cannot
             # afford it. `amid` is decodable from stage 1 up, so it is dropped from

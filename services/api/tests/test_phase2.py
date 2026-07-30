@@ -7,13 +7,16 @@ evidence of nothing.
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+
 import httpx
 import pytest
 from sqlalchemy import text
 
 from storyforge.db import SessionLocal
-from storyforge.decoder import load_gpcs, mastered_ids, validate_word
-from storyforge.decoder.lexicon_util import min_syllables, syllable_count
+from storyforge.decoder import load_gpcs, load_lexicon, mastered_ids, validate_word
+from storyforge.decoder.lexicon_util import aligned_syllables, min_syllables, syllable_count
 from storyforge.decoder.types import WordVerdict
 from storyforge.main import app
 from storyforge.precompute import load_blocklist
@@ -102,6 +105,49 @@ async def test_syllable_cap_is_honoured(session):
     assert not rows.all()
 
 
+async def test_the_live_syllable_cap_holds_for_the_reading_the_child_produces(session):
+    """The same claim as `test_syllable_cap_is_honoured`, asked of the ALIGNMENT.
+
+    DEVIATIONS 21.2. That test reads `allowed_words.syllables` and compares it to
+    `stages.max_syllables`, so it proves precompute agrees with itself and nothing
+    more — it was green over 67 rows whose stored count came from a pronunciation
+    the aligner could not use at that stage (`every`, `family`, `different`,
+    `several`, `towards` at stages 5-7, all counted 2 under a cap of 2 and all
+    three syllables long in the only reading available there).
+
+    Red means the table is stale against the code, not that the code is wrong:
+    the remedy is `make precompute`, which is free.
+
+    EVERY row, not `ORDER BY random() LIMIT n`. 208 of 34,288 rows carried a wrong
+    count and 67 of those broke the cap — 0.6% of the table, which a 600-row sample
+    misses outright about one run in forty. A tripwire with a 2.6% false-green rate
+    against the defect it was written for is not a tripwire. The full scan costs
+    ~2s because the aligner's lattice cache does the heavy half once per word.
+    """
+    rows = (
+        await session.execute(
+            text(
+                "SELECT a.stage_id, a.word, a.syllables, s.max_syllables "
+                "FROM allowed_words a JOIN stages s ON s.id = a.stage_id "
+                "ORDER BY a.word, a.stage_id"
+            )
+        )
+    ).all()
+    assert rows, "allowed_words is empty — run `make precompute`"
+
+    lexicon = load_lexicon()
+    bad = []
+    for stage, word, stored, cap in rows:
+        real = aligned_syllables(word, lexicon.get(word, ()), mastered_ids(stage))
+        if real is None or real != stored or real > cap:
+            bad.append((stage, word, stored, real, cap))
+    assert not bad, (
+        f"{len(bad)} of {len(rows)} rows carry a syllable count from a "
+        f"pronunciation the reader cannot use (stage, word, stored, aligned, cap): "
+        f"{bad[:10]} — run `make precompute`"
+    )
+
+
 async def test_allowlist_grows_monotonically_with_stage(session):
     """A later stage must never allow fewer words than an earlier one."""
     rows = await session.execute(
@@ -150,6 +196,91 @@ def test_syllable_count(pron, expected):
 
 def test_min_syllables_takes_the_kindest_reading():
     assert min_syllables((("K", "AE1", "T"), ("K", "AE1", "T", "AH0"))) == 1
+
+
+def _seeded_syllable_caps() -> dict[int, int]:
+    """`stages.max_syllables`, from the CSV `make seed` loads. No database, no
+    hand-copied ladder — `data/seed/stages.csv` is the same file the table comes
+    from, so this cannot disagree with what is seeded."""
+    path = Path(__file__).resolve().parents[3] / "data/seed/stages.csv"
+    body = [
+        ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip() and ln[0] != "#"
+    ]
+    return {int(r["id"]): int(r["max_syllables"]) for r in csv.DictReader(body)}
+
+
+# --- the syllable cap measures the reading the child produces (21.2) --------
+# `test_syllable_cap_is_honoured` above compares the STORED number against the
+# stage cap, so it can only ever prove precompute is consistent with itself. It
+# was green while the stored number came from `min_syllables(prons)` — the fewest
+# syllables in any CMUdict entry for the word, including entries the aligner could
+# not use at that stage. These ask the alignment instead of the row.
+@pytest.mark.parametrize(
+    "word,stage,counted,aligned,why",
+    [
+        # only /EH1 V ER0 IY0/ aligns; the 2-syllable /EH1 V R IY0/ never does
+        ("every", 5, 2, 3, "over stage 5's cap of 2 — the row should not exist"),
+        ("every", 8, 2, 3, "under stage 8's cap of 3, but still not 2"),
+        ("family", 5, 2, 3, "same shape as `every`"),
+        ("several", 6, 2, 3, "same shape as `every`"),
+        ("towards", 6, 1, 2, "/T AO1 R D Z/ needs `ow`->/AO/, which is not taught"),
+        # the stage-DEPENDENT case: silent-e is stage 4, so before it the only
+        # reading of `fine` is the Italian /F IH1 N AH0/, and the word gets
+        # SHORTER as the child learns more.
+        ("fine", 1, 1, 2, "silent-e is stage 4; the 1-syllable reading is unavailable"),
+        ("fine", 4, 1, 1, "silent-e taught — the kind reading is now reachable"),
+    ],
+)
+def test_the_syllable_count_comes_from_a_pronunciation_that_aligns(
+    word, stage, counted, aligned, why
+):
+    prons = load_lexicon()[word]
+    assert min_syllables(prons) == counted, f"{word}: the OLD number moved"
+    assert aligned_syllables(word, prons, mastered_ids(stage)) == aligned, why
+
+
+def test_aligned_syllables_is_none_when_no_pronunciation_aligns():
+    """`None`, never a number. "Cannot be read here at all" and "can be read here
+    in two syllables" are different answers, and a cap comparison must not be able
+    to accept the first by accident."""
+    prons = load_lexicon()["beautiful"]
+    for stage in range(1, 12):
+        assert aligned_syllables("beautiful", prons, mastered_ids(stage)) is None
+    # ...and the word it replaces answers 3 at every stage, which is <= the top
+    # stage's cap of 9. That is the accident.
+    assert min_syllables(prons) == 3
+
+
+def test_no_precomputed_row_is_capped_against_an_unusable_pronunciation():
+    """The whole allowlist, re-derived — the test that would have caught 21.2.
+
+    Pure: `compute_rows` takes no database, so this covers all ~34k rows in about
+    two seconds and cannot be green against a stale table. Two claims, and the
+    second is the one that was false: every row is under its stage's cap, AND the
+    number it is under the cap on is the one the reader actually produces.
+
+    The caps are READ FROM THE SEED CSV rather than written out here, so this test
+    covers whatever ladder is seeded — a hand-written `{1: 2, ..., 11: 9}` raises
+    `KeyError` the moment the ladder is renumbered again, which is a test failing
+    for a reason that has nothing to do with what it measures.
+    """
+    from storyforge.precompute import compute_rows
+
+    caps = _seeded_syllable_caps()
+    lexicon = load_lexicon()
+    rows = compute_rows(caps)
+    assert len(rows) > 30_000, "compute_rows produced almost nothing — check the data files"
+
+    bad = []
+    for row in rows:
+        stage, word = row["stage_id"], row["word"]
+        real = aligned_syllables(word, lexicon[word], mastered_ids(stage))
+        if real != row["syllables"] or real is None or real > caps[stage]:
+            bad.append((stage, word, row["syllables"], real, caps[stage]))
+    assert not bad, (
+        f"{len(bad)} rows are capped on a pronunciation the reader cannot use at "
+        f"that stage (stage, word, stored, aligned, cap): {bad[:10]}"
+    )
 
 
 # --- POST /api/validate (§5.6) ----------------------------------------------
