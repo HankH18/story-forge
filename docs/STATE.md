@@ -43,7 +43,8 @@ Lint: `cd services/api && uv run ruff check storyforge tests`.
 
 ## Commands
 ```
-make dev | test | seed | precompute | warm | warm-check | warm-plan | eval | eval-smoke
+make dev | test | seed | precompute | warm | warm-check | promote-check | warm-plan
+make eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
 `make warm` covers §7's whole matrix — **11 stages x every theme x 3 stories**, the
@@ -53,7 +54,10 @@ money. `make warm-plan` (`--dry-run`) prices it first; **`make warm-check`
 holds fewer than 3 servable stories.** Run it after every warm run and after
 anything that moves the pool: a partial pool is invisible at runtime, because §7's
 ladder answers an empty pair by silently serving a lower stage (DEVIATIONS
-8.40–8.48).
+8.40–8.48). **`make promote-check` (`--check-promotability`) is the SECOND gate
+and measures the other floor** — the §8 evidence those stories can yield — and it
+is RED today: six stages are terminal dead ends (invariant 15, DEVIATIONS 11.70).
+Both are free, neither implies the other.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
 `reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest
@@ -110,7 +114,20 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     predicate, because a gate that counts stories the serving path will not serve
     reports a pair as full while every child at it gets a silent §7 fallback. Six
     live `warm` stories were in exactly that state (DEVIATIONS 8.50–8.56).
-15. **Every sound `sound_targets` offers is provably answerable, and `tap_word` has
+15. **§7's floor and §8's floor are DIFFERENT floors, and only the first was ever
+    measured.** `make warm-check` counts stories a child can be SERVED (≥3 per
+    (stage, theme)); it says nothing about whether those stories carry the §8
+    evidence that promotes a child OFF the stage. Measured with `make
+    promote-check` on the live pool: **six of the eleven stages were terminal** —
+    a perfect reader at stage 3, 6, 7, 8, 9 or 10 who read every story their
+    stage held could never be promoted, because a re-read yields no evidence by
+    design and the whole stage was worth fewer than `MIN_GPC_OBSERVATIONS`. Nine
+    of the ten promotable stages failed DEVIATIONS 11.67's promise that the floor
+    is reachable inside §8's five stories. **Never lower the floor to make this
+    green** (5.5: it is what stops one lucky tap promoting a child) — the remedy
+    is supply, and at stages 9-11 it is the allowlist, not the question count
+    (DEVIATIONS 11.70-11.74).
+16. **Every sound `sound_targets` offers is provably answerable, and `tap_word` has
     a pure-function proposer of last resort.** A tier of `_prefer_current_stage`
     fires on answerability, not non-emptiness — "first non-empty tier" handed stage
     8 a menu of one impossible sound (`ou`/`outside`) and cost the story both

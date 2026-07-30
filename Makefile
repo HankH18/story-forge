@@ -10,7 +10,8 @@ WEB := apps/web
 
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
-        migrate seed precompute warm warm-check warm-plan eval eval-smoke codegen clean
+        migrate seed precompute warm warm-check promote-check warm-plan eval \
+        eval-smoke codegen clean
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -89,6 +90,16 @@ warm: ## Pre-generate the warm story pool over §7's full 11 x 3 matrix (SLOW, s
 # exist; this target is the local wrapper.
 warm-check: ## Refuse a partial warm pool: non-zero while any (stage, theme) is below §7's floor
 	cd $(API) && uv run python -m storyforge.warm --check-coverage
+
+# The SECOND floor, and the one nothing measured until DEVIATIONS 11.70. §7 asks
+# whether a child can be SERVED their own stage; §8 asks whether the stories they
+# are served carry the evidence that promotes them off it. The two are
+# independent — every pair can hold 3 servable stories, `warm-check` can be green,
+# and six of the eleven stages can still be terminal dead ends where a perfect
+# reader is never promoted no matter how much they read. Costs nothing: two SQL
+# queries and the decoder, no API client.
+promote-check: ## Refuse a pool no child can be promoted from: non-zero while any stage is below §8's evidence floor
+	cd $(API) && uv run python -m storyforge.warm --check-promotability
 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run

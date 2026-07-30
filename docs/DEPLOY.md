@@ -128,6 +128,7 @@ python -m storyforge.precompute  # make precompute — the allowed_words table (
 python -m storyforge.warm --dry-run   # what warm would generate + roughly what it costs. Free.
 python -m storyforge.warm        # make warm       — the story pool (§7). SLOW. Costs money.
 python -m storyforge.warm --check-coverage   # MANDATORY. Non-zero = partial pool. Free.
+python -m storyforge.warm --check-promotability  # MANDATORY. Non-zero = no child can be promoted. Free.
 ```
 
 - `make seed`'s `migrate` prerequisite is already satisfied by the PRE_DEPLOY job.
@@ -175,6 +176,35 @@ POOL COVERAGE — servable (warm|complete) stories per (stage, theme), target 3:
       1        3        3        4
       6      0 !      0 !      0 !     <- every stage-6 child gets stage-5 text
 ```
+
+### `--check-promotability` is the OTHER floor, and it is not the same floor
+
+`--check-coverage` asks whether a child can be **served** their own stage.
+`--check-promotability` asks whether the stories they are served carry the §8
+evidence that gets them **off** it. The two are independent, and a green
+`--check-coverage` says nothing about the second: every (stage, theme) pair can
+hold three servable stories while a stage supplies two of the ten GPC
+observations `MIN_GPC_OBSERVATIONS` requires.
+
+That is not hypothetical either. Measured on the live pool the day this check was
+written: **six of the eleven stages were terminal** — a child at stage 3, 6, 7, 8,
+9 or 10 who read every story their stage held, with a perfect score, could never
+be promoted, because a re-read yields no new evidence by design and the whole pool
+at that stage was worth fewer than ten observations. Nothing reported it. The
+child's dashboard said `6 of 10 answered GPC instances needed on stage-9 sounds`,
+which reads as *keep reading* (DEVIATIONS 11.70).
+
+```
+POOL PROMOTABILITY — §8 evidence a perfect reader can earn per stage …
+  stage  stories   best 5   whole pool
+      9        9      5 !            6  TERMINAL: no number of readings promotes
+```
+
+The remedy is **supply**, printed by the check itself: more stories fixes a stage
+that merely needs more than five of them; re-enriching for a second `tap_word`
+raises what each story is worth. Neither fixes a stage whose stories contain no
+word using a sound that stage introduces — that is an allowlist and generation
+problem, and the check names it rather than implying `make warm` will do.
 
 ## 5. One manual Clerk step the API cannot do for you
 
@@ -226,7 +256,8 @@ content half of "is this deployment usable" is one command in the `api` console,
 and it is the same one §4 ends with —
 
 ```bash
-python -m storyforge.warm --check-coverage   # exit 0, or the pool is partial
+python -m storyforge.warm --check-coverage        # exit 0, or the pool is partial
+python -m storyforge.warm --check-promotability   # exit 0, or no child can leave their stage
 ```
 
 Worth re-running after anything that could move the pool: a database restore, a

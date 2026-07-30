@@ -8584,3 +8584,184 @@ run 114 on the old ladder, labelled as such. Production's renumber is verified
 by construction and by scratch-DB sabotage, not yet against the live database —
 the deploy's migration job is the step that does it, and `make warm-check` +
 the §17 demo at stage 2 are the post-deploy checks to run.
+
+## Phase 8 — six of the eleven stages are terminal dead ends (11.70-11.74)
+
+Numbered in the 11.60-11.79 block because this is 11.67 revisited: the same
+threshold, the same claim, measured a second way and found insufficient. Logged
+**before** the change. Every number below was measured read-only against the
+live local pool with `storyforge`'s own functions — no API call, nothing written.
+
+**11.70 — `MIN_GPC_OBSERVATIONS` is not reachable at six stages by reading MORE,
+because the whole servable pool does not contain that much evidence. 11.67
+measured an average, and an average cannot see an exhausted pool.**
+
+11.67's argument for leaving the floor at 10 was that a supply-side fix would
+make it *"reachable in the five stories §8 asks for"*, and it measured the mean
+(1.08 → 1.95 observations per story). The mean is the wrong statistic. The
+question §8 actually asks is per stage, and it has two answers, both of which the
+mean hides:
+
+- **can a child clear the floor inside §8's five stories** (11.67's own promise);
+- **can a child clear it at all**, having read every distinct story the stage
+  holds — because a re-read yields nothing by design (`_ALREADY_READ_SQL`,
+  DEVIATIONS 5.5's other half).
+
+Measured per stage over the servable, answerable pool, crediting every `tap_word`
+row's correct word through the SAME two functions the runtime uses
+(`mastery.word_gpc_ids` for the alignment, `gpcs.stage_id` for "introduced at
+this stage"), for a reader who answers everything correctly:
+
+| stage | stories | best 5 stories | whole pool | verdict |
+|---|---|---|---|---|
+| 1 | 24 | 20 | 79 | promotable |
+| 2 | 10 | 5 | 10 | needs 10 stories, not 5 |
+| 3 | 11 | 5 | **7** | **never promotable** |
+| 4 | 12 | 5 | 12 | needs 10 stories |
+| 5 | 9 | 6 | 10 | needs ~8 stories |
+| 6 | 9 | 5 | **9** | **never promotable** |
+| 7 | 9 | 5 | **9** | **never promotable** |
+| 8 | 9 | 5 | **8** | **never promotable** |
+| 9 | 9 | 5 | **6** | **never promotable** |
+| 10 | 9 | 2 | **2** | **never promotable** |
+| 11 | 9 | — | 0 | top of the ladder; promotion is moot |
+
+Stage 11 is the top of the ladder, so ten stages are gated by §8 at all. **Nine
+of those ten fail 11.67's own reachability promise, and six are terminal**: a
+perfect reader at stage 3, 6, 7, 8, 9 or 10 who reads every
+story their stage has can never be promoted, and the dashboard tells them
+`6 of 10 answered GPC instances needed on stage-9 sounds` — a sentence that
+invites them to read more when reading more cannot move the number. The floor
+that exists so one lucky tap cannot promote a child (5.5) has become a floor no
+amount of honest work can reach.
+
+Two contributing facts, both measured rather than assumed:
+
+- **11.67's supply-side fix is in the code and in zero rows of the data.**
+  `MAX_TAP_WORDS = 2` shipped; the live pool holds exactly one `tap_word` per
+  story, 120 of 120 servable stories. Nothing re-enriched them.
+- **The high stages are an allowlist problem, not a question-count problem.**
+  Stage 10 supplies 2 observations across 9 stories and stage 11 supplies 0,
+  because the stories contain no word that uses a sound their own stage
+  introduces — `sound_targets`' `older_stage_fallback`, which 11.67 already
+  recorded as open and which a second `tap_word` per story cannot fix.
+
+**11.71 — `MIN_GPC_OBSERVATIONS` does not move, and neither does anything else in
+`mastery.py`.** The floor is the reason a two-observation ratio cannot promote a
+child (5.5), and lowering it would make the measurement green by making the claim
+smaller — §0's rule about the validator, applied to the mastery signal. The
+cumulative-denominator alternative is refused for the reason
+`evaluate_promotion`'s docstring already gives: a stage-9 reader's cumulative
+counters are dominated by stage-1 correspondences they mastered months ago, so a
+child who never met the new graphemes would show 95% and advance. `MASTERY_QTYPES`
+is not widened either (11.66). The defect is the supply, and the supply is where
+it is fixed.
+
+**11.72 — what ships here is the missing GATE: `--check-promotability`, with the
+same standing as `--check-coverage`, asking §8's question rather than the pool's.**
+
+`--check-coverage` is green on this pool and always was — it counts stories per
+(stage, theme) and every pair holds ≥3. That is the whole problem: **§7's floor
+and §8's floor are different floors**, and the product only ever measured the
+first. A pair can hold three servable stories, be served correctly, and still be
+a stage no child can leave.
+
+The proposition, per stage below `MAX_STAGE`:
+
+    sum of the top STORIES_REQUIRED_AT_STAGE stories' stage evidence
+        >= MIN_GPC_OBSERVATIONS
+
+Five design points, each of which could have been got wrong quietly:
+
+- **Top five, not the whole pool.** The whole pool is the weaker claim (it
+  catches only the six terminal stages); the top five is 11.67's own promise, and
+  it fails at ten stages. A gate that reports the weaker fact would call stage 2
+  fine while a child there must read ten stories to clear a floor documented as
+  needing five. The report prints BOTH numbers so an operator can tell "needs
+  more stories than §8 asks for" from "impossible".
+- **Per stage, not per (stage, theme).** A child can change theme, so the
+  stage-wide sum is the optimistic bound; a gate on the pessimistic one would
+  fire on stages that are in fact reachable. This gate is red only when the
+  product genuinely cannot promote.
+- **The evidence is computed by the runtime's own two sources** — the decoder's
+  alignment (`mastery.word_gpc_ids`, aligned at the STORY's stage, exactly as
+  `readings.complete_reading` does) and the database's `gpcs.stage_id` (exactly
+  what `_STAGE_EVIDENCE_SQL`'s promotion denominator joins against). A gate that
+  re-implemented either would be a green light that lies. The two are verified
+  equal to the decoder inventory today (93 ids, no stage disagreement), and the
+  end-to-end test below binds the gate's arithmetic to what the HTTP routes
+  actually do rather than to a restatement of them.
+- **A perfect reader is assumed.** This is a ceiling: the most evidence the pool
+  can ever yield. A gate about a hypothetical bad reader would measure the child.
+- **It refuses to pass vacuously.** An unseeded ladder exits non-zero with `make
+  seed` named, for 8.44's reason — a check over zero stages finds zero gaps.
+
+**11.73 — the gate is RED on the live pool, and that is the finding, not a defect
+in the gate.** It exits 0 against a pool that can supply the evidence (proved with
+a fixture pool that the same code calls promotable, and with a real kid promoted
+through the real HTTP routes at that pool), and non-zero against this one, naming
+all ten stages and marking the six terminal ones. The operator's remedy is stated
+in the failure message and is honest about its limits: `make warm` adds stories,
+which fixes the stages that merely need more than five; re-enriching for 11.67's
+second `tap_word` roughly doubles the yield per story; and neither one fixes
+stages 9-11, where the stories contain no current-stage sound to ask about at all.
+
+**11.74 — what is deliberately NOT done here.**
+
+- **No supply is generated.** `make warm` and `make eval` spend real money and
+  were not authorised; nothing in this change writes a row, calls a model, or
+  touches DigitalOcean. Live spend $0.00.
+- **The second `tap_word` is not backfilled onto the 120 stories that lack it**,
+  and the reason is scope, not cost. Worth writing down for whoever does it: a
+  top-up would need **no API call**. `tap_word` options come from
+  `tap_word_options`, a pure function over a closed list; the instruction comes
+  from `PROMPT_FRAMES`, which is human-authored; `check_tap_word` is the
+  unchanged judge; and §13 layer 3 is exempt for this qtype (11.61), so only the
+  free blocklist pass applies — exactly the shape of the two repairs that already
+  exist (`refresh_tap_word_prompts`, `repair_leaky_cues`). It is a separate
+  change because it writes child-facing rows into the pool and needs its own
+  before/after measurement, and because on its own it fixes stages 3-8 and leaves
+  9-11 where they are. The gate is what makes its absence loud.
+- **The allowlist/generation work at stages 9-11 is untouched.** It is the same
+  `older_stage_fallback` item 11.67 recorded as open, in another module.
+- **No existing test's assertion is changed**, and no threshold moved.
+
+### Gates — measured on 2026-07-30, commands as run
+
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **1020 passed,
+  3 skipped, 0 failed, exit 0**, against the stated baseline of 1008 + 3. All 12
+  of the delta are `tests/test_promotion_supply.py`; no existing test's
+  assertions were touched.
+- **Sabotage-verified four ways, and the record in that file's docstring is what
+  actually printed.** Reverting the whole change fails all 12 at collection,
+  which is the weakest of the four; the three that matter are semantic. Counting
+  every aligned GPC instead of the ones the stage introduces fails 5, including
+  the end-to-end one, which then reports stage 2 as promotable while the kid it
+  just watched read all nine stories perfectly sits at stage 2. Summing the first
+  five stories instead of the best five fails 1. Removing the top-stage exemption
+  fails 3. **One of those sabotages found a real defect in a test of mine**: the
+  reachability case originally used `[1, 1, 2, 10, 1, 1, 1]`, whose first five
+  and best five both sum to 15, so it passed with the sort deleted. Replaced with
+  order-sensitive data.
+- `.venv/bin/ruff check storyforge tests scripts` — all checks passed.
+- `cd apps/web && bunx tsc --noEmit && bun test src` — typecheck clean, **232
+  pass, 0 fail**. No web file is touched by this change.
+- `python -m storyforge.warm --check-coverage` — **exit 0, 33 of 33 pairs at
+  target**, unchanged, and now printing the sentence that says what it does not
+  cover.
+- `python -m storyforge.warm --check-promotability` — **exit 1**, the finding as
+  an exit code: 9 stages short within five stories, 6 of them terminal
+  (3, 6, 7, 8, 9, 10). The per-stage numbers it prints are the ones in 11.70,
+  reproduced by the shipped code rather than by the throwaway script that found
+  them.
+- **No `make warm`, no `make eval`, no model call of any kind, nothing written to
+  any database, nothing touched on DigitalOcean. Live spend $0.00.**
+
+**What is NOT proved.** That the gate stays green once the supply is fixed — no
+supply was generated, so the passing direction is proved on a fixture pool
+(`test_the_gate_predicts_a_promotable_stage_end_to_end`, five stories at exactly
+the floor, a real kid promoted through the real HTTP routes) and not on the live
+pool. And this changes nothing a child sees today: the six terminal stages are
+still terminal, and the dashboard still tells a stuck reader how many GPC
+instances they need. What has changed is that the product can no longer report
+itself healthy while they are stuck.

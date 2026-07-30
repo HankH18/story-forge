@@ -108,8 +108,18 @@ from storyforge.llm.scene_tags import SceneTagResult, select_asset, tag_segments
 
 # §8's evidence rule, imported rather than restated: `tap_word` is the only
 # question type that ever moved `gpc_stats`, so it is the only one whose row is
-# irreplaceable once a child has answered it.
-from storyforge.mastery import MASTERY_QTYPES
+# irreplaceable once a child has answered it. The promotability gate below reads
+# the same module for the same reason — its arithmetic has to BE the runtime's.
+from storyforge.mastery import (
+    MASTERY_QTYPES,
+    MIN_GPC_OBSERVATIONS,
+    STORIES_REQUIRED_AT_STAGE,
+    promotion_is_reachable,
+    reachable_observations,
+    single_word,
+    stage_evidence,
+    stories_needed,
+)
 from storyforge.models import Asset, Question, Story, StorySegment
 from storyforge.pipeline import PipelineResult, load_vocabulary, run_pipeline
 
@@ -387,6 +397,301 @@ async def run_coverage_check(target: int = TARGET_PER_PAIR) -> None:
             f"{target} servable story/stories.\n{_SILENT_FALLBACK}\n{_FILL_HINT}"
         )
     print(f"\nOK — all {len(rows)} (stage, theme) pair(s) hold >= {target} servable story/stories.")
+    # Green here is not green for §8, and it read as though it were until
+    # DEVIATIONS 11.70 measured the other floor. Named at the moment the operator
+    # is most likely to conclude the pool is fine.
+    print(
+        "     That is §7's floor — stories a child can be SERVED. It says nothing "
+        "about whether\n     those stories carry the §8 evidence a child needs to "
+        "be PROMOTED off the stage:\n     run `python -m storyforge.warm "
+        "--check-promotability` for that floor."
+    )
+
+
+# --- §8 promotability: the other floor, and the one nothing measured ---------
+# DEVIATIONS 11.70. `--check-coverage` above asks "can a child at this (stage,
+# theme) be served their own stage" and has been green throughout. §8 asks a
+# second question — "can a child who reads those stories ever leave the stage" —
+# and the answer at six of the eleven stages is no, in any number of readings.
+#
+# The two floors are independent: three servable stories per pair satisfies §7
+# completely while supplying two of the ten observations `MIN_GPC_OBSERVATIONS`
+# requires. Nothing in the product noticed, because nothing in the product asked.
+
+#: Every stage, and the credited word of every `tap_word` question on every
+#: SERVABLE story at it.
+#:
+#: Three joins, each of which is the same decision the coverage gate made and for
+#: the same reason:
+#:
+#: - `FROM stages` with a LEFT JOIN, so a stage holding no stories comes back as
+#:   a row rather than as no row (8.44's vacuity failure, one query later).
+#: - `SERVABLE_STATUSES` + `ANSWERABLE_SQL`, imported from the endpoint and never
+#:   re-spelled (8.51): a story the serving path will not serve cannot contribute
+#:   evidence, and counting one would report a stage as promotable that no child
+#:   can reach.
+#: - a LEFT JOIN to `questions` on `MASTERY_QTYPES`, so a servable story whose
+#:   only question is an `mcq2` is still COUNTED as a story and contributes zero.
+#:   An inner join would have hidden it, and "9 stories, 2 observations" is the
+#:   sentence an operator needs.
+_SUPPLY_SQL = text(
+    f"""
+    SELECT st.id AS stage_id, s.id AS story_id, q.answer AS answer
+    FROM stages st
+    LEFT JOIN stories s
+      ON s.stage_id = st.id
+     AND s.status = ANY(:statuses)
+     AND {ANSWERABLE_SQL.format(story="s")}
+    LEFT JOIN questions q
+      ON q.story_id = s.id
+     AND q.qtype = ANY(:qtypes)
+    ORDER BY st.id, s.id, q.idx
+    """
+)
+
+#: The promotion denominator's own definition of "introduced at this stage",
+#: read from the same table `readings._STAGE_EVIDENCE_SQL` joins against.
+_INTRODUCED_SQL = text("SELECT gpc_id, stage_id FROM gpcs")
+
+
+@dataclass(frozen=True)
+class StageSupply:
+    """One stage, and the §8 evidence a perfect reader can ever earn there.
+
+    `per_story` is one ceiling per distinct servable story, descending. Nothing
+    here is about a particular child: it is what the POOL can supply.
+    """
+
+    stage_id: int
+    per_story: tuple[int, ...]
+
+    @property
+    def stories(self) -> int:
+        return len(self.per_story)
+
+    @property
+    def reachable(self) -> int:
+        """The best `STORIES_REQUIRED_AT_STAGE` stories, summed — §8's window."""
+        return reachable_observations(self.per_story)
+
+    @property
+    def total(self) -> int:
+        """The whole pool at this stage. Below the floor here means TERMINAL."""
+        return sum(self.per_story)
+
+    @property
+    def terminal(self) -> bool:
+        """No number of readings promotes a child from here.
+
+        Read it only for a stage §8 gates. At the top of the ladder the supply is
+        always zero and there is nothing to be promoted to, which is the end of
+        the ladder rather than a dead end; `promotion_gaps` never asks there.
+        """
+        return stories_needed(self.per_story) is None
+
+
+async def stage_supply(session) -> list[StageSupply]:
+    """What each stage can ever yield, computed the way the runtime counts it.
+
+    Two sources, both the product's own, neither re-implemented here: the
+    decoder's alignment at the STORY's stage (`mastery.stage_evidence`, which is
+    what `readings.complete_reading` credits) and `gpcs.stage_id` (which is what
+    the promotion denominator sums over). One query each, no API call, nothing
+    written.
+
+    A key that is not one word — a phrase, a null, a hostile row — contributes
+    nothing, exactly as `mastery.single_word` refuses it at completion time. The
+    gate must not be able to report evidence the runtime would never credit.
+    """
+    introduced: dict[int, set[str]] = {}
+    for row in await session.execute(_INTRODUCED_SQL):
+        introduced.setdefault(row.stage_id, set()).add(row.gpc_id)
+
+    rows = await session.execute(
+        _SUPPLY_SQL, {"statuses": list(SERVABLE_STATUSES), "qtypes": list(MASTERY_QTYPES)}
+    )
+    words: dict[int, dict[int, list[str]]] = {}
+    for row in rows:
+        stage = words.setdefault(row.stage_id, {})
+        if row.story_id is None:
+            continue
+        stage.setdefault(row.story_id, [])
+        key = row.answer if isinstance(row.answer, dict) else {}
+        word = single_word(key.get("correct"))
+        if word is not None:
+            stage[row.story_id].append(word)
+
+    return [
+        StageSupply(
+            stage_id=stage_id,
+            per_story=tuple(
+                sorted(
+                    (
+                        stage_evidence(
+                            story_words,
+                            stage_id=stage_id,
+                            introduced=introduced.get(stage_id, set()),
+                        )
+                        for story_words in stories.values()
+                    ),
+                    reverse=True,
+                )
+            ),
+        )
+        for stage_id, stories in sorted(words.items())
+    ]
+
+
+def promotion_gaps(rows: Sequence[StageSupply]) -> list[StageSupply]:
+    """The stages a child cannot be promoted off. Worst first, then by stage.
+
+    No `target` parameter, unlike `coverage_gaps`. §7's depth is an operator's
+    policy about generate-ahead; §8's floor is the mastery signal itself
+    (DEVIATIONS 5.5), and a `-n` on this gate would be a supported way to lower
+    it until the pool looked adequate.
+    """
+    return sorted(
+        (
+            r
+            for r in rows
+            if not promotion_is_reachable(stage_id=r.stage_id, per_story=r.per_story)
+        ),
+        key=lambda r: (r.reachable, r.stage_id),
+    )
+
+
+def assert_ladder_seeded(rows: Sequence[StageSupply]) -> None:
+    """Refuse to answer at all when `stages` is not the ladder (cf. 8.44).
+
+    A supply check over zero stages finds zero gaps and exits 0 — on a fresh
+    deploy, which is the exact scenario this gate is for.
+    """
+    stages = sorted(r.stage_id for r in rows)
+    expected = list(range(MIN_STAGE, MAX_STAGE + 1))
+    if stages != expected:
+        raise SystemExit(
+            f"the stage ladder itself is not seeded: {len(stages)} stage(s) {stages} "
+            f"— expected {MIN_STAGE}..{MAX_STAGE}. Run `make seed` first.\n"
+            "Refusing rather than reporting: a promotability check over an empty "
+            "ladder finds no gaps and would exit 0."
+        )
+
+
+def render_supply(rows: Sequence[StageSupply]) -> list[str]:
+    """The whole ladder as a table, then the stuck stages by name.
+
+    Both numbers, always. "5 of 10 in five stories" and "7 in the entire pool"
+    are different findings with different remedies, and a table showing one of
+    them would send an operator to `make warm` for a stage that more stories
+    cannot fix.
+    """
+    out = [
+        "",
+        f"POOL PROMOTABILITY — §8 evidence a perfect reader can earn per stage, over "
+        f"the servable ({'|'.join(SERVABLE_STATUSES)}) pool.",
+        f"Floor: {MIN_GPC_OBSERVATIONS} observation(s) on the sounds the stage "
+        f"introduces, within the {STORIES_REQUIRED_AT_STAGE} stories §8 asks for.",
+        "  stage  stories   best 5   whole pool",
+    ]
+    for row in rows:
+        if row.stage_id >= MAX_STAGE:
+            out.append(
+                f"  {row.stage_id:>5}  {row.stories:>7}        —            — "
+                "  top of the ladder: promotion is moot"
+            )
+            continue
+        short = "" if row.reachable >= MIN_GPC_OBSERVATIONS else " !"
+        note = "  TERMINAL: no number of readings promotes" if row.terminal else ""
+        out.append(
+            f"  {row.stage_id:>5}  {row.stories:>7}  {str(row.reachable) + short:>7}  "
+            f"{row.total:>11}{note}"
+        )
+
+    gaps = promotion_gaps(rows)
+    gated = [r for r in rows if r.stage_id < MAX_STAGE]
+    out.append(
+        f"  {len(gated) - len(gaps)} of {len(gated)} stage(s) can promote a reader "
+        f"within {STORIES_REQUIRED_AT_STAGE} stories."
+    )
+    if gaps:
+        out.append(f"  {len(gaps)} below the floor (marked !):")
+        for gap in gaps:
+            needed = stories_needed(gap.per_story)
+            remedy = (
+                f"the whole pool supplies {gap.total} — TERMINAL"
+                if needed is None
+                else f"reachable, but only over {needed} stories, not "
+                f"{STORIES_REQUIRED_AT_STAGE}"
+            )
+            out.append(
+                f"    stage {gap.stage_id}: {gap.reachable} of {MIN_GPC_OBSERVATIONS} "
+                f"observations across its best {STORIES_REQUIRED_AT_STAGE} of "
+                f"{gap.stories} story/stories; {remedy}"
+            )
+    return out
+
+
+#: What a terminal stage costs the child, in §8's own terms. The gate's value is
+#: this sentence as much as the exit code: nothing in the product can say it,
+#: because the dashboard's shortfall line is identical whether the child needs one
+#: more story or whether no story exists.
+_STUCK_CHILD = (
+    "A child at a TERMINAL stage who reads every story that stage holds, with a "
+    "perfect score, is never promoted. A re-read yields no further evidence by "
+    "design (DEVIATIONS 5.5), so their dashboard shows the same shortfall forever "
+    "while telling them how many answered GPC instances they still need."
+)
+
+#: The remedy, and what it cannot do. Honest about the second half, because a
+#: hint that promises `make warm` will fix stage 10 sends an operator to spend
+#: money on stories that will supply nothing.
+_SUPPLY_HINT = (
+    "This is a SUPPLY problem, and the floor is not the remedy (DEVIATIONS 5.5, "
+    "11.71 — lowering it would let one lucky tap promote a child). Raise what a "
+    "story is worth: `python -m storyforge.warm` adds stories, which fixes a stage "
+    "that merely needs more than five; re-enriching for DEVIATIONS 11.67's second "
+    "`tap_word` per story roughly doubles the evidence each one carries. NEITHER "
+    "fixes a stage whose stories contain no word using a sound that stage "
+    "introduces (`sound_targets`' older_stage_fallback) — that is an allowlist and "
+    "generation problem. Verify with `python -m storyforge.warm "
+    "--check-promotability`."
+)
+
+
+async def run_promotability_check() -> None:
+    """§8's floor as an exit code. No API client is constructed; nothing is spent.
+
+    The companion to `run_coverage_check`, and deliberately a SECOND command
+    rather than a clause inside the first: the two gates have different
+    propositions, different remedies and different owners, and folding them
+    together would report one exit code for "generate more stories" and "the
+    allowlist cannot ask about this stage's sounds".
+    """
+    async with SessionLocal() as session:
+        rows = await stage_supply(session)
+    assert_ladder_seeded(rows)
+    for line in render_supply(rows):
+        print(line, flush=True)
+
+    gaps = promotion_gaps(rows)
+    if gaps:
+        terminal = sorted(g.stage_id for g in gaps if g.terminal)
+        detail = (
+            f", and {len(terminal)} of them cannot supply it in ANY number of "
+            f"readings: stage(s) {terminal}"
+            if terminal
+            else ""
+        )
+        raise SystemExit(
+            f"\n{len(gaps)} stage(s) cannot supply §8's promotion evidence within "
+            f"the {STORIES_REQUIRED_AT_STAGE} stories §8 asks for{detail}."
+            f"\n{_STUCK_CHILD}\n{_SUPPLY_HINT}"
+        )
+    print(
+        f"\nOK — every stage below {MAX_STAGE} can supply "
+        f"{MIN_GPC_OBSERVATIONS} observation(s) of §8 evidence within "
+        f"{STORIES_REQUIRED_AT_STAGE} stories."
+    )
 
 
 _OBSERVED_COST_SQL = text(
@@ -1949,6 +2254,17 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--check-promotability",
+        action="store_true",
+        help=(
+            "report the §8 evidence each stage's servable pool can ever yield and "
+            "exit NON-ZERO while any stage below the top cannot reach "
+            f"MIN_GPC_OBSERVATIONS within {STORIES_REQUIRED_AT_STAGE} stories, then "
+            "exit. No API calls, nothing spent. The companion to --check-coverage, "
+            "which measures a different floor (DEVIATIONS 11.70)"
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -1988,6 +2304,8 @@ def main() -> None:
     try:
         if a.check_coverage:
             asyncio.run(run_coverage_check(a.target))
+        elif a.check_promotability:
+            asyncio.run(run_promotability_check())
         elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
         elif a.grammar_backfill:

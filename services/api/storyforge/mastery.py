@@ -66,11 +66,32 @@ per story and stage 12 stays at 0.00 (9 of 9 live stage-12 stories credit no
 stage-12 GPC). Stage 12 is the top of the ladder so promotion is moot, but
 **stage 11 remains effectively unpromotable**; that is the allowlist's
 `older_stage_fallback` rate, not this module's.
+
+**And the limit was larger than that paragraph knew** (DEVIATIONS 11.70). 11.67
+measured a MEAN — 1.08 → 1.95 observations per story — and a mean cannot see an
+exhausted pool. Asked per stage, over every distinct servable story a child can
+be served, a perfect reader clears the floor at **one of the ten stages a child
+can be promoted off**: the best five stories supply 20 observations at stage 1
+and 5, 5, 5, 6, 5, 5, 5, 5 and 2 at stages 2-10. At six of them the whole pool
+supplies
+fewer than ten, and a re-read yields nothing by design, so those stages are
+terminal — a child who reads everything their stage has, perfectly, is never
+promoted and is shown a shortfall that reading more cannot move.
+
+Nothing in this module is the fix. The floor stays at 10 for 5.5's reason, the
+denominator stays at the stage's own GPCs for :func:`evaluate_promotion`'s
+reason, and `MASTERY_QTYPES` stays as it is for 11.66's — those are the three
+directions in which making the number look better would mean saying something
+smaller. What was missing was that nothing ever ASKED whether the pool could
+supply the floor: §7's gate counts stories per (stage, theme) and was green
+throughout. :func:`reachable_observations` is the arithmetic of that question,
+kept here beside the threshold it is about, and `warm.run_promotability_check`
+is the exit code.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
 from storyforge.decoder import MAX_STAGE as _DECODER_MAX_STAGE
@@ -388,3 +409,86 @@ def evaluate_promotion(
         min_observations=thresholds.min_observations,
         criteria=criteria,
     )
+
+
+# --- supply: can a stage yield the evidence the floor asks for? --------------
+# The question §7's coverage gate does not ask (DEVIATIONS 11.70). That gate
+# counts servable stories per (stage, theme); this counts the §8 EVIDENCE those
+# stories can ever carry, which is a different number and was never measured.
+def stage_evidence(
+    words: Iterable[str], *, stage_id: int, introduced: Collection[str]
+) -> int:
+    """How many stage-``stage_id`` GPC instances ``words`` are worth, at most.
+
+    The ceiling on what one story can contribute to :func:`evaluate_promotion`'s
+    ``gpc_seen``: the credited words of its ``tap_word`` questions, aligned by
+    the decoder at the STORY's stage exactly as ``readings.complete_reading``
+    aligns them, counting only the correspondences ``stage_id`` *introduces*
+    exactly as the promotion denominator counts them.
+
+    ``introduced`` is a parameter rather than something derived here, and that is
+    deliberate: the runtime's denominator is a SQL join against ``gpcs.stage_id``,
+    so the caller passes the same rows the database holds. A gate that recomputed
+    which stage teaches which grapheme would be free to disagree with the product
+    it is gating, and would still print a table.
+
+    Instances, with repeats, because §8 counts instances: a word using the
+    stage's new digraph twice is worth two.
+    """
+    return sum(
+        1
+        for word in words
+        for gpc_id in word_gpc_ids(word, stage_id)
+        if gpc_id in introduced
+    )
+
+
+def reachable_observations(
+    per_story: Iterable[int], thresholds: Thresholds = THRESHOLDS
+) -> int:
+    """The most evidence §8's five stories can hold: the best five, summed.
+
+    Sorted, not "the first five" and not "five times the mean" — a child reads
+    distinct stories and the best case is the five richest ones. The mean is
+    what 11.67 measured, and it is the statistic that hid this: it cannot
+    distinguish a stage whose stories average one observation because there are
+    forty of them from one where there are nine and then nothing.
+
+    Deliberately the OPTIMISTIC bound. If this is below
+    ``MIN_GPC_OBSERVATIONS`` then no child at this stage clears the floor inside
+    the five stories §8 asks for, whatever they read and however well they do.
+    """
+    return sum(sorted(per_story, reverse=True)[: thresholds.stories_required])
+
+
+def stories_needed(per_story: Iterable[int], thresholds: Thresholds = THRESHOLDS) -> int | None:
+    """How many distinct stories it actually takes to clear the floor.
+
+    ``None`` when the supply given can never clear it — the honest answer for a
+    stage where the whole servable pool is worth less than
+    ``MIN_GPC_OBSERVATIONS``, and a different fact from "more than five". The
+    dashboard's shortfall line reads the same in both cases, which is why the
+    gate has to say which one it is.
+    """
+    running = 0
+    for n, observations in enumerate(sorted(per_story, reverse=True), start=1):
+        running += observations
+        if running >= thresholds.min_observations:
+            return n
+    return None
+
+
+def promotion_is_reachable(
+    *, stage_id: int, per_story: Iterable[int], thresholds: Thresholds = THRESHOLDS
+) -> bool:
+    """Can a perfect reader at ``stage_id`` be promoted, by §8's own rule?
+
+    ``per_story`` is :func:`stage_evidence` for every distinct servable story at
+    the stage. True at the top of the ladder, where there is nothing to be
+    promoted TO and the last stage introduces no correspondences at all — a gate
+    that reported it as a gap could never pass, and a gate that cannot pass is
+    not a guard.
+    """
+    if stage_id >= thresholds.max_stage:
+        return True
+    return reachable_observations(per_story, thresholds) >= thresholds.min_observations
