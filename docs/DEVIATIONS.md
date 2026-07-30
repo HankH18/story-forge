@@ -9165,3 +9165,171 @@ carrying the other.
   written to any database, nothing touched on DigitalOcean. Live spend $0.00.**
   Every live figure above is a read-only `SELECT`; the re-score loads the
   vocabulary and runs the pure decoder in-process.
+
+## Phase 8 — §8's promotion guard counted the wrong GPCs, at the one stage where that is invisible (11.79-11.81)
+
+Numbered in the 11.60-11.79 block because this is 11.70's other half: the same
+denominator — *the correspondences a stage INTRODUCES* — and the same failure
+mode, a green gate measuring a quantity next to the one it is named for. 11.70
+found six terminal stages that shipped under a green promotion suite; this is
+**why that suite was green**. Logged **before** the change. Every number below
+was measured read-only against the live local `storyforge` Postgres with the
+product's own functions — no API call, nothing written, live spend $0.00.
+
+**11.79 — `test_five_clean_readings_promote_the_kid` guards its own arithmetic
+with the length of the word's WHOLE alignment, while the grader sums only the
+correspondences the stage introduces. The two are equal at stage 1 and nowhere
+else, and stage 1 is the only stage the file runs at.**
+
+The guard, verbatim (`tests/test_readings.py`, introduced in 383c6d2 beside the
+docstring *"5 stories at stage 1, 15 GPC observations, 100%"*):
+
+```python
+per_reading = len(word_gpc_ids(TAP_WORD, TAP_STAGE))
+assert per_reading * STORIES_REQUIRED_AT_STAGE >= MIN_GPC_OBSERVATIONS
+```
+
+`word_gpc_ids` returns the whole alignment — every instance the child is credited
+as having *seen* (`mastery.gpc_increments` filters nothing, deliberately). The
+stage filter is applied at READ time, by `readings._STAGE_EVIDENCE_SQL`:
+
+```sql
+FROM gpc_stats s JOIN gpcs g ON g.gpc_id = s.gpc_id
+WHERE s.kid_id = :kid_id AND g.stage_id = :stage_id
+```
+
+`= :stage_id`, not `<=`. That is the whole distance between the two numbers, and
+`mastery.evaluate_promotion`'s docstring already names it: *"aggregated over the
+GPCs **introduced at** `stage_id`, not the cumulative set a stage-N reader has
+been taught."* The guard uses the cumulative one.
+
+Measured over all 120 servable `tap_word` rows in the live pool, crediting each
+row's correct word through `mastery.word_gpc_ids` at the STORY's stage exactly as
+`complete_reading` does:
+
+| stage | rows | mean alignment | mean introduced | guard's verdict (x5 >= 10) | grader's verdict |
+|---|---|---|---|---|---|
+| 1 | 24 | 3.29 | **3.29** | yes, 16.5 | yes, 16.5 |
+| 2 | 10 | 3.20 | 1.00 | yes, 16.0 | **no, 5.0** |
+| 3 | 11 | 4.00 | 0.64 | yes, 20.0 | **no, 3.2** |
+| 4 | 12 | 3.08 | 1.00 | yes, 15.4 | **no, 5.0** |
+| 5 | 9 | 3.11 | 1.11 | yes, 15.6 | **no, 5.6** |
+| 6 | 9 | 3.44 | 1.00 | yes, 17.2 | **no, 5.0** |
+| 7 | 9 | 3.78 | 1.00 | yes, 18.9 | **no, 5.0** |
+| 8 | 9 | 3.56 | 0.89 | yes, 17.8 | **no, 4.4** |
+| 9 | 9 | 4.22 | 0.67 | yes, 21.1 | **no, 3.3** |
+| 10 | 9 | 4.33 | 0.22 | yes, 21.7 | **no, 1.1** |
+| 11 | 9 | 3.00 | 0.00 | yes, 15.0 | **no, 0.0** |
+
+The guard says *"there is enough evidence here"* at all eleven stages. The
+grader says it at one. They agree at stage 1 because every correspondence a
+stage-1 word can align to is a correspondence stage 1 introduces — `sit` is
+`s|S, i|IH, t|T`, and all three are stage-1 rows — so the wrong count and the
+right count are the same integer, 3, and `TAP_STAGE = 1`.
+
+This is not a hypothetical. The finding's sabotage, reproduced in a throwaway
+`git archive HEAD` copy against a throwaway database, changed **only**
+`TAP_STAGE = 1` to `TAP_STAGE = 6`:
+
+```
+FAILED test_five_clean_readings_promote_the_kid - assert False is True
+FAILED test_promotion_stops_below_the_accuracy_threshold
+FAILED test_promotion_resets_the_story_count_at_the_new_stage
+```
+
+and the guard on the line above the first failure **still passed** (3 x 5 = 15 >=
+10) while the promotion it exists to guarantee never happened. A guard that
+cannot go red before the thing it guards is not a guard; it is a comment with
+`assert` in front of it.
+
+**11.80 — the fix: the guard is computed from the rows the grader joins, and one
+promotion test now runs at a stage where the two counts DISAGREE.**
+
+Two changes, both in `tests/test_readings.py`. No product file is touched.
+
+- `_evidence_per_reading(session, word, stage_id)` calls `mastery.stage_evidence`
+  — the function 11.70 already wrote for exactly this quantity, and the one
+  `warm.stage_supply` gates on — with `introduced` read from **`SELECT gpc_id
+  FROM gpcs WHERE stage_id = :s`**. From the database, not from the decoder's
+  CSV, because `_STAGE_EVIDENCE_SQL` joins those rows: a guard that recomputed
+  which stage teaches which grapheme would be free to disagree with the product
+  it is guarding and would still print a green dot (12.5's lesson, and
+  `stage_evidence`'s own docstring says so).
+- A second promotion test at **stage 5**, on `oatmeal`: five correspondences in
+  the alignment, **two** of them stage-5 rows (`oa|OW`, `ea|IY`), so five clean
+  readings are worth exactly `MIN_GPC_OBSERVATIONS = 10`. The boundary,
+  deliberately — the fixture stories are built by the same factory the stage-1
+  ones are, so the stage is a parameter, and the body
+  *"Sam had oatmeal on a rainy day. The pup was sleepy."* measures **1.000**
+  decodable at stage 5 with all three tap options in it.
+
+Per `justify-test-edit`, recorded at the edit site and here: this is **not a
+failing test being loosened**. The suite is green and no product code changed.
+The replacement quantity is a filtered subcount of the same list, so it is
+**strictly smaller** — 2 where the old guard read 5 — which makes the assertion
+harder to satisfy, not easier. Nothing is deleted, skipped or widened; two
+assertions are added.
+
+**11.81 — what is NOT changed, and why the neighbouring call sites are right.**
+
+`word_gpc_ids(TAP_WORD, TAP_STAGE)` appears five more times in the same file
+(the `gpc_updates` payload, the `gpc_stats` rows twice, the replay attack, the
+progress DTO). Every one of those is about what the child was credited as having
+**seen**, which really is the whole alignment: `gpc_increments` marks every
+instance and the stage slice is taken later, at read time. Those five are
+correct and are left exactly as they are. The wrong quantity was in one
+assertion, and only that assertion moved.
+
+Nothing in `storyforge/` changes: not `_STAGE_EVIDENCE_SQL`, not
+`MIN_GPC_OBSERVATIONS`, not `STORIES_REQUIRED_AT_STAGE`, not `MASTERY_QTYPES`.
+The six terminal stages of 11.70 are still terminal and `make promote-check` is
+still red — this entry does not fix that and must not be read as fixing it. It
+fixes the reason the promotion suite could not see it.
+
+**Tests — one added, one assertion corrected, two assertions added, none
+weakened and none deleted.**
+
+- `test_five_clean_readings_promote_the_kid_above_stage_one` — the new one, and
+  the whole point. The same loop the stage-1 test drives, through the same real
+  routes, at stage 5: `assert per_reading < aligned` states its own premise
+  first (2 versus 5 — a test that only proves something where the two counts
+  differ has to check that they do), and every reading asserts
+  `promotion.gpc_seen == per_reading * n`, so the runtime is being asked to
+  agree with `stage_evidence` on every step and not just at the finish line.
+  Promotion lands on the fifth story, at exactly 10 observations, and the kid
+  row moves 5 → 6.
+- `test_five_clean_readings_promote_the_kid` — the corrected guard, plus
+  `promotion.gpc_seen == per_reading * STORIES_REQUIRED_AT_STAGE == 15`, which
+  is the number its docstring has claimed since 383c6d2 and never asserted.
+- `story_pool` — the fixture `distinct_stories` was, with the stage, word,
+  options, grapheme and body as parameters. `distinct_stories` is now the
+  stage-1 call and keeps its docstring verbatim; nothing about what it builds
+  changed.
+
+**Sabotage — two, each restored and verified restored.**
+
+| sabotage | the defect it stages | result |
+|---|---|---|
+| `_STAGE_EVIDENCE_SQL` → `g.stage_id <= :stage_id` (product) | the cumulative denominator `evaluate_promotion`'s docstring forbids | **1 RED**: `AssertionError: reading 1: the grader counted 5 stage-5 instances, not 2` — and **52 passed**, every stage-1 promotion test among them |
+| `_evidence_per_reading` → `len(word_gpc_ids(word, stage_id))` (the shipped guard, restored) | the finding itself | **1 RED**: `AssertionError: 'oatmeal' is worth 5 at stage 5 and aligns to 5 correspondences — this test only proves anything at a stage where those differ, which is every stage except stage 1` |
+
+The first row is the entry. A cumulative promotion denominator — the exact
+defect `mastery.evaluate_promotion` spends a paragraph forbidding, the one that
+would advance a reader who never once met the new graphemes on the strength of
+stage-1 sounds they mastered months ago — is invisible to all 52 other tests in
+this file and visible to the new one on its FIRST reading. Before this change
+the whole file was the 52.
+
+**Gates.**
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **1026
+  passed, 3 skipped**, against a baseline of **1025 passed, 3 skipped** measured
+  on `de6e48f` in this tree before the change. +1, the one new test, and nothing
+  else moves. (The task brief said 1008; that number has been stale since 9.74.)
+- `.venv/bin/ruff check storyforge tests scripts` — all checks passed.
+- `cd apps/web && bun test src` — **232 pass, 0 fail**. No web file is touched.
+- The suite writes to the live local Postgres and cleans up after itself:
+  `SELECT count(*) FROM stories WHERE title LIKE 'Distinct %'` is **0** after the
+  run, so the new stage-5 fixture leaves the warm pool exactly as it found it and
+  neither `make warm-check` nor `make promote-check` is perturbed.
+- **No `make warm`, no `make eval`, no `make eval-smoke`, no model call, nothing
+  touched on DigitalOcean. Live spend $0.00.**

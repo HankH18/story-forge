@@ -21,6 +21,8 @@ targets a stage-2 grapheme" is not a fact the suite should depend on.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 from sqlalchemy import text
@@ -31,6 +33,7 @@ from storyforge.mastery import (
     MAX_STAGE,
     MIN_GPC_OBSERVATIONS,
     STORIES_REQUIRED_AT_STAGE,
+    stage_evidence,
     word_gpc_ids,
 )
 
@@ -39,7 +42,27 @@ from storyforge.mastery import (
 # floor, and the arithmetic is checkable by hand.
 TAP_WORD = "sit"
 TAP_OPTIONS = ["sit", "map", "bed"]
+TAP_GRAPHEME = "s"
 TAP_STAGE = 1
+TAP_BODY = "Sam sat."
+
+# The SECOND (stage, word) pair, and it is above stage 1 on purpose (DEVIATIONS
+# 11.79). Stage 1 is the one rung of the ladder where a word's whole alignment
+# and the correspondences the stage INTRODUCES are the same set — `sit` is
+# `s|S, i|IH, t|T` and all three are stage-1 rows — so at stage 1 a promotion
+# test cannot tell the two apart, and every promotion test in this file ran
+# there. `oatmeal` aligns to FIVE correspondences at stage 5 and exactly TWO of
+# them (`oa|OW`, `ea|IY`) are stage-5 rows, which is what
+# `_STAGE_EVIDENCE_SQL` sums: five clean readings are worth 10, not 25, and 10
+# is `MIN_GPC_OBSERVATIONS` on the nose. The boundary, deliberately.
+HIGH_TAP_WORD = "oatmeal"
+HIGH_TAP_OPTIONS = ["oatmeal", "rainy", "sleepy"]
+HIGH_TAP_GRAPHEME = "oa"
+HIGH_TAP_STAGE = 5
+#: 1.000 decodable at stage 5 (`the` is the only sight word), and it contains
+#: all three options — a tap-a-word question about a word the story never says
+#: is not a question `check_tap_word` would ever have let through.
+HIGH_TAP_BODY = "Sam had oatmeal on a rainy day. The pup was sleepy."
 
 
 @pytest.fixture
@@ -121,7 +144,80 @@ async def tap_question(session, story_at_stage_1):
 
 
 @pytest.fixture
-async def distinct_stories(session):
+async def story_pool(session):
+    """Factory: `STORIES_REQUIRED_AT_STAGE + 1` DIFFERENT stories at ONE stage,
+    each with a tap_word question carrying the same hand-checked answer key.
+
+    The stage is a parameter because it has to be one. `distinct_stories` below
+    is the stage-1 instance this file has always had; `distinct_stories_above_
+    stage_one` is the same fixture at stage 5, and the difference between what
+    those two prove is DEVIATIONS 11.79.
+    """
+    created: list[int] = []
+
+    async def build(
+        *, stage_id: int, word: str, options: list[str], grapheme: str, body: str
+    ) -> list[tuple[int, int]]:
+        assert options[0] == word, "the answer key indexes option 0"
+        theme_id = (
+            await session.execute(text("SELECT id FROM themes ORDER BY id LIMIT 1"))
+        ).scalar_one()
+
+        readables = []
+        for n in range(STORIES_REQUIRED_AT_STAGE + 1):
+            story_id = (
+                await session.execute(
+                    text(
+                        "INSERT INTO stories (stage_id, theme_id, status, title, decodability, "
+                        "story_words, gen_meta) VALUES (:s, :t, 'warm', :title, 1.0, "
+                        "CAST('{}' AS text[]), CAST('{}' AS jsonb)) RETURNING id"
+                    ),
+                    {"s": stage_id, "t": theme_id, "title": f"Distinct {stage_id}-{n}"},
+                )
+            ).scalar_one()
+            created.append(story_id)
+            await session.execute(
+                text(
+                    "INSERT INTO story_segments (story_id, idx, body, scene_tags) "
+                    "VALUES (:st, 0, :body, CAST('{}' AS text[]))"
+                ),
+                {"st": story_id, "body": body},
+            )
+            qid = (
+                await session.execute(
+                    text(
+                        "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
+                        "VALUES (:st, 99, 'tap_word', :prompt, "
+                        "CAST(:payload AS jsonb), CAST(:answer AS jsonb)) RETURNING id"
+                    ),
+                    {
+                        "st": story_id,
+                        "prompt": f"Tap: {word}.",
+                        "payload": json.dumps(
+                            {"options": options, "target_grapheme": grapheme}
+                        ),
+                        "answer": json.dumps({"index": 0, "correct": word}),
+                    },
+                )
+            ).scalar_one()
+            readables.append((story_id, qid))
+        await session.commit()
+        return readables
+
+    try:
+        yield build
+    finally:
+        # `story_segments`, `questions` and `readings` all cascade from stories.
+        if created:
+            await session.execute(
+                text("DELETE FROM stories WHERE id = ANY(CAST(:ids AS int[]))"),
+                {"ids": created},
+            )
+            await session.commit()
+
+
+@pytest.fixture
+async def distinct_stories(story_pool):
     """`STORIES_REQUIRED_AT_STAGE + 1` DIFFERENT stage-1 stories, each with a
     tap_word question carrying the same hand-checked answer key.
 
@@ -140,55 +236,57 @@ async def distinct_stories(session):
     five. A test of the promotion rule must not be silently satisfiable by pool
     depth in either direction, so it brings its own.
     """
-    theme_id = (
-        await session.execute(text("SELECT id FROM themes ORDER BY id LIMIT 1"))
-    ).scalar_one()
+    return await story_pool(
+        stage_id=TAP_STAGE,
+        word=TAP_WORD,
+        options=TAP_OPTIONS,
+        grapheme=TAP_GRAPHEME,
+        body=TAP_BODY,
+    )
 
-    readables = []
-    for n in range(STORIES_REQUIRED_AT_STAGE + 1):
-        story_id = (
-            await session.execute(
-                text(
-                    "INSERT INTO stories (stage_id, theme_id, status, title, decodability, "
-                    "story_words, gen_meta) VALUES (:s, :t, 'warm', :title, 1.0, "
-                    "CAST('{}' AS text[]), CAST('{}' AS jsonb)) RETURNING id"
-                ),
-                {"s": TAP_STAGE, "t": theme_id, "title": f"Distinct {n}"},
-            )
-        ).scalar_one()
-        await session.execute(
-            text(
-                "INSERT INTO story_segments (story_id, idx, body, scene_tags) "
-                "VALUES (:st, 0, 'Sam sat.', CAST('{}' AS text[]))"
-            ),
-            {"st": story_id},
-        )
-        qid = (
-            await session.execute(
-                text(
-                    "INSERT INTO questions (story_id, idx, qtype, prompt, payload, answer) "
-                    "VALUES (:st, 99, 'tap_word', 'Tap: sit.', "
-                    "CAST(:payload AS jsonb), CAST(:answer AS jsonb)) RETURNING id"
-                ),
-                {
-                    "st": story_id,
-                    "payload": '{"options": ["sit", "map", "bed"], "target_grapheme": "s"}',
-                    "answer": '{"index": 0, "correct": "sit"}',
-                },
-            )
-        ).scalar_one()
-        readables.append((story_id, qid))
-    await session.commit()
 
-    try:
-        yield readables
-    finally:
-        # `story_segments`, `questions` and `readings` all cascade from stories.
-        await session.execute(
-            text("DELETE FROM stories WHERE id = ANY(CAST(:ids AS int[]))"),
-            {"ids": [s for s, _ in readables]},
-        )
-        await session.commit()
+@pytest.fixture
+async def distinct_stories_above_stage_one(story_pool):
+    """The same pool at `HIGH_TAP_STAGE`, where the alignment and the stage's
+    own slice of it are different sizes (DEVIATIONS 11.79)."""
+    return await story_pool(
+        stage_id=HIGH_TAP_STAGE,
+        word=HIGH_TAP_WORD,
+        options=HIGH_TAP_OPTIONS,
+        grapheme=HIGH_TAP_GRAPHEME,
+        body=HIGH_TAP_BODY,
+    )
+
+
+async def _introduced_gpc_ids(session, stage_id: int) -> frozenset[str]:
+    """The correspondences the DATABASE says this stage INTRODUCES.
+
+    Read from `gpcs` rather than recomputed from the decoder's CSV because
+    `readings._STAGE_EVIDENCE_SQL` joins these exact rows (`g.stage_id =
+    :stage_id`). A guard that formed its own opinion about which stage teaches
+    which grapheme would be free to disagree with the product it is guarding
+    and would still print a green dot.
+    """
+    rows = await session.execute(
+        text("SELECT gpc_id FROM gpcs WHERE stage_id = :s"), {"s": stage_id}
+    )
+    return frozenset(rows.scalars())
+
+
+async def _evidence_per_reading(session, word: str, stage_id: int) -> int:
+    """What one correct tap on `word` adds to §8's `gpc_seen` at `stage_id`.
+
+    `mastery.stage_evidence` is the product's own arithmetic for this — the
+    quantity `warm.stage_supply` gates on and `_STAGE_EVIDENCE_SQL` sums. It is
+    NOT `len(word_gpc_ids(word, stage_id))`: that is the whole alignment, every
+    instance the child is credited as having *seen*, and the stage filter is
+    applied later, at read time.
+    """
+    return stage_evidence(
+        [word],
+        stage_id=stage_id,
+        introduced=await _introduced_gpc_ids(session, stage_id),
+    )
 
 
 async def _new_kid(client, sandbox, stage_id=TAP_STAGE, name="Testkid") -> int:
@@ -214,10 +312,23 @@ async def _answer(client, reading_id: int, question_id: int, response) -> dict:
     return resp.json()
 
 
-async def _read_once(client, kid_id, story_id, question_id, *, correct: bool) -> dict:
-    """One whole kid session: start, answer, complete."""
+async def _read_once(
+    client,
+    kid_id,
+    story_id,
+    question_id,
+    *,
+    correct: bool,
+    word: str = TAP_WORD,
+    wrong: str = "map",
+) -> dict:
+    """One whole kid session: start, answer, complete.
+
+    `wrong` is an OFFERED option rather than junk, because a wrong tap in this
+    product is a child tapping the other word on the screen.
+    """
     reading_id = await _start(client, kid_id, story_id)
-    await _answer(client, reading_id, question_id, TAP_WORD if correct else "map")
+    await _answer(client, reading_id, question_id, word if correct else wrong)
     resp = await client.post(f"/api/readings/{reading_id}/complete")
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -830,7 +941,14 @@ async def test_five_clean_readings_promote_the_kid(
     supplies five different ones, so the docstring and the test agree.
     """
     kid_id = await _new_kid(client, sandbox, stage_id=TAP_STAGE)
-    per_reading = len(word_gpc_ids(TAP_WORD, TAP_STAGE))
+    # justify-test-edit, VERDICT: TEST IS WRONG (DEVIATIONS 11.79). This read
+    # `len(word_gpc_ids(TAP_WORD, TAP_STAGE))` — the WHOLE alignment — while
+    # `_STAGE_EVIDENCE_SQL` sums only rows with `g.stage_id = :stage_id`. The two
+    # are equal at stage 1 and at no other stage (measured over all 120 servable
+    # `tap_word` rows), so the guard passed at every stage while the promotion it
+    # guards happens at one. The replacement is a filtered subcount of the same
+    # list: strictly smaller, so the assertion got harder, not weaker.
+    per_reading = await _evidence_per_reading(session, TAP_WORD, TAP_STAGE)
     assert per_reading * STORIES_REQUIRED_AT_STAGE >= MIN_GPC_OBSERVATIONS
 
     for n in range(1, STORIES_REQUIRED_AT_STAGE + 1):
@@ -845,11 +963,75 @@ async def test_five_clean_readings_promote_the_kid(
     assert body["promotion"]["from_stage"] == 1
     assert body["promotion"]["to_stage"] == 2
     assert body["promotion"]["accuracy"] == 1.0
+    # The docstring's "15 GPC observations", asserted rather than asserted-about.
+    assert body["promotion"]["gpc_seen"] == per_reading * STORIES_REQUIRED_AT_STAGE == 15
 
     stage = (
         await session.execute(text("SELECT stage_id FROM kids WHERE id = :k"), {"k": kid_id})
     ).scalar_one()
     assert stage == 2
+
+
+async def test_five_clean_readings_promote_the_kid_above_stage_one(
+    client, sandbox, session, distinct_stories_above_stage_one
+):
+    """The same loop, closed at a stage where the two GPC counts DISAGREE.
+
+    Every other promotion test in this file runs at stage 1, and stage 1 is the
+    one rung where a word's whole alignment IS the set of correspondences the
+    stage introduces. §8's denominator is the second of those
+    (`evaluate_promotion`: "not the cumulative set a stage-N reader has been
+    taught"), so at stage 1 a promotion test cannot tell a grader that counts
+    the stage's own sounds from one that counts every sound in the word — and
+    that is why six terminal stages shipped under a green promotion suite
+    (DEVIATIONS 11.70, 11.79).
+
+    At stage 5 the two numbers are 2 and 5. Five clean readings are worth
+    exactly `MIN_GPC_OBSERVATIONS`, so this also pins the boundary: promotion
+    lands on the fifth story, not the fourth.
+    """
+    kid_id = await _new_kid(client, sandbox, stage_id=HIGH_TAP_STAGE)
+
+    per_reading = await _evidence_per_reading(session, HIGH_TAP_WORD, HIGH_TAP_STAGE)
+    aligned = len(word_gpc_ids(HIGH_TAP_WORD, HIGH_TAP_STAGE))
+    assert per_reading < aligned, (
+        f"{HIGH_TAP_WORD!r} is worth {per_reading} at stage {HIGH_TAP_STAGE} and aligns "
+        f"to {aligned} correspondences — this test only proves anything at a stage "
+        f"where those differ, which is every stage except stage 1"
+    )
+    assert per_reading * STORIES_REQUIRED_AT_STAGE == MIN_GPC_OBSERVATIONS
+
+    for n in range(1, STORIES_REQUIRED_AT_STAGE + 1):
+        story_id, question_id = distinct_stories_above_stage_one[n - 1]
+        body = await _read_once(
+            client,
+            kid_id,
+            story_id,
+            question_id,
+            correct=True,
+            word=HIGH_TAP_WORD,
+            wrong=HIGH_TAP_OPTIONS[1],
+        )
+        assert body["promotion"]["stories_completed"] == n
+        # The claim the stage-1 tests cannot make: the runtime credited the
+        # stage's OWN sounds, not every sound the word needed.
+        assert body["promotion"]["gpc_seen"] == per_reading * n, (
+            f"reading {n}: the grader counted {body['promotion']['gpc_seen']} "
+            f"stage-{HIGH_TAP_STAGE} instances, not {per_reading * n}"
+        )
+        if n < STORIES_REQUIRED_AT_STAGE:
+            assert body["promoted"] is False, f"promoted after only {n} stories"
+
+    assert body["promoted"] is True
+    assert body["promotion"]["gpc_seen"] == MIN_GPC_OBSERVATIONS
+    assert body["promotion"]["from_stage"] == HIGH_TAP_STAGE
+    assert body["promotion"]["to_stage"] == HIGH_TAP_STAGE + 1
+    assert body["promotion"]["accuracy"] == 1.0
+
+    stage = (
+        await session.execute(text("SELECT stage_id FROM kids WHERE id = :k"), {"k": kid_id})
+    ).scalar_one()
+    assert stage == HIGH_TAP_STAGE + 1
 
 
 async def test_promotion_stops_below_the_accuracy_threshold(
