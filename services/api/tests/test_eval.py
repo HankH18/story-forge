@@ -1060,7 +1060,7 @@ async def client():
         yield c
 
 
-#: The stage the eval fixture builds at. Any stage inside §9's 1..12 does: the
+#: The stage the eval fixture builds at. Any stage inside §9's 1..11 does: the
 #: fixture owns the visible pool, so the eval row is the only candidate on §7's
 #: ladder whatever this is. It replaces `stage = min(12, int(top) + 1)` over the
 #: live `max(stage_id)`, which resolved to **12, tied with nine live stories**, while

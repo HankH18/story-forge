@@ -8520,3 +8520,67 @@ the style guide palette. `tests/test_scene_tags.py::test_every_asset_row_has_a_
 file_on_disk` is the other half and it was **sabotage-checked**: moving
 `dragons/cave-01.svg` aside turns it red naming that url, restoring it turns it
 green. That test is the one that would have caught this defect on day one.
+
+### 12.15 — the off-limits handoff resolved itself mid-flight
+
+12.4 planned for `mastery.py`'s `MAX_STAGE = 12` to stay untouched (another
+agent's surface) with the one-line change described in the handoff report, and
+`tests/test_mastery.py`'s pin rewritten to assert cross-module agreement — RED
+until applied. That red lasted minutes: the concurrent agent applied the exact
+consolidation (`MAX_STAGE = _DECODER_MAX_STAGE`, imported from the decoder) and
+made `tests/test_questions.py` derive its fixture stage from the inventory
+itself (`next(g.stage for g in load_gpcs() if g.grapheme == "w")`), which is
+renumber-proof. Nothing in this change's own surface touched those files.
+
+### Gates — all measured on 2026-07-30, commands as run
+
+- `make precompute` → **34,288 rows across 11 stages in ~1.5s**; per stage
+  771 / 1,383 / 1,934 / 2,149 / 3,197 / 3,461 / 3,899 / 4,333 / 4,378 / 4,386 /
+  4,397. **Every stage clears §18's 150 floor** (minimum 771 = 5.1x); no
+  starvation warning. The counts are exactly 11.11's measured twelve-stage
+  counts shifted by one, which is what 12.14 predicted — the filters did not
+  move.
+- **Vacuity ratchet, re-measured at the new top stage** (same seed 20260728,
+  same 800-word sample): `mastered_ids(11)` = the full 93-GPC set =
+  **44.75%**, bit-identical to the pre-renumber value, ceiling 50% untouched,
+  floor 35% untouched. Nowhere near the ceiling; nothing was smuggled in.
+- **§5.7 goldens**: every case re-derived by executing the validator against
+  the new inventory BEFORE the YAML was edited (12.5); `city@7` misses exactly
+  `{c|S}`; the §17 demo sentence at stage 2 reproduces every verdict, both
+  missing sets and 0.0 decodability. 18/18 word cases + demo case green.
+- **Migration `f3a91c6d0e24`, sabotage-verified four ways on scratch DBs**:
+  (1) fixture kids at every old stage 1..12 land at 1,1,2,3,4,5,6,7,8,9,10,11;
+  (2) idempotent — the body re-executed against a renumbered database changes
+  ZERO rows (full `pg_dump --data-only` byte-identical modulo pg_dump's random
+  `\restrict` token), and the decodability recompute reports 0 changes on a
+  second run; (3) a fresh empty database is a no-op through the whole chain;
+  (4) an unknown ladder shape (max stage 13) raises and rolls back. Applied to
+  the dev database: 5 merged-stage stories' decodability recomputed (story
+  3241: 0.9677 → 1.0, its `rabbit` violation dissolved by the merge) and
+  verified end-to-end on a reconstructed pre-renumber copy where the migration
+  itself performed the same recompute.
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` against a
+  private copy of the database (STATE.md's concurrent-writer protocol):
+  **1008 passed, 3 skipped, 0 failed** — the 6-failure baseline in the
+  concurrent agent's files is gone too, after their own in-flight updates.
+  Shared-DB runs show moving failures while two agents write to one Postgres;
+  every one re-ran green in isolation.
+- `.venv/bin/ruff check storyforge tests scripts` — all checks passed (one
+  import-order fix in `tests/test_stage_coverage.py` was mine).
+- `cd apps/web && bunx tsc --noEmit && bun test src` — typecheck clean,
+  **232 pass, 0 fail**.
+- `make warm-check` — **GREEN: 33 of 33 (stage, theme) pairs hold ≥3 servable
+  stories.** The merged pool needed no generation: old stages 1+2's stories
+  both landed at new stage 1.
+- **No `make warm`, no `make eval`, nothing touched on DigitalOcean.** The
+  production database is untouched; migration `f3a91c6d0e24` runs there at the
+  next deploy's PRE_DEPLOY job. **Live spend: $0.00.**
+
+**What is NOT proved.** The renumbered prompts have not generated a story (no
+API call was authorised): band shifts (12.10) and the removed negation clause
+(12.9) are argued from inventory facts and §10's own scaling, not from a live
+A/B. The §14 matrix at 11 x 3 x 5 has not been run; docs/EVAL.md still records
+run 114 on the old ladder, labelled as such. Production's renumber is verified
+by construction and by scratch-DB sabotage, not yet against the live database —
+the deploy's migration job is the step that does it, and `make warm-check` +
+the §17 demo at stage 2 are the post-deploy checks to run.

@@ -39,7 +39,7 @@ from storyforge.decoder import MAX_STAGE, MIN_STAGE
 # --- guard 1: the defaults ---------------------------------------------------
 # RED against the pre-fix defaults. Sabotage check, run against a copy of the
 # tree with `DEFAULT_STAGES = "1,2,3"` / `DEFAULT_THEMES = "dragons"` restored:
-#   test_the_cli_default_matrix_is_every_stage       FAILED  [1,2,3] != 1..12
+#   test_the_cli_default_matrix_is_every_stage       FAILED  [1,2,3] != 1..11
 #   test_the_cli_default_matrix_is_every_theme       FAILED  'dragons' != 'all'
 #   test_the_default_matrix_is_what_the_cli_hands_run_warm  FAILED  3 stages, 1 theme
 

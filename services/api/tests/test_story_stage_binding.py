@@ -38,7 +38,7 @@ from tests.owned_pool import hide_servable_pool, owned_transaction
 DRAGONS = "dragons"
 
 #: The stage the serve-gate fixture plants its poison row at. A CONSTANT with one
-#: requirement — a stage below it inside §9's 1..12 — because the gate test needs a
+#: requirement — a stage below it inside §9's 1..11 — because the gate test needs a
 #: readable story one rung down for §7's ladder to descend to once the poison is
 #: refused. Any interior stage is as good as any other.
 #:
@@ -235,7 +235,7 @@ async def test_the_served_stage_is_the_kids_stage_not_the_callers_wish(
 
 async def test_a_parent_may_not_choose_the_stage(client, local_clerk, parent, sandbox):
     """C2. The client is untrusted exactly as §0 says the LLM is."""
-    # Any stage inside §9's 1..12. The value is irrelevant to what this asserts:
+    # Any stage inside §9's 1..11. The value is irrelevant to what this asserts:
     # `_resolve_stage` raises the 422 before the pool, the stage table or the theme
     # is read at all, which is why this test never needed the pool to have a shape.
     resp = await client.post(
