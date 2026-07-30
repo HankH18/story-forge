@@ -253,12 +253,53 @@ def test_every_clean_word_really_avoids_the_sound():
             assert target.grapheme not in word_graphemes(word, mastered_ids(STAGE))
 
 
-def test_sight_and_story_words_are_never_offered():
-    """The child has not sounded them out, so they carry no evidence about a
-    grapheme — and a story word is not decodable by design (§5.5)."""
+def test_a_word_this_stage_cannot_sound_out_is_never_offered():
+    """The surviving half of the old blanket sight/story exclusion (11.112).
+
+    `justify-test-edit`, recorded here because a test edit with no recorded
+    justification is indistinguishable from reward hacking. This replaces
+    `test_sight_and_story_words_are_never_offered`, which asserted
+    `not offered & set(SIGHT)` and `not offered & set(STORY_WORDS)` on the
+    grounds that *"the child has not sounded them out ... and a story word is
+    not decodable by design (§5.5)"*. The second clause is factually false and
+    the fixture proves it: `validate_word("dragon", mastered_ids(2))` is
+    DECODABLE with alignment `['d|D','r|R','a|AE','g|G','o|AA','n|N']`. So is
+    `the` (`['th|DH','e|EH']`). The first clause contradicts the function that
+    actually awards the credit — `mastery.word_gpc_ids` passes no sight set at
+    all, and `test_mastery.py::test_a_word_that_is_a_sight_word_but_also_
+    decodable_still_counts` asserts that in as many words. Measured cost of the
+    old contract over the servable pool: 3,555 of 4,681 sight/story token
+    occurrences refused although the aligner decodes them at the story's own
+    stage, stage 7's own new sound (`ou|AW`, in the sight word `out`) among them.
+
+    The contract is not deleted, it is narrowed to what was always true: a word
+    the validator CANNOT sound out at this stage is not evidence about a
+    grapheme and is never offered.
+    """
+    from storyforge.decoder import mastered_ids
+
     offered = {w for t in targets() for w in t.onset_words + t.clean_words}
-    assert not offered & set(SIGHT)
-    assert not offered & set(STORY_WORDS)
+    assert offered
+    for word in offered:
+        assert word_graphemes(word, mastered_ids(STAGE)) is not None, word
+
+    # The words this fixture's stage genuinely cannot spell stay out, sight list
+    # or not: `is`, `was`, `he` are VIOLATIONs at this stage, as are the story
+    # words `fire` and `cave`.
+    for word in ("is", "was", "he", "fire", "cave"):
+        assert word_graphemes(word, mastered_ids(STAGE)) is None, word
+        assert word not in offered
+
+
+def test_a_sight_word_this_stage_can_sound_out_IS_offered():
+    """The half that changed, stated as a fact rather than as an absence.
+
+    `dragon` is one of this fixture's `STORY_WORDS` and the decoder aligns it at
+    this stage, so it is a word the child can sound out and a tap on it is
+    evidence §8 would credit. The old exclusion refused it for being on a list.
+    """
+    offered = {w for t in targets() for w in t.onset_words + t.clean_words}
+    assert "dragon" in offered
 
 
 def test_the_cue_word_is_never_one_of_the_story_words():
@@ -1438,3 +1479,310 @@ async def test_an_extra_phonics_question_is_not_reported_as_derived(monkeypatch)
     assert len(result.extra_tap_words) == len(taps) - 1
     for extra in result.extra_tap_words:
         assert extra["source"] == "derived"
+
+
+# --- the question is about SOUND and it is now PROVED about sound ------------
+# DEVIATIONS 11.110-11.111. `PROMPT_FRAMES[0]` says "starts with the same **sound**
+# as {cue}" and the web speaks "Which word starts **like** {cue}?" — both claims
+# about phonemes. Every proof `check_tap_word` made was about graphemes. The
+# inventory has 12 graphemes carrying more than one phoneme and 26 phonemes
+# spelled more than one way, so the two come apart, and both directions were
+# live-reachable. These fixtures are the two directions.
+
+#: An excerpt of live story 7319 (stage 8, dragons) — the story question 11294
+#: sits on. `city`, `in` and `had` are its own words, in its own order.
+STAGE8_STORY = "A dragon was in a cave. The dragon had wide wings. They saw the city and the park."
+STAGE8_SIGHT = ["a", "the", "they", "was", "said", "you", "to", "is", "he", "she", "we", "me"]
+
+
+def test_the_live_question_with_no_correct_answer_is_refused():
+    """Question 11294, exactly as it was being served, reproduced and refused.
+
+    ```
+    prompt  : Tap the word that starts with the same sound as can.
+    payload : {"options": ["city","in","had"], "cue_word": "can"}
+    answer  : {"index": 0, "correct": "city", "target_grapheme": "c"}
+    ```
+
+    `can` is `c|K` (/k/) and `city` is `c|S` (/s/): the child is asked for a word
+    starting with /k/ and NO option starts with /k/. Every grapheme proof passes
+    — `city` does begin with `c`, and neither `in` nor `had` uses `c` anywhere —
+    which is precisely why this shipped. A child applying phonics correctly
+    cannot answer it, and a 1-in-3 guess was credited as §8 mastery evidence.
+    """
+    target = SoundTarget(
+        grapheme="c",
+        cue="can",
+        onset_words=["city"],
+        clean_words=["in", "had", "park"],
+        stage=1,
+        scope="older_stage_fallback",
+    )
+    question, problems = check_tap_word(
+        TapWordDraft(target_grapheme="c", correct_word="city", other_words=["in", "had"]),
+        targets=[target],
+        stage_id=8,
+        story_text=STAGE8_STORY,
+        sight_words=STAGE8_SIGHT,
+        story_words=[],
+        seed=7,
+    )
+    assert question is None, "a question with no correct answer became a question"
+    assert any("same sound" in p for p in problems), problems
+
+
+def test_a_cue_whose_sound_differs_from_the_answers_is_never_offered():
+    """The same defect one step earlier: `sound_targets` must not compose it.
+
+    A target is one SOUND, not one letter. Stated over the menu rather than over
+    one row, because `check_tap_word` refusing it costs the story its phonics
+    screen — the menu is where the sound has to be right.
+    """
+    from storyforge.decoder import mastered_ids
+    from storyforge.llm.questions import onset_gpc
+
+    offered = sound_targets(
+        story_text=STAGE8_STORY,
+        stage_id=8,
+        allowed_words=["can", "car", "cup", "cell", "cent", "had", "big", "red", "top", "sit"],
+        sight_words=STAGE8_SIGHT,
+        story_words=[],
+    )
+    mastered = mastered_ids(8)
+    for target in offered:
+        cue_gpc = onset_gpc(target.cue, mastered)
+        assert cue_gpc is not None, target.cue
+        for word in target.onset_words:
+            assert onset_gpc(word, mastered) == cue_gpc, (
+                f'"{word}" is offered as the answer to "the same sound as '
+                f'{target.cue}" and does not start with that sound'
+            )
+
+
+def test_a_distractor_that_starts_with_the_answers_sound_is_refused():
+    """The mirror case, and the worse one: the child is RIGHT and marked wrong.
+
+    Stage 1, `"the same sound as cup"` over `['cap','kid','sat']`. `kid` uses no
+    `c` anywhere, so the grapheme rule calls it a legal distractor — and it
+    starts with /k/, which is exactly what the child was asked for. A child who
+    taps it has done the phonics correctly, is graded WRONG, and `gpc_stats` is
+    debited for it. Zero of the 120 live rows do this today; that is luck, not a
+    guard, and this is the guard.
+    """
+    story = "The kid had a cap. A cat sat on the cap. The kid sat."
+    target = SoundTarget(
+        grapheme="c",
+        cue="cup",
+        onset_words=["cap"],
+        clean_words=["kid", "sat"],
+        stage=1,
+        scope="current_stage_onset",
+    )
+    question, problems = check_tap_word(
+        TapWordDraft(target_grapheme="c", correct_word="cap", other_words=["kid", "sat"]),
+        targets=[target],
+        stage_id=1,
+        story_text=story,
+        sight_words=["the", "a"],
+        story_words=[],
+        seed=7,
+    )
+    assert question is None, "two options start with /k/ and one of them is 'wrong'"
+    assert any("kid" in p and "starts with the sound" in p for p in problems), problems
+
+    # The same triple with a genuinely wrong distractor is fine, which is what
+    # makes the refusal about the SOUND and not about the words.
+    ok, problems = check_tap_word(
+        TapWordDraft(target_grapheme="c", correct_word="cap", other_words=["sat", "hat"]),
+        targets=[target.model_copy(update={"clean_words": ["sat", "hat"]})],
+        stage_id=1,
+        story_text="The kid had a cap. A cat sat on the hat.",
+        sight_words=["the", "a"],
+        story_words=[],
+        seed=7,
+    )
+    assert problems == [] and ok is not None
+
+
+#: Stage 1 teaches `c|K` AND `k|K` — one sound, two letters — so a story holding
+#: both spells the collision the grapheme rule cannot see.
+K_COLLISION_STORY = "The kid had a cap. A cat sat on a mat. The kid ran."
+
+
+def test_a_word_that_spells_the_targets_sound_another_way_is_not_a_distractor():
+    """`kid` reuses no letter of `c` and still starts with /k/.
+
+    The old clean-word rule was "does not use this GRAPHEME anywhere", which is
+    the property `check_tap_word` proves about the answer key — and it admits
+    `kid` as a distractor for the target `c`. The child is asked for a word that
+    starts like `cup`, taps the word that starts like `cup`, and is marked wrong.
+    The menu must not contain it; `check_tap_word` refuses it separately, and a
+    guarantee that only lives in one of the two is a suggestion.
+    """
+    offered = sound_targets(
+        story_text=K_COLLISION_STORY,
+        stage_id=1,
+        allowed_words=["can", "cup", "cot", "kit", "sit", "him", "top", "red", "man", "hat"],
+        sight_words=["the", "a"],
+        story_words=[],
+    )
+    hard_c = next(t for t in offered if t.grapheme == "c")
+    assert hard_c.onset_words == ["cap", "cat"]
+    assert "kid" not in hard_c.clean_words, "/k/ spelled `k` is not a wrong answer to /k/"
+
+    # And the mirror, so this is about the SOUND rather than about `k` in
+    # particular: the `k` target may not offer `cap` or `cat` either.
+    k = next(t for t in offered if t.grapheme == "k")
+    assert k.onset_words == ["kid"]
+    assert not {"cap", "cat"} & set(k.clean_words)
+
+
+def test_no_distractor_of_an_offered_triple_shares_the_answers_sound():
+    """The property over the closed list, at the fixture's own stage."""
+    from storyforge.decoder import mastered_ids
+    from storyforge.llm.questions import onset_phoneme, tap_word_options
+
+    collision = sound_targets(
+        story_text=K_COLLISION_STORY,
+        stage_id=1,
+        allowed_words=["can", "cup", "cot", "kit", "sit", "him", "top", "red", "man", "hat"],
+        sight_words=["the", "a"],
+        story_words=[],
+    )
+    for stage_id, offered in ((STAGE, targets()), (1, collision)):
+        mastered = mastered_ids(stage_id)
+        assert offered
+        for target in offered:
+            options = tap_word_options(target)
+            assert options is not None, target.grapheme
+            answer, *distractors = [onset_phoneme(o, mastered) for o in options]
+            # Two DISTRACTORS may share a sound — both are wrong either way. What
+            # may never happen is a distractor sharing the ANSWER's sound.
+            assert answer not in distractors, f"{target.grapheme}: {options} -> {options}"
+
+
+def test_the_stage_a_sound_is_taught_at_is_keyed_per_gpc_not_per_letter():
+    """`stage_of` used `min()` over a grapheme, and `c` spells two sounds.
+
+    `c|K` is stage 1 and `c|S` is stage 8, so soft `c` was dated to stage 1 and
+    could never reach the `current_stage_onset` tier — at stage 8, which is where
+    it is taught and where the live pool is starved of evidence.
+    """
+    offered = sound_targets(
+        story_text="A man had a cup. The city is big. He sat on a mat.",
+        stage_id=8,
+        allowed_words=["cell", "cent", "can", "cup", "sit", "big", "top", "red", "had", "man"],
+        sight_words=["a", "the", "he", "is"],
+        story_words=[],
+    )
+    soft_c = [t for t in offered if t.onset_words == ["city"]]
+    assert soft_c, f"soft c was not offered at all: {[(t.grapheme, t.cue) for t in offered]}"
+    assert soft_c[0].stage == 8, "soft `c` is a stage-8 sound, not a stage-1 one"
+    assert soft_c[0].scope == "current_stage_onset"
+
+
+# --- a sight word the validator can decode IS evidence (DEVIATIONS 11.112) ----
+def test_a_sight_word_this_stage_can_sound_out_carries_its_sound():
+    """`out` is a stage-7 sight word and `ou|AW` is the GPC stage 7 introduces.
+
+    The old exclusion refused every sight word on the grounds that the child had
+    not sounded it out. The validator disagrees, and so does the function that
+    awards the credit: `mastery.word_gpc_ids` passes no sight set at all. Three
+    live stage-7 stories (7302, 7306, 9110) offered nothing but stage-1 sounds
+    because of this; narrowed, all three offer `ou`.
+    """
+    from storyforge.decoder import WordVerdict, mastered_ids, validate_word
+
+    report = validate_word("out", mastered_ids(7))
+    assert report.verdict is WordVerdict.DECODABLE
+    assert report.alignment == ["ou|AW", "t|T"]
+
+    sight = ["the", "a", "was", "said", "you", "they", "out", "he", "she", "to", "is"]
+    offered = sound_targets(
+        story_text="The kid went out. Dad had a red hat. The cat sat on it.",
+        stage_id=7,
+        allowed_words=["our", "round", "had", "get", "not", "top", "sit", "run", "big", "red"],
+        sight_words=sight,
+        story_words=[],
+    )
+    ou = next((t for t in offered if t.grapheme == "ou"), None)
+    assert ou is not None, f"stage 7's own sound was refused: {[t.grapheme for t in offered]}"
+    assert ou.onset_words == ["out"]
+    assert ou.stage == 7 and ou.scope == "current_stage_onset"
+
+
+def test_a_sight_word_this_stage_cannot_sound_out_is_still_refused():
+    """The half of the old rule that was always true, kept.
+
+    At stage 1 `out` is a VIOLATION — `ou` is four stages away — so it is not
+    evidence about anything and never reaches the menu, sight list or not.
+    """
+    from storyforge.decoder import mastered_ids
+
+    assert word_graphemes("out", mastered_ids(1)) is None
+    offered = sound_targets(
+        story_text="The kid went out. Dad had a red hat. The cat sat on it.",
+        stage_id=1,
+        allowed_words=["can", "had", "get", "not", "top", "sit", "run", "big", "red", "man"],
+        sight_words=["the", "a", "out"],
+        story_words=[],
+    )
+    assert "out" not in {w for t in offered for w in t.onset_words + t.clean_words}
+
+
+# --- the same property over the POOL, not over the next story ----------------
+# DEVIATIONS 11.110. The two fixtures above prove the rule; they say nothing about
+# whether any row already in the database breaks it, and one did — 11294, live,
+# servable, stage 8, one of the eight observations that stage's entire pool
+# supplies. RED against the pool as it stood before the repair; the sabotage
+# record is in DEVIATIONS 11.115. Read-only: nothing here writes.
+async def test_the_live_pool_asks_no_question_whose_cue_names_a_different_sound():
+    """Every servable tap-a-word row's answer starts with the sound its own cue
+    names — the sentence the child is read, checked against the answer key.
+
+    Spelled out of the decoder here rather than through `check_tap_word`, so a
+    bug in the judge cannot make its own invariant pass: the row is read as the
+    child gets it (`payload.cue_word`, `answer.correct`) and both are aligned by
+    `validate_word` at the STORY's own stage.
+    """
+    from sqlalchemy import text as _sql
+
+    from storyforge.api.stories import ANSWERABLE_SQL, SERVABLE_STATUSES
+    from storyforge.db import SessionLocal
+    from storyforge.decoder import mastered_ids
+    from storyforge.llm.questions import onset_phoneme
+
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                _sql(
+                    "SELECT q.id, q.story_id, s.stage_id, "
+                    "       q.payload ->> 'cue_word' AS cue, q.answer ->> 'correct' AS correct "
+                    "FROM questions q JOIN stories s ON s.id = q.story_id "
+                    f"WHERE q.qtype = 'tap_word' AND s.status = ANY(:statuses) "
+                    f"  AND {ANSWERABLE_SQL.format(story='s')} ORDER BY q.id"
+                ),
+                {"statuses": list(SERVABLE_STATUSES)},
+            )
+        ).all()
+
+    if not rows:
+        # Not a pass. An empty pool cannot serve an unanswerable question and
+        # cannot demonstrate an answerable one either — 8.44's vacuity failure.
+        pytest.skip("no tap_word rows on servable stories — run `make warm` first")
+
+    broken = []
+    for row in rows:
+        mastered = mastered_ids(row.stage_id)
+        cue_sound = onset_phoneme(row.cue or "", mastered)
+        answer_sound = onset_phoneme(row.correct or "", mastered)
+        if cue_sound is None or cue_sound != answer_sound:
+            broken.append((row.id, row.story_id, row.stage_id, row.cue, row.correct))
+
+    assert broken == [], (
+        f"{len(broken)} of {len(rows)} servable tap-a-word question(s) ask for a sound "
+        f"their own answer does not start with: {broken[:5]}. A child applying phonics "
+        "correctly cannot answer one of those, and the guess is credited as §8 mastery "
+        "evidence. Re-cue the row in place — never DELETE it: `answers.question_id` is "
+        "ON DELETE CASCADE."
+    )

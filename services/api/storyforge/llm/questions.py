@@ -37,8 +37,16 @@ is taken on trust.
     tap_word  Options are drawn from a CLOSED list computed from the story
               itself. The claimed answer must genuinely begin with the target
               sound — proved from the decoder's own GPC alignment, not from the
-              model's say-so — and every distractor must not use that grapheme
-              anywhere in its alignment, so exactly one option *can* be correct.
+              model's say-so — and every distractor must miss it, so exactly one
+              option *can* be correct. Four proofs, two about LETTERS and two
+              about SOUND, because the instruction is about sound and the answer
+              key is about letters (DEVIATIONS 11.110): the answer's first
+              grapheme is the target grapheme and its first phoneme is the CUE's;
+              no distractor reuses the target grapheme anywhere in its alignment
+              and none starts with the answer's phoneme. The two are not
+              interchangeable — the inventory has 12 graphemes with more than one
+              phoneme and 26 phonemes with more than one grapheme — and proving
+              only the first pair shipped a live question with no correct answer.
     mcq2      The true option's words must appear in the story, in the story's
               own order; the false option's must not. That makes "which one is
               correct" a decidable property of the text rather than a claim.
@@ -519,17 +527,69 @@ def readable(
     return validate_text(text, mastered_ids(stage_id), sight, story)
 
 
-def word_graphemes(word: str, mastered: frozenset[str]) -> list[str] | None:
-    """The graphemes the decoder actually used to sound `word` out, in order.
+def word_gpcs(word: str, mastered: frozenset[str]) -> list[str] | None:
+    """The GPC ids the decoder actually used to sound `word` out, in order.
 
     ``None`` when the word is not decodable at this stage — which is also the
-    answer to "may this word be a tap-a-word option?". A GPC id is
-    ``"sh|SH"``, so the grapheme is everything before the pipe.
+    answer to "may this word be a tap-a-word option?".
+
+    A GPC id is ``"sh|SH"``: grapheme before the pipe, phonemes after it. Both
+    halves are load-bearing and they are NOT interchangeable (DEVIATIONS 11.110).
+    The inventory holds 12 graphemes carrying more than one phoneme and 26
+    phonemes spelled more than one way, so `c` alone does not name a sound —
+    `c|K` in `can` and `c|S` in `city` are different sounds sharing a letter.
     """
     report = validate_word(word, mastered)
     if report.verdict is not WordVerdict.DECODABLE or not report.alignment:
         return None
-    return [gid.split("|", 1)[0] for gid in report.alignment]
+    return list(report.alignment)
+
+
+def word_graphemes(word: str, mastered: frozenset[str]) -> list[str] | None:
+    """The graphemes the decoder actually used to sound `word` out, in order.
+
+    ``None`` when the word is not decodable at this stage. Spelled out of
+    `word_gpcs` so the two cannot disagree about what "decodable" means.
+    """
+    found = word_gpcs(word, mastered)
+    return None if found is None else [gpc_grapheme(gid) for gid in found]
+
+
+def gpc_grapheme(gpc_id: str) -> str:
+    """The letters of a GPC id — ``"sh|SH"`` -> ``"sh"``."""
+    return gpc_id.split("|", 1)[0]
+
+
+def gpc_phoneme(gpc_id: str) -> str:
+    """The SOUND of a GPC id — ``"sh|SH"`` -> ``"SH"``, ``"x|K.S"`` -> ``"K.S"``.
+
+    The whole tail, not the first phoneme of it: a two-phoneme grapheme like
+    `x` says /ks/ as one indivisible onset, and comparing only `K` would call
+    `x` and `c` the same starting sound.
+    """
+    return gpc_id.split("|", 1)[1] if "|" in gpc_id else ""
+
+
+def onset_gpc(word: str, mastered: frozenset[str]) -> str | None:
+    """The GPC this word STARTS with — the whole id, letters and sound.
+
+    ``None`` when the word cannot be sounded out at this stage, which is the
+    same answer `word_gpcs` gives and for the same reason.
+    """
+    found = word_gpcs(word, mastered)
+    return found[0] if found else None
+
+
+def onset_phoneme(word: str, mastered: frozenset[str]) -> str | None:
+    """The SOUND this word starts with — what the child is actually asked for.
+
+    `PROMPT_FRAMES[0]` says "starts with the same **sound** as {cue}", and the
+    web speaks "Which word starts **like** {cue}?". This is the function that
+    proposition is proved with (DEVIATIONS 11.110-11.111); the grapheme proofs in
+    `check_tap_word` are kept beside it, not replaced by it.
+    """
+    found = onset_gpc(word, mastered)
+    return None if found is None else gpc_phoneme(found)
 
 
 @lru_cache(maxsize=16)
@@ -841,8 +901,28 @@ def sound_targets(
 
     A sound qualifies only when the story contains a word that STARTS with it
     and at least two words that never use it — otherwise "exactly one correct
-    answer" cannot be guaranteed. Sight and story words are excluded: the child
-    has not sounded them out, so they carry no evidence about a grapheme.
+    answer" cannot be guaranteed.
+
+    **A sound is a GPC, not a grapheme** (DEVIATIONS 11.110). Grouping by the
+    first LETTER put `can` (`c|K`) and `city` (`c|S`) in one target, and the
+    live consequence was question 11294: *"the same sound as can"* over
+    `['city','in','had']`, where no option starts with /k/ and a child applying
+    phonics correctly cannot answer. The candidate cue is required to share the
+    target's whole first GPC id for the same reason — the cue is the only sound
+    the child is given, so it is what states the question's proposition.
+
+    **A word is excluded only when the VALIDATOR cannot sound it out at this
+    stage** (DEVIATIONS 11.112). This used to drop every sight and story-bank
+    word on the grounds that the child had not sounded them out — but `out` is a
+    stage-7 sight word and `ou|AW` is the GPC stage 7 introduces, so the
+    validator decodes it at that very stage, and `mastery.word_gpc_ids` (the
+    function that actually awards the credit) passes no sight set at all. Over
+    the servable pool that exclusion was refusing 3,555 of 4,681 sight/story
+    token occurrences the aligner decodes at the story's own stage — 76% of them
+    — and stage 7's own new sound with them. The surviving half of the old rule
+    is the whole of `word_gpcs` returning `None`: a sight word the child's stage
+    genuinely cannot spell is still refused, which is the case the sentence was
+    about. §0 is untouched — this narrows nothing the gate judges.
 
     "Best" is §8's evidence rule, not recency alone — see `_prefer_current_stage`.
 
@@ -856,37 +936,56 @@ def sound_targets(
     make — so nothing `check_tap_word` proves is affected.
     """
     mastered = mastered_ids(stage_id)
-    sight, story = _sets(sight_words, story_words)
 
     # Insertion-ordered, so the offered lists follow reading order.
-    graphemes_by_word: dict[str, list[str]] = {}
+    gpcs_by_word: dict[str, list[str]] = {}
     for token in tokenize(story_text):
-        if not token.is_word or token.text in graphemes_by_word:
+        if not token.is_word or token.text in gpcs_by_word:
             continue
-        if token.text in sight or token.text in story:
-            continue
-        found = word_graphemes(token.text, mastered)
+        found = word_gpcs(token.text, mastered)
+        # `None` is the only exclusion, and it already covers the sight and
+        # story-bank words this stage cannot sound out (11.112). A word the
+        # validator DOES align at the story's own stage is evidence, exactly as
+        # `mastery.word_gpc_ids` treats it when the credit is awarded.
         if found:
-            graphemes_by_word[token.text] = found
+            gpcs_by_word[token.text] = found
 
-    stage_of = {}
-    for gpc in load_gpcs():
-        if gpc.stage <= stage_id:
-            stage_of[gpc.grapheme] = min(stage_of.get(gpc.grapheme, gpc.stage), gpc.stage)
+    # Keyed per GPC ID, never `min()` over a grapheme (11.110). `c|K` is stage 1
+    # and `c|S` is stage 8, so keying by the letter dated soft `c` to stage 1 and
+    # put the only stage-8 onset those stories carry permanently out of reach of
+    # the `current_stage_onset` tier. GPC ids are unique across the inventory.
+    stage_of = {gpc.id: gpc.stage for gpc in load_gpcs() if gpc.stage <= stage_id}
 
-    cues = _cue_index(allowed_words, mastered, exclude=set(graphemes_by_word))
+    cues = _cue_index(allowed_words, mastered, exclude=set(gpcs_by_word))
 
     targets: list[SoundTarget] = []
-    for grapheme in sorted({g[0] for g in graphemes_by_word.values()}):
-        onset = [w for w, g in graphemes_by_word.items() if g[0] == grapheme]
-        clean = [w for w, g in graphemes_by_word.items() if grapheme not in g]
+    for gpc_id in sorted({ids[0] for ids in gpcs_by_word.values()}):
+        grapheme, phoneme = gpc_grapheme(gpc_id), gpc_phoneme(gpc_id)
+        onset = [w for w, ids in gpcs_by_word.items() if ids[0] == gpc_id]
+        # A distractor must be wrong BOTH ways: it may not reuse the target's
+        # letters anywhere (what `check_tap_word` proves about the answer key)
+        # and it may not start with the target's sound (what the child is asked).
+        # `kid` shares no letter with `c` and starts with /k/ — a child who taps
+        # it has done exactly as instructed and is marked wrong.
+        clean = [
+            w
+            for w, ids in gpcs_by_word.items()
+            if grapheme not in {gpc_grapheme(i) for i in ids}
+            and gpc_phoneme(ids[0]) != phoneme
+        ]
         if not onset or len(clean) < TAP_WORD_OPTIONS - 1:
             continue
         # 7.14: the cue is proved against EVERY word this sound may still offer,
         # and any word it would give away leaves the offer list. Later steps
         # (`_prefer_current_stage`, the `MAX_OFFERED_WORDS` cut) only narrow
         # further, so a cue proved here stays proved.
-        cue, onset, clean = _cue_and_offer(cues.get(grapheme, ()), onset, clean)
+        #
+        # 11.110: and the candidates are first narrowed to words that genuinely
+        # start with THIS GPC. `_cue_index` is keyed by grapheme and stays that
+        # way — `warm.repair_leaky_cues` reads it through `cue_candidates` — so
+        # the sound half of the key is applied here.
+        candidates = [c for c in cues.get(grapheme, ()) if onset_gpc(c, mastered) == gpc_id]
+        cue, onset, clean = _cue_and_offer(candidates, onset, clean)
         if cue is None:
             continue
         targets.append(
@@ -895,13 +994,15 @@ def sound_targets(
                 cue=cue,
                 onset_words=onset,
                 clean_words=clean,
-                stage=stage_of.get(grapheme, 0),
+                stage=stage_of.get(gpc_id, 0),
             )
         )
 
     # Most recently taught sound first — that is the one worth practising —
-    # with an alphabetical tiebreak so the list is reproducible.
-    targets.sort(key=lambda t: (-t.stage, t.grapheme))
+    # with an alphabetical tiebreak so the list is reproducible. The cue is part
+    # of the tiebreak because two sounds can now share a grapheme (11.110), and
+    # the cue is the only thing that tells them apart on the page.
+    targets.sort(key=lambda t: (-t.stage, t.grapheme, t.cue))
 
     # Memoised per cue: `tap_word_prompt` walks `PROMPT_FRAMES` against the gate,
     # and the same cue is re-tested once per tier otherwise.
@@ -999,19 +1100,32 @@ def _cue_index(
     repeatedly was — `the` is the shortest, commonest stage-3 word starting with
     `th`, and seven warm stories offering the option `then` all took it. The
     caller picks the first candidate that is safe for its own word list.
+
+    The dict is keyed by GRAPHEME and that is deliberate — `warm.repair_leaky_
+    cues` reads it through `cue_candidates` and holds a grapheme, not a GPC id.
+    The `limit` is applied per SOUND before the merge, though (DEVIATIONS
+    11.110): one grapheme can spell two sounds, `sound_targets` then keeps only
+    the candidates whose whole first GPC matches its target, and truncating the
+    merged list first would cut the minority sound away entirely. Stage 8's `c`
+    is the live case — its 24 shortest, commonest words are all `c|K`, so the
+    soft-`c` question had no cue left to be re-asked with. The merged list is a
+    SUPERSET ordered by the same comparator, so the first `limit` entries are
+    exactly what this returned before and no existing caller's choice moves.
     """
     ranked: dict[str, list[tuple[int, int, str]]] = {}
     for rank, raw in enumerate(allowed_words):
         word = raw.strip().lower()
         if not word or word in exclude:
             continue
-        found = word_graphemes(word, mastered)
+        found = word_gpcs(word, mastered)
         if not found:
             continue
         ranked.setdefault(found[0], []).append((len(word), rank, word))
-    return {
-        grapheme: [key[2] for key in sorted(keys)[:limit]] for grapheme, keys in ranked.items()
-    }
+
+    merged: dict[str, list[tuple[int, int, str]]] = {}
+    for gpc_id, keys in ranked.items():
+        merged.setdefault(gpc_grapheme(gpc_id), []).extend(sorted(keys)[:limit])
+    return {grapheme: [key[2] for key in sorted(keys)] for grapheme, keys in merged.items()}
 
 
 def tap_word_prompt(
@@ -1187,11 +1301,22 @@ def check_tap_word(
     """Prove the question before it can become one. Returns (question, problems)."""
     problems: list[str] = []
     grapheme = draft.target_grapheme.strip().lower()
-    target = next((t for t in targets if t.grapheme == grapheme), None)
-    if target is None:
+    mastered = mastered_ids(stage_id)
+    matching = [t for t in targets if t.grapheme == grapheme]
+    if not matching:
         return None, [
             f'"{draft.target_grapheme}" is not one of the sounds offered; pick one from the list'
         ]
+    # One grapheme can now name two offered sounds (11.110): `c` is `c|K` in `can`
+    # and `c|S` in `city`, and the model names the target by its LETTERS. Resolve
+    # by the sound the claimed answer actually starts with, and fall back to the
+    # first — a wrong resolution can only cost the attempt, because every proof
+    # below still has to pass against whichever target is chosen.
+    target = matching[0]
+    if len(matching) > 1:
+        claimed = [t.text for t in tokenize(draft.correct_word) if t.is_word]
+        want = onset_gpc(claimed[0], mastered) if len(claimed) == 1 else None
+        target = next((t for t in matching if onset_gpc(t.cue, mastered) == want), matching[0])
 
     raw_options = [draft.correct_word, *draft.other_words]
     options: list[str] = []
@@ -1222,7 +1347,13 @@ def check_tap_word(
 
     correct = options[0]
     in_story = set(story_word_tokens(story_text))
-    mastered = mastered_ids(stage_id)
+
+    # 11.110: the SENTENCE says "starts with the same sound as {cue}", so the cue
+    # is what states the proposition and the cue is what it is proved against.
+    # Derived here rather than carried on the target, so a `SoundTarget` built
+    # anywhere — including in a test — is subject to it.
+    cue_sound = onset_phoneme(target.cue, mastered)
+    correct_sound = onset_phoneme(correct, mastered)
 
     for option in options:
         if option not in in_story:
@@ -1245,9 +1376,33 @@ def check_tap_word(
                 problems.append(
                     f'"{correct}" does not start with {grapheme} — it starts with {graphemes[0]}'
                 )
+            # The claim the child is asked to check. Live row 11294 satisfied the
+            # letters clause above and failed this one: cue `can` (`c|K`, /k/),
+            # answer `city` (`c|S`, /s/), so the question it asked had NO correct
+            # answer and a 1-in-3 guess was credited as mastery evidence.
+            if cue_sound is None:
+                problems.append(
+                    f'"{target.cue}" cannot be sounded out at this stage, so it cannot '
+                    f"name a sound — ask about a different sound"
+                )
+            elif correct_sound != cue_sound:
+                problems.append(
+                    f'"{correct}" does not start with the same sound as "{target.cue}" '
+                    f"({correct_sound or '?'} against {cue_sound}) — the question asks "
+                    f"about a sound, not about a letter"
+                )
         elif grapheme in graphemes:
             # Two options carrying the sound means two defensible answers.
             problems.append(f'"{option}" also uses {grapheme}, so it is not a wrong answer')
+        elif correct_sound is not None and onset_phoneme(option, mastered) == correct_sound:
+            # The mirror of the clause above, and the one the grapheme rule
+            # cannot see (11.110): `kid` reuses no letter of `c` and still starts
+            # with /k/. A child who taps it has done exactly what the sentence
+            # asked and is marked WRONG, with `gpc_stats` debited for it.
+            problems.append(
+                f'"{option}" also starts with the sound {correct_sound}, so it is a '
+                f'defensible answer to "the same sound as {target.cue}"'
+            )
 
     # §8: when the story CAN supply a correct word that uses a sound taught at
     # this stage, it must. Otherwise the question is unimpeachable and still
