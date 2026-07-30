@@ -255,6 +255,13 @@ def test_no_gate_failure_can_produce_an_empty_problem_list():
             CAP_ONLY_BODY + " The dog ran to the zorp.",
             CAP_ONLY_CLAIM,
         ),
+        # the FOURTH way, added with the empty-story refusal below. None of the
+        # three loops in `build_rewrite_block` can see it — there is no violation,
+        # no OOV and no story word to name — so before the fix this case reached
+        # the 9.45 fallback and told a model that had written nothing that its
+        # story was under 95% decodable.
+        "empty": (_rw_vocab(), "", []),
+        "punct only": (_rw_vocab(), "... !!!", []),
     }
     for name, (vocab, body, claim) in cases.items():
         report, block = _rw(body, claim, vocab=vocab)
@@ -263,6 +270,113 @@ def test_no_gate_failure_can_produce_an_empty_problem_list():
         # every listed problem is a bullet, and there is at least one
         stated = block.split("PROBLEMS (", 1)[1].split("):\n", 1)[1]
         assert stated.lstrip().startswith("- "), name
+
+
+# --- the empty story (DEVIATIONS 21.1) ----------------------------------
+# `validate_text` scores `decodable / scored if scored else 1.0`, so a story with
+# no words came back at decodability 1.0, oov 0 and zero story words — every
+# `passes_gate` clause satisfied, none of them asked about anything. §1's promise
+# is "every word in this story is one the child can read"; zero words satisfies
+# it vacuously and proves nothing, and the child gets a blank screen and a
+# `Finish` button. `StoryDraft.segments` has no `min_length`, so an empty draft
+# is expressible by the schema the model answers in.
+EMPTY_TEXTS = {
+    "": "nothing at all",
+    "   ": "whitespace",
+    "\n\n\t": "newlines",
+    "... !!! ---": "punctuation only, which §5.1 does not score",
+    "“”": "smart quotes",
+}
+
+
+@pytest.mark.parametrize("body", sorted(EMPTY_TEXTS), ids=lambda b: EMPTY_TEXTS[b])
+def test_a_story_with_no_words_is_refused_rather_than_reported_perfect(body):
+    """The report keeps saying 1.0 — that is the honest value of a ratio with an
+    empty denominator — and the GATE says no. Both halves are asserted, because a
+    fix that only moved the number would have left `passes_gate` deciding on the
+    number and every other reader of `decodability` re-deriving the same lie."""
+    from storyforge.pipeline import passes_gate, validate_draft
+
+    report = validate_draft(_rw_vocab(), body, [])
+    assert report.decodability == 1.0
+    assert report.counts["oov"] == 0
+    assert report.distinct_story_words == []
+    assert report.word_count == 0
+    assert passes_gate(report) is False, f"{body!r} was certified fully decodable"
+
+
+def test_the_refusal_is_of_no_words_and_not_of_an_empty_denominator():
+    """The narrow edge. A text of nothing but sight and story words ALSO has
+    `scored_word_count == 0` and reaches decodability 1.0 down the same branch —
+    and it must still pass, because those are words and the child can read them.
+    Refusing on `scored_word_count` instead of on `word_count` would have made
+    this red, which is what stops the fix from being a quiet tightening of §5.1's
+    denominator rule."""
+    from storyforge.pipeline import passes_gate, validate_draft
+
+    report = validate_draft(_rw_vocab(), "The dragon, and the dragon!", ["dragon"])
+    assert report.scored_word_count == 0
+    assert report.decodability == 1.0
+    assert report.word_count == 5
+    assert passes_gate(report) is True
+
+
+def test_the_rewrite_block_for_an_empty_story_says_it_is_empty():
+    """F1's lesson: never send a false premise. "It must be at least 95%
+    decodable" is not what is wrong with a story that has no text."""
+    report, block = _rw("", [])
+    assert "came back empty" in block
+    assert "no story text at all" in block
+    assert "95% decodable" not in block
+    assert "used words this child cannot read" not in block
+
+
+async def test_the_pipeline_rejects_an_empty_draft_and_never_pays_to_moderate_it(
+    monkeypatch,
+):
+    """The finding is about the PIPELINE, not the reporting layer.
+
+    A model that returns `segments=[]` used to clear VALIDATING at 100%, be sent
+    to MODERATING (a real Haiku call — STATE invariant 11 says never spend on a
+    story that will not be served), and be persisted `warm` with
+    `decodability=1.0`. Here the gate refuses it, the rewrite budget is spent
+    trying to get text back, and the run ends `passed=False`, which is what
+    `warm.persist` turns into `status="rejected"`.
+    """
+    from storyforge import obs
+    from storyforge import pipeline as pl
+    from storyforge.llm.generate import StoryDraft
+    from storyforge.llm.pricing import Usage
+
+    # Never ship spans from a unit test to the live §15 project.
+    monkeypatch.setattr(obs, "_client", None)
+
+    vocab = _rw_vocab(stage_id=1)
+    usage = Usage(model="m", input_tokens=1, output_tokens=1)
+    moderated = []
+
+    async def fake_load(session, stage_id, theme_slug):
+        return vocab
+
+    async def fake_call(*_a, **_kw):
+        return StoryDraft(title="", segments=[], story_words_used=[]), usage
+
+    async def fake_moderate(body):  # pragma: no cover - must never be reached
+        moderated.append(body)
+        raise AssertionError("moderation was asked to judge an empty story")
+
+    monkeypatch.setattr(pl, "load_vocabulary", fake_load)
+    monkeypatch.setattr(pl, "_call", fake_call)
+    monkeypatch.setattr(pl, "moderate", fake_moderate)
+
+    result = await pl.run_pipeline(None, 1, "dragons")
+
+    assert result.passed is False
+    assert result.final_text == ""
+    assert result.final_report is not None and result.final_report.word_count == 0
+    assert moderated == [], "an empty story reached §13"
+    # generate + MAX_REWRITES: the budget was spent asking for text, not skipped.
+    assert len(result.attempts) == pl.MAX_REWRITES + 1
 
 
 # --- the undeclared story word (DEVIATIONS 9.75-9.78) ------------------------

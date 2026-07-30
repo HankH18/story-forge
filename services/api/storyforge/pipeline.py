@@ -214,7 +214,35 @@ def validate_draft(vocab: Vocabulary, body: str, used_story_words: list[str]) ->
 
 
 def passes_gate(report: TextReport) -> bool:
-    """§7: pass requires >=95% decodability AND zero OOV AND <=3 story words."""
+    """§7: pass requires TEXT, then >=95% decodability AND zero OOV AND <=3 story
+    words.
+
+    **The first clause is not a formality.** `validate_text` scores
+    `counts["decodable"] / scored if scored else 1.0`, so a story with no words —
+    `""`, whitespace, `"..."`, or a draft whose segments all came back empty —
+    arrived here at `decodability == 1.0`, `oov == 0` and zero story words and was
+    reported as FULLY DECODABLE. Every clause below was satisfied and none of them
+    had been asked about anything: §1's guarantee is "every word in this story is
+    one the child can read", and a story with no words satisfies that vacuously
+    while proving nothing. Vacuously true is not true, and an empty story is
+    never servable — a child would be handed a blank screen, press Finish, and the
+    §8 evidence would record a perfect read of nothing.
+
+    So the verdict is a hard refusal, and it is made HERE rather than in
+    `validate_text` on purpose: the report is a measurement and 1.0 is the honest
+    value of a ratio with an empty denominator, while this is the judgement, and
+    the judgement is what §7's state machine reads. `run_pipeline` therefore
+    rewrites and finally rejects an empty draft instead of paying for moderation
+    and persisting it `warm`. `api/stories.py::_is_decodable_for` already scored an
+    empty body 0.0 at serve time (DEVIATIONS 7.23); this is the same answer moved
+    to where the story is still preventable.
+
+    A text of nothing but SIGHT or STORY words also has `scored == 0` and is NOT
+    refused: those are words, the child can read them, and 1.0 is true of them.
+    The refusal is for no words at all.
+    """
+    if report.word_count == 0:
+        return False
     return (
         report.decodability >= DECODABILITY_GATE
         and report.counts.get("oov", 0) == 0
@@ -359,7 +387,22 @@ def build_rewrite_block(
     #: what the model ends up holding, declared or not — the cap's only books
     kept, dropped = keep + adopt, drop + evict
 
+    # The FIFTH thing it could not say. `passes_gate` refuses a report with no
+    # words at all, and none of the three loops below can describe that: there is
+    # no violation, no OOV and no story word to name, so `lines` came out empty
+    # and the generic fallback told a model that had written NOTHING that its
+    # story was under 95% decodable. Same shape as F1 — a false premise beside
+    # "change only what is listed" — so the emptiness is named first and the ask
+    # is to write the story, not to edit it.
+    empty = report.word_count == 0
+
     lines = []
+    if empty:
+        lines.append(
+            f"- You returned no story text at all. Write the whole story: "
+            f"{vocab.target_min}-{vocab.target_max} words, using only the "
+            f"permitted, sight and story words."
+        )
     for w in adopt:
         lines.append(
             f'- "{w}" is one of your STORY WORDS, not a word this child cannot '
@@ -397,8 +440,9 @@ def build_rewrite_block(
 
     if not lines:
         # DEVIATIONS 9.45. Unreachable from a real gate failure — decodability
-        # cannot fall below 1.0 with zero violations and zero OOV, so the three
-        # `passes_gate` conditions are now all describable — but this is a live
+        # cannot fall below 1.0 with zero violations and zero OOV, so all FOUR
+        # `passes_gate` conditions are describable (the fourth, the empty-text
+        # refusal, is handled at the top of `lines`) — but this is a live
         # child-facing prompt and an empty problem list beside "change only what is
         # listed" is the entirety of F1. Never ship that sentence again.
         lines.append(
@@ -411,7 +455,9 @@ def build_rewrite_block(
     # 9.44 made the headline conditional so it could never be false; 9.77 keeps it
     # that way. A story whose only violations were undeclared story words did NOT
     # use words this child cannot read, so that sentence is unreachable for it.
-    if unreadable or oov:
+    if empty:
+        headline = "Your story came back empty. There was no text in it at all."
+    elif unreadable or oov:
         headline = "Your story used words this child cannot read. Rewrite it."
     elif dropped:
         headline = (

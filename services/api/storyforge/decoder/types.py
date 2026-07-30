@@ -101,3 +101,19 @@ class TextReport(BaseModel):
     ambiguity_count: int = 0
     heteronym_count: int = 0
     unalignable_count: int = 0
+
+    @property
+    def word_count(self) -> int:
+        """Word TOKENS in the text — everything the child actually has to read.
+
+        `scored_word_count` is the decodability DENOMINATOR, which §5.1 shrinks by
+        excluding sight and story words. This answers a different and prior
+        question: is there any text here at all. Zero means the report is about
+        nothing, and `validate_text`'s `counts["decodable"] / scored if scored else
+        1.0` then reports 100% — arithmetically fine, evidentially empty. Punct is
+        excluded because §5.1 does not score it; `"... !!!"` is not a story.
+
+        A `@property` and not a field, so `/api/validate`'s
+        `response_model=TextReport` shape does not move.
+        """
+        return sum(1 for w in self.words if w.verdict is not WordVerdict.PUNCT)

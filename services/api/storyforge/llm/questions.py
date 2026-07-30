@@ -1530,7 +1530,15 @@ def check_mcq2(
     if not prompt.endswith("?"):
         problems.append("the question must end with a question mark")
     report = readable(prompt, stage_id, sight_words, story_words)
-    if not passes_gate(report):
+    if report.word_count == 0:
+        # The answer pair has had this guard since 11.68 (`the {label} is empty`)
+        # and the question never did. `"?"` ends with a question mark and used to
+        # clear `passes_gate` on an empty denominator, so a question with no words
+        # in it was judged decodable; now the gate refuses it and this is what
+        # keeps the refusal from being reported as "uses words this child cannot
+        # read: " with nothing after the colon.
+        problems.append("the question is empty")
+    elif not passes_gate(report):
         problems.append(
             f'the question "{prompt}" uses words this child cannot read: '
             + ", ".join(unreadable_words(report))
