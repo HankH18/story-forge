@@ -1,229 +1,92 @@
-# RESUME — pick up here
+# RESUME — regenerated automatically, do not hand-edit
 
-Written at a hard stop on 2026-07-29. Everything below is committed and pushed to
-both remotes. Read `docs/AUDIT-PHASE6.md` before touching anything.
+**Generated:** 2026-07-30 04:24:51 CDT by `/tmp/refresh_resume.sh`.
+Every figure here was read from the thing it describes at that moment. If a number
+looks stale, the generator is the bug, not the number.
 
-**State:** commit `76e86a1`, branch `k5-learning-app-gstack-setup`, mirrored to
-`master` on GitLab (`labs.gauntletai.com/hankholcomb/story-forge`, the submission
-target) and GitHub (`HankH18/story-forge`, private, build source for DO). Both
-remotes verified identical at `76e86a1`.
+## Where things stand right now
 
-**Test baseline:** 552 passed / 1 skipped, PLUS 4 known failures in
-`tests/test_stories_api.py` described in JOB A. ruff clean, `tsc` clean,
-production build clean with all five verdict classes surviving the purge.
+| | |
+|---|---|
+| HEAD | `d4da46a` on `k5-learning-app-gstack-setup` |
+| uncommitted files | 0 |
+| GitHub `master` | `7d58263` |
+| stages in local db | 11 |
+| smallest allowed_words stage | 771 (§18's floor is 150) |
+| git worktrees | 2 (1 main + 1 sibling checkout = quiet; more = loop fixers in flight) |
+| live app /api/health | HTTP 200 — https://storyforge-vtwne.ondigitalocean.app |
 
----
+## The single thing in flight
 
-## Read this first: the app is NOT demo-ready
+A three-round audit-fix loop, run as a Workflow. Per round: 36 Fable finders (one
+per subsystem) -> adversarial verify (default refuted) -> objective triage ->
+fix in an isolated worktree -> **merge, testing after every single merge** -> gate.
+Rounds 2 and 3 are deduped against earlier findings.
 
-Two CRITICAL, confirmed, child-facing defects break §0's central guarantee. The
-decoder is correct and is **not** the problem — the serving path never asks it
-about the right child. Do not demo, and do not deploy, until JOB B is done.
+    Run ID:     wf_f3df3f19-776
+    Script:     ~/.claude/projects/-Users-hankholcomb-conductor-workspaces-story-forge-delhi/e2581e8b-a8ea-453c-977c-55820e51f3c4/workflows/scripts/storyforge-audit-fix-loop-wf_f3df3f19-776.js
+    Resume:     Workflow({scriptPath: "<above>", resumeFromRunId: "wf_f3df3f19-776"})
 
-Also: **do not trust a green test run as evidence the product works.** Three of
-the worst defects in this project (the forgeable promotion signal, the discarded
-grammar verdict, these two) were live while the suite was green, and in two cases
-tests actively encoded the defect as the contract. Every one was found by an
-adversarial pass. Keep that pattern.
+Resuming returns every completed agent from cache, so a dead session costs only
+the agents that were mid-flight. **Read `<transcriptDir>/journal.jsonl` before
+assuming a cached result was non-empty.**
 
----
+**If `git worktree list` shows more than 2 entries, fixes are stranded.** Each
+fixer commits inside its own worktree and a merge phase brings them in; a session
+that dies between those two steps leaves real work on branches nobody merged. Find
+them with `git branch -a` and `git log --oneline HEAD..<branch>` — do not trust
+agent self-reports, because a crashed agent prints nothing. Merge one at a time,
+running the suite after each.
 
-## JOB B (do first — CRITICAL, child-facing)
+## What is done
 
-Full instructions are in `docs/AUDIT-PHASE6.md` under C1/C2. Summary:
+Phases 0-8 complete. Eleven stages (stage 1 retired — it held 78 words against a
+150 floor, and its inventory could not express negation because no stage-1 word
+contained the letter `o`). Live on DigitalOcean from a container image, no git
+provider connected. §17's demo runs end to end; its playground step is now
+**stage 2**, not stage 3.
 
-### C1 — every kid session runs at stage 4 regardless of the child's real stage
-The Phase 6 migration
-`services/api/storyforge/migrations/versions/ab5a866f52fc_phase_6_users_and_kids_parent_id_fk.py:96`
-NULLs `parent_id` for all pre-existing kids. So `GET /api/kids` returns `[]`,
-`resolveKid` returns null, and `apps/web/src/routes/KidSession.tsx:109` falls back
-to `DEFAULT_STAGE = 4`.
+## What is NOT done, and the first one matters
 
-Confirmed in a browser: `/read/1648`, a **stage-1** reader, posts
-`{"stage_id": 4}` and is served a story measuring **17.6% decodability at stage
-1**. §1 requires >=95%. A five-year-old is shown text they cannot read. All 5
-existing readers are also unreachable from the dashboard, so the §17 demo cannot
-be shown at all.
+1. **Production is running the PRE-RENUMBER image.** The deployed tag is
+   `c5125be-amd64` and its database still has 12 stages; migration
+   `f3a91c6d0e24` applies at the next deploy's PRE_DEPLOY job. Prod is therefore
+   self-consistent but old, and the local tree is eleven stages. Rebuilding is
+   `docker build --platform linux/amd64` (arm64 gives `exec format error` —
+   that failure already cost one deploy), push, then update the tag in the spec.
+2. Prod was warmed with 44 stories under the OLD prompts, old word list and old
+   art. They should be replaced, not migrated.
+3. Open, documented, not blockers: one grammar false positive on coordinated
+   subjects (`"Sam and the rabbit spin."`); §1.6's p95<12s recorded as unmet and
+   unreachable with the criterion unrelaxed; `ruff format --check` fails on ~39
+   pre-existing files while `ruff check` is clean.
 
-Fix the orphaned `parent_id` rows AND delete the silent stage fallback. A
-`DEFAULT_STAGE` constant that substitutes a wrong stage is the anti-pattern:
-not knowing a child's stage must never resolve to "serve stage 4 anyway".
-§01 forbids a child-facing error screen, so "show an error" and "guess a stage"
-are BOTH wrong — the honest move is probably to not enter a reading session and
-route back to the adult. Decide and justify it.
+## Traps that have each cost real time here
 
-### C2 — the client-supplied `stage_id` is unchecked at every layer
-`POST /api/stories/request` takes `stage_id` from the body with no `kid_id` and
-no ownership check. `{"stage_id": 12}` returns a stage-5 story measuring **13.0%
-decodable** for a stage-1 reader, reachable with no tooling via
-`/read/1648?stage=12 (pre-renumber example)`. `storyforge/api/stories.py:40-47` argues ownership binds
-later at `POST /api/readings`; that endpoint does not check the stage either — a
-stage-1 kid + a stage-5 story files a reading with `201`.
+- **A check that passes because it asks the wrong question** is this project's
+  signature defect. Six shipped: a grammar verdict computed then discarded on
+  write; a promotion counter counting readings not distinct stories, with four
+  tests pinning the bug as the contract; "0 blocklisted words" true against a list
+  holding only stems while 50 inflections were live; 839 segments tagged with art
+  against ZERO image files, every <img> 404ing into a silent placeholder;
+  `GET /api/themes` 404ing for eight phases; and a worktree-isolated fix phase
+  with no merge step, which would have discarded three rounds of work.
+- **Measure against a private DB copy** when anything else is writing:
+  `docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfscratch'`
+  then `DATABASE_URL=.../sfscratch`. A green shared-DB run is as untrustworthy as a red one.
+- **Never `git add -A` while an agent is live.** I did, four times, and committed
+  another agent's half-finished work under a message describing something else.
+- **Never test auth against a bypassed server.** `/api/health` reports
+  `demo_bypass_auth`; confirm `garbage token -> 401` before believing any response.
+- Source `.env` BEFORE overriding `DATABASE_URL`, never after. Sourcing after
+  clobbers it, and a seed run reported success against the wrong database.
+- Chrome MCP is not connected. Use `~/.claude/skills/gstack/browse/dist/browse`
+  with an isolated `BROWSE_SERVER_PORT`.
 
-Derive the stage from the child server-side. Treat the client exactly as §0
-treats the LLM: untrusted. Probably means the request carries `kid_id`; update
-`apps/web/src/lib/api.ts` and callers. Close the `POST /api/readings` half too.
+## Credentials
 
-Then add defence in depth: a story served at 13% decodable *for its reader*
-should be inexpressible, not merely unlikely. `validate_text` / `mastered_ids`
-are pure and fast enough to check at serve time.
-
-### C3 — make the bypass visible (this is why C1/C2 hid so long)
-With `DEMO_BYPASS_AUTH=true`, **nothing in any HTTP response discloses it** — a
-log line only; `/api/health` is silent. Two agents reached opposite conclusions
-about whether auth was enforced because of this. Surface it in `/api/health` and
-consider a response header. **Do not weaken the §18 startup guard.**
-
-Verification bar for JOB B: re-run the audit's exact reproductions and report
-**measured decodability before/after**. Code reading is not evidence. Start your
-own API on a spare port with `DEMO_BYPASS_AUTH=false` — testing against a
-bypassed server is the mistake that produced this whole confusion.
-
----
-
-## JOB A — the cue leak and 4 failing tests
-
-Two different problems; do not conflate them.
-
-**A1 — real bug.** `make warm` produced live question 4392:
-```
-prompt:  "Tap it. Hint: the."
-payload: {"options": ["sat", "in", "then"], "cue_word": "the"}
-answer:  {"index": 2, "correct": "then", "target_grapheme": "th"}
-```
-The cue `the` is a prefix of exactly one option. A child taps it correctly with
-no phonics, and §8 then credits `th` mastery evidence for a guess — evidence that
-feeds promotion. Same class as the forgeable promotion signal (DEVIATIONS 6.7).
-
-Fix the GENERATOR (`storyforge/llm/questions.py`), not the test. Handle prefix,
-suffix, substring and identity — and note a cue that identifies a WRONG option is
-also a defect. Sweep the live DB for existing instances and repair in place;
-`answers.question_id` is `ON DELETE CASCADE` and rows carrying
-`mastery.MASTERY_QTYPES` evidence must survive (an agent already lost one row
-this way). Report the count, and say plainly whether any recorded mastery
-evidence is now suspect. Add a test that fails against the old generator, proven
-by sabotage.
-
-**A2 — 4 tests read the live database instead of a fixture**, so `make warm`
-broke them: `test_request_returns_a_full_dto` (line 79, `assert []`),
-`test_a_real_node_produced_question_never_ships_its_answer_key` (this one caught
-A1 — it is doing its job), `test_empty_pair_falls_back_to_the_same_stage_and_
-another_theme` (its docstring says "`space` has no stories at all" — true of the
-DB when written, false now), `test_a_stage_with_no_pool_falls_back_to_the_
-nearest_lower_stage`.
-
-Make them own their fixture data. **Do not weaken the assertions** — the §7
-ladder behaviour is real and must still be checked, especially that it NEVER
-climbs stage (STATE invariant 6). Run `justify-test-edit` on each and record the
-verdict at the edit site.
-
----
-
-## JOB C — smaller audit findings (see AUDIT-PHASE6.md)
-
-- `safeRedirectPath` misses `/\`, TAB, CR, LF — `/\evil.example/x` becomes
-  `http://evil.example/x`. Only Clerk's `allowedRedirectOrigins` stops it today.
-- The 401 screen says "sign in again" under a header reading "signed in as…",
-  and its Sign-in button loops back.
-- A non-owner at `/read/162` silently gets their OWN first reader, and the
-  reading is filed against that child — silent wrong attribution.
-- JWKS fails closed (correct) but has no stale-key fallback, so a Clerk outage
-  past the TTL locks every user out.
-- The §18 guard boots with this repo's own compose `db` hostname, a unix socket,
-  `PORT`, `K_SERVICE`, and `ENVIRONMENT=prod-us`.
-- The 403 branch (DEVIATIONS 6.20) is unreachable — no web route calls an admin
-  route.
-- ~~`warm.py` still aborts the whole run on `anthropic.APITimeoutError` instead of
-  taking the §7 fallback.~~ **FIXED** — DEVIATIONS 8.4. Proved live against the
-  real API, not with a mock: a real `APITimeoutError` on the first generation, a
-  real stage-12 story at 97.7% on the second, one non-zero exit at the end naming
-  the failed cell. The two guarding tests go red when the `try/except` is removed.
-- DEVIATIONS 6.14: `test_stories_api.py::_pool` filters `status='warm'` while
-  `_SERVE_SQL` serves `warm|complete`.
-
-## JOB D — Phase 7 remainder
-
-### `make eval` + the §14 report — DONE. Read `docs/EVAL.md`.
-Full-matrix (then 12 stages) x 3 themes x 5 stories against the live model. **169 of 169
-stories that the model produced cleared the 95% gate; 0 finished below it.** p95
-rewrite depth 1 (§1 budget 2), 0 OOV, 0 over the story-word cap. Cost **$2.7958**
-at 2026-07-29 pricing (Sonnet 5 intro rate), $0.0178 per accepted story excluding
-enrichment. Deviations 7.40-7.51.
-
-`make eval` **exits non-zero**, on availability rather than decodability: 11 of
-180 cells never produced text because §7's 30s generation timeout is too tight at
-the 120-200 word stages. Four findings worth acting on, all in `docs/EVAL.md`:
-
-1. ~~**The 30s generation timeout (§7) fails ~7% of cells at stages 9-12** and
-   pushes cold p95 to 59.8s against §1.6's 12s. Successes there are landing on
-   SDK retry. `warm.py` still dies outright on the same exception (below).~~
-   **FIXED — DEVIATIONS 8.0-8.2, and the diagnosis above is half wrong.** Those
-   latencies are *censored*: `max_retries=2` makes one SDK call up to three
-   30s attempts, so 27% of all generation attempts the run paid for were killed
-   and discarded, not 7% of cells. And the defect is not specific to stages 9-12
-   — measured with `max_retries=0`, a **30-word stage-1 story took 24.60s**
-   against the 30s budget. Latency tracks output tokens (r = +0.997), not stage
-   (r = +0.50), because adaptive thinking is what the tokens go on. Timeout is now
-   one constant, 120s = `max_tokens` / slowest measured throughput.
-   §1.6's 12s target is separately recorded as **unmet and unreachable as
-   written** (DEVIATIONS 8.6) — it budgets one API call for what §6/§7 specify as
-   a multi-node pipeline with rewrites.
-2. **`of` is neither decodable nor a sight word at any stage.** One of the
-   commonest words in English costs every story that uses it part of its 5%
-   violation budget. Appendix A's 33-row sight-word list is the fix; it needs
-   `make precompute` and the §5.7 goldens re-run, so it was not made here.
-3. **`data/blocklist.txt` blocks `high`** (drugs section), which killed a 100%
-   decodable, entirely safe stage-6 space story — *"The stars are very high."*
-   §13's own approve list names "high places". Two of 3 layer-1 rejects are this
-   word. Do NOT just delete it without re-testing both directions (STATE 5).
-4. **The grammar half of §13 rejects on SEMANTICS, not grammar**, in 5 of 8
-   cases ("Rockets do not run", "wings cannot sit", "should be cave not can").
-   Its own prompt says "Judge the grammar, not the sense." 8 of 12 moderation
-   rejects are grammar, so this is most of the 12.8% fallback rate.
-
-Also: **length compliance is 52% overall and 7-13% at stages 9-12** — the model
-returns ~90-102 words against a 120-200 target. Decodability is unaffected.
-
-Eval artifacts: `reports/eval-*.md` + `.json` (gitignored), `eval_runs` id 2 and
-its 180 `eval_run_items`. The 169 stories it wrote are `status='eval'`, a fourth
-status no serving path names (7.41) — verified live, 36/36 (stage, theme) probes
-served a non-eval story and all 169 are 404 by id. Servable pool 52 -> 52.
-
-### Deploy — still not done
-Artifacts exist and were exercised locally (`services/api/Dockerfile`,
-`.do/app.yaml`, `docs/DEPLOY.md`), **nothing is deployed and no DO resources
-exist**. That is the user's call.
-
----
-
-## Things that are DONE and verified — do not redo
-
-- **Auth works end to end.** Verified in a browser with a real Clerk session:
-  admin token -> 200 on admin-only `/api/validate`; no token -> 401; another
-  parent's kid -> 404 identical in shape to a nonexistent id. Token lifecycle is
-  clean: 16 probes over 150 s, 4 distinct tokens, **zero 401s** — long reading
-  sessions do not fail mid-story.
-- **The Clerk role claim needed a DASHBOARD change, not code** (DEVIATIONS 6.13).
-  Session token customization is set to `{"public_metadata":
-  "{{user.public_metadata}}"}`. There is no Backend API for this — a fresh Clerk
-  instance will silently downgrade every user to `parent` until someone sets it
-  by hand.
-- **Pool warmed**: distinct servable per stage 1-5 = 9 / 12 / 10 / 10 / 11, no
-  `(stage,theme)` pair below 2, **zero servable stories with no questions**.
-  Promotion is reachable at every stage for the first time. Cost $0.575.
-- **Grammar is fixed at the source.** It rejected stories live during the warm
-  run ("He runs to bed" tense shift; "The dragon and the man sit."). Previously
-  `warm.persist()` wrote 3 of the verdict's 5 fields, so `well_formed` was
-  discarded for EVERY story — the check ran, passed, and was thrown away. 4 of 28
-  servable stories were ungrammatical and still being served.
-- **`httpx` moved to runtime deps** and proven by resolving a `--no-dev` env and
-  importing `storyforge.auth`.
-- Blocklist 52 -> 240 entries; 42 profanities are out of `PERMITTED WORDS`.
-
-## Environment notes
-- Chrome MCP extension is NOT connected. Use gstack's headless browser:
-  `~/.claude/skills/gstack/browse/dist/browse`, isolated `BROWSE_SERVER_PORT`.
-- `services/api/.env` is mode 600, gitignored; git history holds zero real keys
-  (only a fake `sk_live_deadbeef` fixture). Keep it that way.
-- Push with a one-off credential URL; never store a PAT. `git push origin master`
-  reaches BOTH remotes — the DO spec's `deploy_on_push: true` depends on that.
+`services/api/.env` is mode 600 and gitignored; git history holds zero real keys.
+Push with a one-off URL, never a stored PAT: `git push origin master` reaches BOTH
+remotes, which is what the DO spec's `deploy_on_push` relies on. The DO token was
+supplied per-command via `DIGITALOCEAN_ACCESS_TOKEN` and never written to
+`~/.config/doctl`. A new session will need the user to re-supply both.
