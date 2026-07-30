@@ -341,19 +341,30 @@ async def test_invented_story_words_cannot_shrink_the_denominator(session):
     Story words are excluded from the decodability denominator, so a model that
     declares ordinary words as "story words" inflates its own score. The claim
     must be intersected with the words actually offered.
+
+    The offered word here used to be `dragon`. What changed is the FIXTURE, not
+    the assertion (DEVIATIONS 14.20): §5.5 now bounds which bank entries may be
+    OFFERED at a stage, and `dragon` is decodable from stage 1 — a stage-3 reader
+    can sound it out, so it is no longer an offerable story word at any stage on
+    the ladder. `cave` is decodable from stage 4, one stage ahead of this reader
+    and inside the band, so it is offered here and the proposition is asserted
+    unchanged. Relaxing the assertion to `== []` instead would have made the test
+    vacuous: an empty offer proves nothing about an intersection, which is why the
+    line below asserts the offer is non-empty first.
     """
     from storyforge.pipeline import load_vocabulary, validate_draft
 
     vocab = await load_vocabulary(session, 3, "dragons")
-    text_body = "The king set a big dragon. The big lot got and the class red ran last."
+    assert "cave" in vocab.story_words, "the fixture word must really be offered"
+    text_body = "The king set a big cave. The big lot got and the class red ran last."
 
-    honest = validate_draft(vocab, text_body, ["dragon"])
+    honest = validate_draft(vocab, text_body, ["cave"])
     inflated = validate_draft(
-        vocab, text_body, ["dragon", "king", "big", "class", "red"]
+        vocab, text_body, ["cave", "king", "big", "class", "red"]
     )
 
     # Only the genuinely-offered word survives the intersection.
-    assert honest.distinct_story_words == ["dragon"]
-    assert inflated.distinct_story_words == ["dragon"]
+    assert honest.distinct_story_words == ["cave"]
+    assert inflated.distinct_story_words == ["cave"]
     # And the denominator is therefore identical — the claim buys nothing.
     assert inflated.scored_word_count == honest.scored_word_count

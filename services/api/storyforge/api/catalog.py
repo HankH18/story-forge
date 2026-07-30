@@ -26,11 +26,20 @@ runs.
 
 **Why ``GET /api/themes`` reports depth and does not filter on it.** The obvious
 worry about this route is that it hands a child a theme the warm pool cannot
-serve. It cannot: ``_SERVE_SQL`` orders ``stage_id DESC, (theme_id = :theme)
-DESC``, so an empty (stage, theme) cell is answered with a lower stage, or another
-theme, or both, with ``fallback.kind`` naming which — never a 404 and never an
-empty result (§7). The only theme that dead-ends a child is one the ``themes``
-table does not have, and a route that reads that table cannot return one.
+serve. It cannot: ``_SERVE_SQL`` orders ``stage_id DESC``, then *unread by this
+kid*, and only then ``(theme_id = :theme) DESC``, so an empty (stage, theme) cell
+is answered with a lower stage, or another theme, or both, with ``fallback.kind``
+naming which — never a 404 and never an empty result (§7).
+
+The middle key is the one this paragraph used to omit, and it is not a detail:
+it sits ABOVE the theme preference, so a child whose requested theme is exhausted
+at their own stage is served another theme AT THAT STAGE before the ladder drops
+a stage. The requested theme is a preference over the whole stage's pool, not a
+partition of it — which is why the coverage gate's deliverable unit is the stage
+(``warm.stage_gaps``, DEVIATIONS 14.31) and why this route's per-theme depth is a
+drift signal rather than a serving constraint. The only theme that dead-ends a
+child is one the ``themes`` table does not have, and a route that reads that
+table cannot return one.
 
 Filtering would also *create* the failure it is meant to prevent: §07 fixes the
 picker at 3-6 cards, and a filter that emptied the list leaves a child a screen

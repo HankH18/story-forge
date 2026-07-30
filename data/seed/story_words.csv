@@ -6,6 +6,29 @@
 # min_stage = earliest stage this word may be offered at. Words are deliberately
 # NOT required to be decodable — that is the entire point of a story word.
 # Stage numbers follow the ELEVEN-stage ladder (DEVIATIONS 12.1-12.3).
+#
+# min_stage is the SEMANTIC floor and nothing else: is this concept
+# age-appropriate at this stage. It is NOT a decodability judgement and never
+# was — `orbit` sat at min_stage 4 while being decodable from stage 1, so it
+# could only ever be offered where a picture chip taught nothing. The
+# decodability band is derived by the decoder and enforced in
+# `pipeline.load_vocabulary` (`STORY_WORD_MAX_LOOKAHEAD`, DEVIATIONS 14.20):
+# a word must be undecodable at the reader's stage, and either permanently
+# unalignable or decodable within 3 stages.
+#
+# Consequence worth knowing before editing this file: seven entries below —
+# comet, dragon, forest, orbit, planet, rabbit, rocket — are decodable from
+# stage 1 and are therefore offerable at NO stage. They are ordinary decodable
+# words that were sitting in the story-word bank; they are kept rather than
+# deleted because removing a curated row is an operator's call, and
+# `--check-story-words` prints them on every run so the count cannot rot.
+#
+# `alien` and `astronaut` moved 2 -> 1 (14.20). Both are permanently
+# unalignable, which makes them the two best story words space has, and
+# min_stage 2 was withholding them from stage 1 — leaving the (stage 1, space)
+# offer EMPTY, i.e. a space story with nothing space in it, which is
+# AUDIT-PHASE7 F1 ("a dragons story with no dragon in it") reached by a second
+# route, against §18's "themes at stages 1-2 lean on story words + pictures".
 theme,word,gloss,min_stage
 dragons,dragon,a big lizard that can fly,1
 dragons,knight,a person in metal armour,1
@@ -19,8 +42,8 @@ space,rocket,a ship that flies to space,1
 space,planet,a big round world in space,1
 space,moon,the white circle in the night sky,1
 space,stars,the tiny lights in the night sky,1
-space,alien,someone from another planet,2
-space,astronaut,a person who goes to space,2
+space,alien,someone from another planet,1
+space,astronaut,a person who goes to space,1
 space,comet,a rock in space with a bright tail,2
 space,orbit,the path around a planet,4
 animals,rabbit,a small animal with long ears,1

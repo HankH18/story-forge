@@ -19,12 +19,20 @@ from __future__ import annotations
 
 import time
 from datetime import date
+from functools import lru_cache
 
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from storyforge import obs
-from storyforge.decoder import TextReport, WordVerdict, mastered_ids, validate_text
+from storyforge.decoder import (
+    MAX_STAGE,
+    TextReport,
+    WordVerdict,
+    mastered_ids,
+    validate_text,
+    validate_word,
+)
 from storyforge.llm.client import generation_model, generation_timeout, get_client
 from storyforge.llm.generate import (
     MAX_OUTPUT_TOKENS,
@@ -43,6 +51,51 @@ MAX_REWRITES = 3
 # §1 / §7: the gate. Never lowered.
 DECODABILITY_GATE = 0.95
 MAX_STORY_WORDS = 3
+
+#: §5.5's ceiling, and the number that was missing entirely (DEVIATIONS 14.20).
+#:
+#: A story word is a word the child is GIVEN — a picture chip with tap-to-hear,
+#: excluded from the decodability denominator — instead of decoding. There are
+#: `MAX_STORY_WORDS` = 3 of them per story and no more, so every slot spent is a
+#: slot bought. Until now `story_word_bank.min_stage` was the only bound on which
+#: words could fill one, and `min_stage` is a hand-set SEMANTIC floor ("is this
+#: concept age-appropriate here") with no relationship whatever to whether the
+#: child can read the word. Measured over the live pool: **225 of 326 picture-chip
+#: slots (69.0%) were spent on words the reader could already decode at their own
+#: stage**, and `orbit` — decodable at stage 1, `min_stage` 4 — could only ever be
+#: offered where it was useless.
+#:
+#: The rule, as one sentence: *a story word must be a word the reader cannot
+#: decode at their own stage, and must either be permanently undecodable within
+#: this GPC inventory or become decodable within `STORY_WORD_MAX_LOOKAHEAD`
+#: stages.*
+#:
+#: Why both ends, and why "never" sits on the permitted side of the ceiling
+#: rather than falling off it:
+#:
+#: - **Floor (>= 1).** A chip over a word the child can sound out does three bad
+#:   things at once: it spends one of three slots, it paints a picture over the
+#:   exact decoding practice §1 exists to deliver, and it removes a decodable word
+#:   from the scored denominator — the same denominator-shrinking STATE invariant
+#:   2 refuses when the MODEL claims it. The bank claiming it is no better.
+#: - **Ceiling (<= 3).** The distinction is *substitutability*. For `castle`,
+#:   `penguin`, `treasure` — words the 93-GPC inventory can never align at any
+#:   stage — no amount of teaching replaces the chip; it is the only route in, for
+#:   the whole curriculum, and it is permanently correct. For `giraffe`
+#:   (decodable at stage 8) offered to a stage-1 reader, teaching WILL replace the
+#:   chip: the only question is whether the child meets the word now as a picture
+#:   or in seven stages as their own decoding. Spending a scarce slot on a word
+#:   the curriculum is about to teach properly is whole-word memorisation bought
+#:   at the cost of a picture chip a permanently-undecodable word needed.
+#:
+#: Three, not two or four, is where the bank stops being able to fill the slot:
+#: at 3 every (theme, stage) keeps at least one candidate, at 2 the stage-1
+#: dragons offer loses `cave` and `fire` and §18's "themes at stages 1-2 lean on
+#: story words + pictures for interest" starts to bite. It is a lookahead in
+#: STAGES rather than in GPCs because that is the unit the child's own progress is
+#: measured in (§8 promotes a stage at a time), so "three stages" is "the next
+#: three things you will be taught".
+STORY_WORD_MAX_LOOKAHEAD = 3
 
 
 class Vocabulary(BaseModel):
@@ -132,6 +185,78 @@ class PipelineResult(BaseModel):
         return self.narrative.usage.cost_usd(on)
 
 
+# --- §5.5's ceiling on a story word (DEVIATIONS 14.20) -----------------------
+
+
+@lru_cache(maxsize=8192)
+def decodable_from_stage(word: str) -> int | None:
+    """The first stage whose mastered GPCs admit a complete alignment of `word`.
+
+    `None` is "never within this inventory" — `castle`, `penguin`, `treasure`,
+    `alien`, `astronaut`, `scales`, `feathers`, `burrow` are all `None` today, and
+    that is a fact about English, not a defect: the 93-GPC inventory has no path
+    for a silent `t` or `su` -> /ZH/ at any stage. It is a categorically different
+    answer from a large number, and every caller here treats it that way.
+
+    Cached because the answer is a pure function of the word and the frozen
+    inventory, and a story-word gate over the whole pool asks it thousands of
+    times. The decoder's own `lru_cache` on the lattice does the heavy half.
+    """
+    lowered = word.strip().lower()
+    if not lowered:
+        return None
+    for stage in range(1, MAX_STAGE + 1):
+        if validate_word(lowered, mastered_ids(stage)).verdict is WordVerdict.DECODABLE:
+            return stage
+    return None
+
+
+def story_word_lookahead(word: str, stage_id: int) -> int | None:
+    """How many stages of instruction stand between this reader and this word.
+
+    `<= 0` means the reader can already decode it — a picture chip would be
+    spent teaching nothing. `None` means they never will be able to, which is the
+    case a picture chip is FOR.
+    """
+    first = decodable_from_stage(word)
+    return None if first is None else first - stage_id
+
+
+def story_word_is_eligible(
+    word: str, stage_id: int, lookahead: int = STORY_WORD_MAX_LOOKAHEAD
+) -> bool:
+    """§5.5's band — see `STORY_WORD_MAX_LOOKAHEAD` for the rule and the measurement."""
+    ahead = story_word_lookahead(word, stage_id)
+    return ahead is None or 1 <= ahead <= lookahead
+
+
+def story_word_refusal(
+    word: str, stage_id: int, lookahead: int = STORY_WORD_MAX_LOOKAHEAD
+) -> str | None:
+    """Why `word` may not be a story word at `stage_id`, or `None` if it may.
+
+    A sentence rather than a boolean, because the two refusals have opposite
+    remedies — one wastes a slot, the other misuses one — and a gate that printed
+    "ineligible" for both would teach an operator nothing.
+    """
+    ahead = story_word_lookahead(word, stage_id)
+    if ahead is None or 1 <= ahead <= lookahead:
+        return None
+    first = decodable_from_stage(word)
+    if ahead <= 0:
+        return (
+            f"already decodable at stage {first} — a stage-{stage_id} reader can "
+            f"sound it out, so the chip spends one of {MAX_STORY_WORDS} slots "
+            "hiding the practice, and drops a decodable word out of the "
+            "decodability denominator"
+        )
+    return (
+        f"decodable at stage {first}, {ahead} stages ahead of a stage-{stage_id} "
+        f"reader (ceiling {lookahead}) — the curriculum will teach this word "
+        "properly before the chip could ever be cashed in"
+    )
+
+
 async def load_vocabulary(session, stage_id: int, theme_slug: str) -> Vocabulary:
     stage = (
         await session.execute(
@@ -163,6 +288,13 @@ async def load_vocabulary(session, stage_id: int, theme_slug: str) -> Vocabulary
             text("SELECT word FROM sight_words WHERE stage_id <= :s"), {"s": stage_id}
         )
     ]
+    # Two filters, and they are answering different questions. `min_stage` is the
+    # SEMANTIC floor a human set — is this concept age-appropriate here — and only
+    # the seed file knows it. `story_word_is_eligible` is the DECODABILITY band and
+    # only the decoder knows it. Enforced here, at generation time, so the model is
+    # never offered a word it must not spend a chip on; `validate_draft` asks the
+    # same question again on the way back, because a Vocabulary can also be built
+    # by hand (DEVIATIONS 14.20).
     story = {
         r[0]: r[1]
         for r in await session.execute(
@@ -173,6 +305,7 @@ async def load_vocabulary(session, stage_id: int, theme_slug: str) -> Vocabulary
             ),
             {"t": theme_slug, "s": stage_id},
         )
+        if story_word_is_eligible(r[0], stage_id)
     }
     return Vocabulary(
         stage_id=stage_id,
@@ -202,6 +335,16 @@ def validate_draft(vocab: Vocabulary, body: str, used_story_words: list[str]) ->
     §0: the LLM is an untrusted generator; a pure function is the gate. So the
     claim is intersected with the words actually OFFERED from the story-word
     bank. Anything invented falls through to normal scoring.
+
+    **§5.5's decodability band is NOT re-asked here, on purpose** (DEVIATIONS
+    14.20). `story_word_is_eligible` is a policy about which words may be OFFERED,
+    and it is enforced where the offer is built (`load_vocabulary`) and audited
+    where the offer's consequences are persisted (`warm.run_story_word_check`).
+    This function is a MEASUREMENT of a text against a vocabulary, and moving the
+    band in here would make the same text score differently depending on a rule
+    that has nothing to do with the text — including at serve time, where
+    `api/stories.py::_is_decodable_for` re-scores an already-persisted story and a
+    silently un-exempted word would drop a live story below the gate.
     """
     offered = {w.lower() for w in vocab.story_words}
     honoured = frozenset(w.lower() for w in used_story_words) & offered

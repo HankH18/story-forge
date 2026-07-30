@@ -11,7 +11,7 @@ WEB := apps/web
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
         migrate seed precompute warm warm-check promote-check prompt-check \
-        mcq2-check fit-check warm-plan eval eval-smoke codegen clean
+        mcq2-check fit-check story-word-check warm-plan eval eval-smoke codegen clean
 
 # `[0-9]` is load-bearing: `mcq2-check` was invisible to `make help` without it,
 # which is a target that exists and cannot be discovered — the same class as a
@@ -144,6 +144,21 @@ mcq2-check: ## Refuse a pool serving two-choice questions answerable without rea
 # 28px) and never a shorter tap target (§11 floors it at 48px).
 fit-check: ## Refuse a pool whose pages do not fit the §10 screen at either reading size
 	cd $(WEB) && bun run fit-check
+
+# The SIXTH gate, and the first that reads what a picture CHIP is spent on. A
+# story word is a word the child is GIVEN instead of decoding — three slots per
+# story and no more (§5.5, `MAX_STORY_WORDS`) — and nothing bounded which words
+# could fill one: `story_word_bank.min_stage` is a hand-set SEMANTIC floor with no
+# relation to whether the reader can already read the word. Measured over the live
+# pool: 225 of 326 chips (69.0%) sat on a word the reader could ALREADY decode,
+# and 23 more on words 4-7 stages ahead. `dragon` is decodable from stage 1, so
+# every dragons story carried a chip over a word its reader could sound out.
+# `pipeline.STORY_WORD_MAX_LOOKAHEAD` is the band and `load_vocabulary` enforces
+# it at generation; this gate is the audit of what is already in the pool. Free:
+# one SQL query and the decoder, no API client. There is no free repair — the word
+# is IN the story, so the remedy is generation (DEVIATIONS 14.20).
+story-word-check: ## Refuse a pool whose picture chips sit on words the reader can already decode
+	cd $(API) && uv run python -m storyforge.warm --check-story-words
 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run

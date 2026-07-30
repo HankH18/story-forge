@@ -35,7 +35,9 @@ three green gates.
 
 from __future__ import annotations
 
+import ast
 import json
+import pathlib
 import re
 
 import pytest
@@ -246,6 +248,130 @@ def test_the_gate_honours_the_target_it_is_given(monkeypatch):
     with pytest.raises(SystemExit):
         await_sync(warm.run_coverage_check(3))
     await_sync(warm.run_coverage_check(2))  # 2 >= 2: no gap
+
+
+# --- guard 2b: the STAGE floor (DEVIATIONS 14.31) ----------------------------
+# `TARGET_PER_PAIR = 3` and `mastery.STORIES_REQUIRED_AT_STAGE = 5` were two
+# numbers in two files that never met. Measured on the live pool: 33 of 33 pairs
+# at target with the gate GREEN, while 29 of those 33 pairs held fewer than 5 and
+# at stages 5-11 every one of the 21 pairs held exactly 3. Read per stage the same
+# pool is 24/10/11/11/9/9/9/9/9/9/9 — every stage clear. Stages, not cells, is the
+# unit, because `_SERVE_SQL` prefers an unread story AT THE READER'S STAGE over
+# the requested theme (commit a3e5be2).
+
+
+def test_the_stage_floor_is_mastery_s_own_number_and_not_a_second_copy():
+    """One number, one home. The whole defect was it living in two files.
+
+    Asserted as an identity against the imported constant rather than against the
+    literal 5, so raising §8's bar moves this gate with it instead of leaving a
+    gate that agrees with a number nothing uses any more.
+    """
+    from storyforge.mastery import STORIES_REQUIRED_AT_STAGE
+
+    rows = _matrix(**{f"4:{t}": 1 for t in ("animals", "dragons", "space")})
+    assert warm.stage_gaps(rows) == warm.stage_gaps(rows, STORIES_REQUIRED_AT_STAGE)
+    # ...and `warm` must not have grown its own copy of the number. Parsed, not
+    # grepped: the docstring quotes `STORIES_REQUIRED_AT_STAGE = 5` while
+    # explaining the finding, and a substring check cannot tell prose from a
+    # binding. An `ImportFrom` is not an `Assign`, which is the whole point.
+    tree = ast.parse(pathlib.Path(warm.__file__).read_text())
+    bound = [
+        t.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for t in node.targets
+        if isinstance(t, ast.Name)
+    ]
+    assert "STORIES_REQUIRED_AT_STAGE" not in bound
+
+
+def test_a_pool_at_pair_target_can_still_starve_a_stage():
+    """The live shape, as an arithmetic proposition.
+
+    Three themes x 3 = 9 clears §8's five. ONE theme x 3 = 3 does not, and the
+    per-pair gate is green in both cases — which is the finding.
+    """
+    three_themes = _matrix()
+    assert warm.coverage_gaps(three_themes, 3) == []
+    assert warm.stage_gaps(three_themes) == []
+    assert warm.stage_depth(three_themes)[1] == 9
+
+    one_theme = [r for r in three_themes if r.theme_slug == "dragons"]
+    assert warm.coverage_gaps(one_theme, 3) == []  # every pair still at target...
+    # ...and every stage starved, which nothing measured until now.
+    assert warm.stage_gaps(one_theme) == [(s, 3) for s in range(MIN_STAGE, MAX_STAGE + 1)]
+
+
+def test_the_gate_exits_non_zero_on_a_starved_stage_with_every_pair_at_target(
+    monkeypatch, capsys
+):
+    """The exit code, over the exact matrix the pair gate calls green."""
+
+    async def one_theme(session):
+        return [r for r in _matrix() if r.theme_slug == "dragons"]
+
+    monkeypatch.setattr(warm, "pool_coverage", one_theme)
+    with pytest.raises(SystemExit) as exc:
+        await_sync(warm.run_coverage_check(3))
+
+    message = str(exc.value)
+    # The pair half stays silent — every pair holds 3 — so this refusal is the
+    # stage half alone, and it has to say so.
+    assert "pair(s) hold fewer than" not in message
+    assert "11 of 11 stage(s) hold fewer than 5" in message
+    assert "stage 1 (3)" in message and "stage 11 (3)" in message
+    assert "re-reads" in message and "no §8 evidence" in message
+
+
+def test_the_gate_reports_both_floors_before_it_exits(monkeypatch, capsys):
+    """A pool short on both must not have the stage half hidden behind the pair
+    half: short-circuiting would send an operator to `make warm` and back."""
+
+    async def broken(session):
+        rows = [r for r in _matrix() if r.theme_slug == "dragons"]
+        return [
+            warm.PairDepth(r.stage_id, r.theme_slug, 0 if r.stage_id == 6 else r.servable)
+            for r in rows
+        ]
+
+    monkeypatch.setattr(warm, "pool_coverage", broken)
+    with pytest.raises(SystemExit) as exc:
+        await_sync(warm.run_coverage_check(3))
+    message = str(exc.value)
+    assert "1 of 11 (stage, theme) pair(s) hold fewer than 3" in message
+    assert "stage(s) hold fewer than 5" in message
+
+
+def test_the_gate_is_green_on_the_live_shape(monkeypatch, capsys):
+    """A gate that cannot pass is a broken build. This is today's pool exactly:
+    every pair at 3, every stage at 9 — and `TARGET_PER_PAIR` deliberately NOT
+    raised to 5, which would demand 165 stories against today's 119."""
+
+    async def live(session):
+        return _matrix()
+
+    monkeypatch.setattr(warm, "pool_coverage", live)
+    await_sync(warm.run_coverage_check(3))
+    out = capsys.readouterr().out
+    assert "OK — all 33" in out
+    assert "All 11 stage(s) hold >= 5" in out
+    assert warm.TARGET_PER_PAIR == 3
+
+
+def test_the_rendered_table_carries_a_stage_total_column():
+    """The column whose absence IS the finding: 33 green cells over a starved
+    stage, with no number on the screen that could have said so."""
+    body = "\n".join(warm.render_coverage(_matrix(), 3))
+    assert "stage" in body.splitlines()[2]
+    # 3 themes x 3 stories, on every row.
+    assert body.count("         9") >= MAX_STAGE
+    assert "11 of 11 stage(s) hold >= 5" in body
+
+    one_theme = [r for r in _matrix() if r.theme_slug == "dragons"]
+    thin = "\n".join(warm.render_coverage(one_theme, 3))
+    assert "3 !" in thin  # the stage total is marked, though no CELL is short
+    assert "0 of 11 stage(s) hold >= 5" in thin
 
 
 def test_the_rendered_table_marks_every_short_pair():

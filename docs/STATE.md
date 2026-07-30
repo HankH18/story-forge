@@ -17,7 +17,7 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 |---|---|
 | 0 scaffold | `make dev` boots PG16 + FastAPI + Vite. Style-guide tokens confirmed in a real browser (computed styles, not just a 200). |
 | 1 decoder | Pure validator, **93**-GPC inventory, vendored SHA-pinned CMUdict. 18/18 §5.7 goldens. Anti-golden suite + vacuity ratchet (**44.75%**, ceiling 50%) — both sabotage-tested, and the ratchet has now refused a real proposed row (DEVIATIONS 8.12). `wh`→/w/ added at the digraph stage (8.13; stage 2 since the renumber). |
-| 2 precompute | `make seed` idempotent; `make precompute` → **34,366** rows / 12 stages in 1.9s, **4,397** distinct words. `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **228** entries → **1,009** forms with inflections, **38** sight words (DEVIATIONS 8.10–8.17, 8.73–8.74, 8.81, **11.1–11.12**). **Two filters replaced §5.4's SUBTLEX intersection and the row counts moved a long way: 64,296 → 34,366.** (a) The blocklist match is **morphology-aware** — it was `if word in blocked` against a list of BASE forms, so the exact-match hit count read **0** while 50 inflections of blocked entries (`fucks`, `asses`, `killings`, `corpses`, `punching`, `addicts`) sat in the live table; `moderate.blocklist_check` deliberately still matches literals, because a layer-1 hit short-circuits layer 3 (11.6). (b) §5.4 named the **wrong corpus** — adult film-subtitle frequency proves a word is common in adult speech, not that a five-year-old knows it, and `amid` (rank 7,528), `lebron`, `nixon` and `nasa` were offered at stage 1. Dale-Chall familiar words now filter register and lowercase Hunspell headwords filter proper nouns. **Stage 1 is 78 and that is a measured CEILING**: its nine GPCs can spell only 78 child words, and its old 157 cleared §18's 150 floor only because 27 were proper nouns and 61 were adult register. It is the ONLY stage below the floor — every other stage is 771–4,397 — so the authorised remedy is **retiring stage 1** (inventories are cumulative, so new stage 1 = old stage 2 = 771 words). **That renumbering is now DONE** (12.1-12.14): stage rows, GPC/sight-word assignments, `MAX_STAGE` (canonical home now `storyforge.decoder`), the §5.7 goldens (re-derived, not decremented), the vacuity ratchet (re-measured: 44.75%, unmoved — the top stage's cumulative set is the same 93 GPCs), §17's demo (stage 2), and live `stage_id` data via migration `f3a91c6d0e24`, sabotage-verified per old stage. `make precompute` now writes **34,288** rows / 11 stages, 771–4,397 per stage — every stage clears §18's 150 floor. |
+| 2 precompute | `make seed` idempotent; `make precompute` → **34,366** rows / 12 stages in 1.9s, **4,397** distinct words. `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **228** entries → **1,009** forms with inflections, **38** sight words (DEVIATIONS 8.10–8.17, 8.73–8.74, 8.81, **11.1–11.12**). **Two filters replaced §5.4's SUBTLEX intersection and the row counts moved a long way: 64,296 → 34,366.** (a) The blocklist match is **morphology-aware** — it was `if word in blocked` against a list of BASE forms, so the exact-match hit count read **0** while 50 inflections of blocked entries (`fucks`, `asses`, `killings`, `corpses`, `punching`, `addicts`) sat in the live table; `moderate.blocklist_check` deliberately still matches literals, because a layer-1 hit short-circuits layer 3 (11.6). (b) §5.4 named the **wrong corpus** — adult film-subtitle frequency proves a word is common in adult speech, not that a five-year-old knows it, and `amid` (rank 7,528), `lebron`, `nixon` and `nasa` were offered at stage 1. Dale-Chall familiar words now filter register and lowercase Hunspell headwords filter proper nouns. **Stage 1 is 78 and that is a measured CEILING**: its nine GPCs can spell only 78 child words, and its old 157 cleared §18's 150 floor only because 27 were proper nouns and 61 were adult register. It is the ONLY stage below the floor — every other stage is 771–4,397 — so the authorised remedy is **retiring stage 1** (inventories are cumulative, so new stage 1 = old stage 2 = 771 words). **That renumbering is now DONE** (12.1-12.14): stage rows, GPC/sight-word assignments, `MAX_STAGE` (canonical home now `storyforge.decoder`), the §5.7 goldens (re-derived, not decremented), the vacuity ratchet (re-measured: 44.75%, unmoved — the top stage's cumulative set is the same 93 GPCs), §17's demo (stage 2), and live `stage_id` data via migration `f3a91c6d0e24`, sabotage-verified per old stage. `make precompute` now writes **34,221** rows / 11 stages, **769**–4,397 per stage — every stage clears §18's 150 floor. **The 34,288/771 those numbers replace were measured with the syllable cap asking the wrong question** (DEVIATIONS 21.2): the cap was checked against `min_syllables(prons)` — the fewest syllables in ANY CMUdict pronunciation, including ones the aligner could not use at that stage — so **67 rows over 20 words (`every`, `family`, `several`, `towards`, `different`…) were offered at stages whose cap they broke**, and 199 rows carried a count from a reading no child there can produce. It is now `aligned_syllables`, counted per stage over the pronunciations that actually align, and `test_syllable_cap_is_honoured` could never see this because it compares the STORED number to the cap — precompute agreeing with itself. **The vacuity ratchet is also no longer a property of a stage number** (21.3): it measured `mastered_ids(MAX_STAGE)`, which equals the full inventory only by the convention that the top stage is review, so a re-stage moves the reading without moving permissiveness (simulated at `MAX_STAGE=8`: 44.00% and a quiet pass, against 44.75% unmoved). It measures `full_inventory()` now, and asserts the top stage teaches all 93. |
 | 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` **targets** ≥3 per (stage,theme) over all 11 stages × 3 themes, idempotent — see the pool row below for what the database actually holds. Moderation = free blocklist + Haiku judge. |
 | warm pool | **`make warm-check` is GREEN: 36 of 36 (stage,theme) pairs hold ≥3 servable stories.** Filled in three passes for **$0.35** total, because `make warm` fills only the shortfall — it is not a re-run. Two earlier versions of this row were wrong in opposite directions and both are worth remembering: the first claimed "`make warm` fills ≥3 per (stage,theme)" when the command defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories across 3 stages — and §17's demo is dragons at a low stage, so **the demo would have passed with nine stages empty**. The second recorded the pool as 13/36 with the gate red, which was honest when written and is now stale. The lesson is the gate, not the number: `make warm-check` exits non-zero and is the only claim here that cannot rot (DEVIATIONS 8.40–8.48). |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
@@ -51,7 +51,8 @@ Lint: `cd services/api && uv run ruff check storyforge tests`.
 ## Commands
 ```
 make dev | test | seed | precompute | warm | warm-plan
-make warm-check | promote-check | prompt-check | mcq2-check | fit-check   # the five gates
+make warm-check | promote-check | prompt-check | mcq2-check | fit-check \
+     story-word-check                                          # the six gates
 make eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
@@ -62,7 +63,18 @@ money. `make warm-plan` (`--dry-run`) prices it first; **`make warm-check`
 holds fewer than 3 servable stories.** Run it after every warm run and after
 anything that moves the pool: a partial pool is invisible at runtime, because §7's
 ladder answers an empty pair by silently serving a lower stage (DEVIATIONS
-8.40–8.48). **`make promote-check` (`--check-promotability`) is the SECOND gate
+8.40–8.48). **It now asserts a SECOND floor in the same command: ≥
+`mastery.STORIES_REQUIRED_AT_STAGE` (5) servable stories per STAGE across every
+theme, imported and never restated** (DEVIATIONS 14.31). The two numbers had never
+met, and the live pool showed the cost: 33 of 33 pairs at target with the gate
+green while **29 of those 33 pairs held fewer than 5** and stages 5-11 held exactly
+3 in every one of their 21 pairs. Per stage the same pool is 24/10/11/11/9×7 —
+every stage clear. Stages is the right unit because of the SORT KEY: since
+`a3e5be2` `_SERVE_SQL` orders `stage_id DESC`, then *unread by this kid*, and only
+then the requested theme, so a child whose theme is exhausted gets another theme AT
+THEIR STAGE before the ladder drops one. **`TARGET_PER_PAIR` stays 3** — raising it
+to 5 would demand 165 stories against today's 119 to buy what the sort key already
+delivers free. Both floors GREEN today. **`make promote-check` (`--check-promotability`) is the SECOND gate
 and measures the other floor** — the §8 evidence those stories can yield — and it
 is RED today: six stages are terminal dead ends (invariant 15, DEVIATIONS 11.70).
 **`make prompt-check` (`--check-prompts`) is the THIRD gate and the only one that
@@ -108,7 +120,24 @@ GENERATION — never a smaller font (§03 floors story text at 28px) and never a
 shorter tap target (§11 floors it at 48px). Free: one SQL query, a build, and a
 headless browser (`BROWSE_BIN=`), no API client. **It exits 2 when it cannot
 run** — no browser, no database, no build are never a pass.
-All five are free, and none implies the others.
+**`make story-word-check` (`--check-story-words`) is the SIXTH gate and the first
+that reads what a picture CHIP is spent on** — §5.5: a story word is a word the
+child is GIVEN instead of decoding, three slots per story and no more. Nothing
+bounded which words could fill one; `story_word_bank.min_stage` is a hand-set
+SEMANTIC floor with no relation to whether the reader can already read the word.
+**RED today, and it has never been green: 248 of 326 live chips (76.1%) are
+outside the band — 225 of them (69.0%) on a word the reader could ALREADY
+decode.** `dragon` is decodable from stage 1, so every dragons story on the
+ladder chipped a word its reader could sound out, while `castle` — which this
+93-GPC inventory can never align at any stage — is the word the chip was invented
+for. The band is `pipeline.STORY_WORD_MAX_LOOKAHEAD`: undecodable at the reader's
+stage, and either permanently unalignable or decodable within 3 stages. Enforced
+at GENERATION (`load_vocabulary`), so nothing generated since can carry one;
+this gate audits the backlog. **There is no free repair and that is a property of
+the defect** — the word is IN the story, so dropping it from `stories.story_words`
+would leave a word the child cannot decode as plain text with no picture. Free:
+one SQL query and the decoder (DEVIATIONS 14.20-14.21).
+All six are free, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
 `reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest
@@ -120,6 +149,20 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
 ## Hard-won invariants — do not regress
 
 1. **The validator is the gate; never weaken it** (§0). Fix prompts/allowlists instead.
+   **And a vacuous pass is not a pass.** `passes_gate` refused NOTHING about a story
+   with no words in it: `validate_text` scores `decodable / scored if scored else
+   1.0`, so `""`, whitespace, `"... !!!"` and a `StoryDraft` with `segments=[]`
+   (the schema has no `min_length`) all arrived at 100% decodable, 0 OOV, 0 story
+   words — three clauses satisfied, none of them asked about anything. §1's promise
+   is "every word is one the child can read" and zero words satisfies it while
+   proving nothing; the story would have been moderated (a paid Haiku call on a
+   story that can never be served, invariant 11) and persisted `warm`, and a child
+   would press `Finish` on a blank screen while §8 recorded a perfect reading. It
+   is a HARD REFUSAL now, in the gate rather than in `validate_text` — the report
+   is a measurement and 1.0 is the honest value of an empty ratio; the gate is the
+   judgement. The refusal reads `TextReport.word_count`, never
+   `scored_word_count`: a text of nothing but sight and story words also scores
+   1.0 on an empty denominator and must still PASS (DEVIATIONS 21.1).
 2. **The LLM is untrusted.** `pipeline.validate_draft` intersects the model's
    `story_words_used` claim with the OFFERED bank — otherwise it shrinks its own
    decodability denominator and self-reports 100%. Live-observed.
@@ -191,6 +234,22 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     460/460 derived drafts accepted, 113/113 servable stories answerable, under the
     unchanged `TAP_LEN_SPREAD`. Never relax the length rule to manufacture a
     question — it was measured not to be the binding constraint (DEVIATIONS 8.53).
+17. **A story word is BOUNDED ON BOTH SIDES, and the floor is the half that
+    matters.** §5.5's chip is a word the child is GIVEN instead of decoding, three
+    slots per story. `pipeline.STORY_WORD_MAX_LOOKAHEAD`: undecodable at the
+    reader's own stage, and either permanently unalignable by this 93-GPC
+    inventory or decodable within 3 stages. **225 of 326 live chips (69.0%) sat on
+    a word the reader could already decode** — a slot spent, the decoding practice
+    hidden, and a decodable word dropped out of the denominator, which is
+    invariant 2's defect committed by the BANK instead of by the model. Never
+    widen the band to make a theme fit: the bank is the thing that is short (7 of
+    24 entries are decodable from stage 1 and offerable nowhere), and the measured
+    counterweight is `test_no_stage_and_theme_is_left_with_nothing_to_offer` —
+    §18 needs every (stage, theme) to keep at least one candidate, and stage-1
+    space had none until `alien`/`astronaut` moved to `min_stage` 1. The band is
+    enforced where the OFFER is built and never inside `validate_draft`: that is a
+    measurement, and `_is_decodable_for` re-scores live stories with it at serve
+    time (DEVIATIONS 14.20-14.21).
 
 | 5 kid mode + mastery | Full kid session live in a real browser (dev AND production bundle): theme picker → reading → questions → celebration, TTS, §11 floors verified by computed style. `readings`/`answers` APIs, `gpc_stats`, stage promotion proven at the 79/80% boundary. |
 

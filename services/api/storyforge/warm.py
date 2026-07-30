@@ -149,7 +149,16 @@ from storyforge.mastery import (
     stories_needed,
 )
 from storyforge.models import Asset, Question, Story, StorySegment
-from storyforge.pipeline import PipelineResult, load_vocabulary, run_pipeline
+from storyforge.pipeline import (
+    MAX_STORY_WORDS,
+    STORY_WORD_MAX_LOOKAHEAD,
+    PipelineResult,
+    load_vocabulary,
+    run_pipeline,
+    story_word_is_eligible,
+    story_word_lookahead,
+    story_word_refusal,
+)
 
 TARGET_PER_PAIR = 3
 
@@ -273,9 +282,7 @@ async def pool_depth(session, stage_id: int, theme_id: int) -> int:
     forever — the gap could never fill, and the operator's remedy for a red
     coverage gate ("re-run `make warm`") would do nothing at all.
     """
-    return (
-        await session.execute(_DEPTH_SQL, {"s": stage_id, "t": theme_id})
-    ).scalar_one()
+    return (await session.execute(_DEPTH_SQL, {"s": stage_id, "t": theme_id})).scalar_one()
 
 
 # --- §7 coverage: the floor, as a refusal (DEVIATIONS 8.41) -------------------
@@ -335,6 +342,35 @@ def coverage_gaps(rows: Sequence[PairDepth], target: int) -> list[PairDepth]:
     )
 
 
+def stage_depth(rows: Sequence[PairDepth]) -> dict[int, int]:
+    """Servable stories per STAGE, summed across every theme.
+
+    The unit the serving path deals in. `_SERVE_SQL` orders `stage_id DESC`,
+    then unread-by-this-kid, and only THEN `(theme_id = :theme) DESC` — so a
+    child at stage 7 who has read all three dragons stories is served an animals
+    or space story at stage 7 before the ladder ever drops a stage. Their supply
+    is the row, not the cell (commit a3e5be2, DEVIATIONS 14.31).
+    """
+    out: dict[int, int] = {}
+    for r in rows:
+        out[r.stage_id] = out.get(r.stage_id, 0) + r.servable
+    return out
+
+
+def stage_gaps(
+    rows: Sequence[PairDepth], required: int = STORIES_REQUIRED_AT_STAGE
+) -> list[tuple[int, int]]:
+    """Stages holding fewer than `required` servable stories in TOTAL.
+
+    `required` defaults to `mastery.STORIES_REQUIRED_AT_STAGE` and is imported,
+    never restated: §8 promotes a child off a stage after that many completed
+    stories, so a stage holding fewer of them is a stage no child can leave by
+    reading — the deliverable is short by definition, and the number that says so
+    has to BE the runtime's or the two drift (DEVIATIONS 14.31).
+    """
+    return [(s, n) for s, n in sorted(stage_depth(rows).items()) if n < required]
+
+
 def assert_matrix_seeded(rows: Sequence[PairDepth]) -> None:
     """Refuse to answer at all when the matrix itself is missing.
 
@@ -364,19 +400,26 @@ def render_coverage(rows: Sequence[PairDepth], target: int) -> list[str]:
     """
     themes = sorted({r.theme_slug for r in rows})
     depth = {(r.stage_id, r.theme_slug): r.servable for r in rows}
+    per_stage = stage_depth(rows)
     width = max([len(t) for t in themes] + [5])
     out = [
         "",
         f"POOL COVERAGE — servable ({'|'.join(SERVABLE_STATUSES)}) stories per "
-        f"(stage, theme), target {target}:",
-        "  stage  " + "  ".join(t.rjust(width) for t in themes),
+        f"(stage, theme), target {target}; per STAGE, target "
+        f"{STORIES_REQUIRED_AT_STAGE}:",
+        "  stage  " + "  ".join(t.rjust(width) for t in themes) + "     stage",
     ]
     for stage in sorted({r.stage_id for r in rows}):
         cells = []
         for theme in themes:
             n = depth.get((stage, theme), 0)
             cells.append((str(n) if n >= target else f"{n} !").rjust(width))
-        out.append(f"  {stage:>5}  " + "  ".join(cells))
+        total = per_stage.get(stage, 0)
+        # The stage total is the column the per-pair table never had, and its
+        # absence is the whole finding: 33 of 33 cells green while 29 of them
+        # held fewer than §8 asks a child to read (DEVIATIONS 14.31).
+        flag = "" if total >= STORIES_REQUIRED_AT_STAGE else " !"
+        out.append(f"  {stage:>5}  " + "  ".join(cells) + f"  {total:>8}{flag}")
 
     gaps = coverage_gaps(rows, target)
     at_target = len(rows) - len(gaps)
@@ -384,6 +427,16 @@ def render_coverage(rows: Sequence[PairDepth], target: int) -> list[str]:
     if gaps:
         out.append(f"  {len(gaps)} below target (marked !):")
         out += [f"    stage {g.stage_id} / {g.theme_slug}: {g.servable}" for g in gaps]
+
+    thin = stage_gaps(rows)
+    at_stage_target = len(per_stage) - len(thin)
+    out.append(
+        f"  {at_stage_target} of {len(per_stage)} stage(s) hold >= "
+        f"{STORIES_REQUIRED_AT_STAGE} (§8's STORIES_REQUIRED_AT_STAGE)."
+    )
+    if thin:
+        out.append(f"  {len(thin)} stage(s) below that (marked ! in the stage column):")
+        out += [f"    stage {s}: {n}" for s, n in thin]
     return out
 
 
@@ -403,14 +456,46 @@ _SILENT_FALLBACK = (
     "another theme — which the ladder does correctly and reports to nobody."
 )
 
+#: The same sentence for the STAGE floor. A thin stage is not a fallback, it is a
+#: re-read: `_SERVE_SQL` has nothing left that this kid has not seen, so it
+#: re-serves one, and §8 credits a re-read with no evidence by design.
+_STAGE_STARVED = (
+    f"§8 promotes a child off a stage after {STORIES_REQUIRED_AT_STAGE} completed "
+    "stories AT it. A stage holding fewer than that cannot supply five DISTINCT "
+    "reads, so the last ones are re-reads, which yield no §8 evidence — the child "
+    "is parked."
+)
+
 
 async def run_coverage_check(target: int = TARGET_PER_PAIR) -> None:
-    """§7's floor as an exit code. No API client is constructed; nothing is spent.
+    """§7's floor as an exit code, per PAIR **and** per STAGE. Nothing is spent.
 
     This is the step `docs/DEPLOY.md` §4 requires after the warm run, and it lives
     here rather than in the Makefile because that step is executed in a
     DigitalOcean console with bare `python -m …` — `make` does not exist there
     (DEVIATIONS 8.41).
+
+    **Two floors, one command, because they are the same supply.** `TARGET_PER_PAIR
+    = 3` and `mastery.STORIES_REQUIRED_AT_STAGE = 5` were two numbers in two files
+    that never met, and the live pool showed exactly what that costs: 33 of 33
+    pairs at target with the gate green, while **29 of those 33 pairs held fewer
+    than 5** and at stages 5-11 every one of the 21 pairs held exactly 3. Read as
+    cells that is a starved pool; read as stages it is a healthy one — per-stage
+    depth is 24, 10, 11, 11, 9, 9, 9, 9, 9, 9, 9 (DEVIATIONS 14.31).
+
+    Stages, not cells, is the correct unit, and it is the SORT KEY that makes it
+    so. `_SERVE_SQL` orders `stage_id DESC`, then *unread by this kid*, and only
+    then `(theme_id = :theme) DESC` (commit a3e5be2): a child at stage 7 who has
+    read the three dragons stories is handed an unread animals story AT STAGE 7
+    before the ladder considers dropping a stage. So the deliverable unit is the
+    stage and the per-stage assertion is the one that had never been made.
+
+    `TARGET_PER_PAIR` is deliberately NOT raised to 5. That would demand 165
+    stories against today's 119 — about 46 stories of real API spend — to buy
+    what the unread key already delivers for nothing.
+
+    The stage floor is imported from `mastery`, never restated. The whole defect
+    was one number living in two files.
     """
     async with SessionLocal() as session:
         rows = await pool_coverage(session)
@@ -422,12 +507,33 @@ async def run_coverage_check(target: int = TARGET_PER_PAIR) -> None:
         print(line, flush=True)
 
     gaps = coverage_gaps(rows, target)
+    thin = stage_gaps(rows)
+    # Both floors are reported before either exits. Short-circuiting on the pair
+    # gate would hide the stage gate behind a `make warm` run — and it is the
+    # stage gate that says whether the run bought enough.
+    refusals = []
     if gaps:
-        raise SystemExit(
-            f"\n{len(gaps)} of {len(rows)} (stage, theme) pair(s) hold fewer than "
-            f"{target} servable story/stories.\n{_SILENT_FALLBACK}\n{_FILL_HINT}"
+        refusals.append(
+            f"{len(gaps)} of {len(rows)} (stage, theme) pair(s) hold fewer than "
+            f"{target} servable story/stories.\n{_SILENT_FALLBACK}"
         )
+    if thin:
+        named = ", ".join(f"stage {s} ({n})" for s, n in thin)
+        refusals.append(
+            f"{len(thin)} of {len(stage_depth(rows))} stage(s) hold fewer than "
+            f"{STORIES_REQUIRED_AT_STAGE} servable stories in TOTAL across every "
+            f"theme: {named}.\n{_STAGE_STARVED}"
+        )
+    if refusals:
+        raise SystemExit("\n" + "\n\n".join(refusals) + f"\n{_FILL_HINT}")
     print(f"\nOK — all {len(rows)} (stage, theme) pair(s) hold >= {target} servable story/stories.")
+    print(
+        f"     All {len(stage_depth(rows))} stage(s) hold >= {STORIES_REQUIRED_AT_STAGE} "
+        "in total across every theme — §8's own\n     "
+        "STORIES_REQUIRED_AT_STAGE, imported rather than restated. That is the "
+        "unit a child\n     is served in: `_SERVE_SQL` prefers an unread story at "
+        "their stage over their theme."
+    )
     # Green here is not green for §8, and it read as though it were until
     # DEVIATIONS 11.70 measured the other floor. Named at the moment the operator
     # is most likely to conclude the pool is fine.
@@ -582,11 +688,7 @@ def promotion_gaps(rows: Sequence[StageSupply]) -> list[StageSupply]:
     it until the pool looked adequate.
     """
     return sorted(
-        (
-            r
-            for r in rows
-            if not promotion_is_reachable(stage_id=r.stage_id, per_story=r.per_story)
-        ),
+        (r for r in rows if not promotion_is_reachable(stage_id=r.stage_id, per_story=r.per_story)),
         key=lambda r: (r.reachable, r.stage_id),
     )
 
@@ -651,8 +753,7 @@ def render_supply(rows: Sequence[StageSupply]) -> list[str]:
             remedy = (
                 f"the whole pool supplies {gap.total} — TERMINAL"
                 if needed is None
-                else f"reachable, but only over {needed} stories, not "
-                f"{STORIES_REQUIRED_AT_STAGE}"
+                else f"reachable, but only over {needed} stories, not {STORIES_REQUIRED_AT_STAGE}"
             )
             out.append(
                 f"    stage {gap.stage_id}: {gap.reachable} of {MIN_GPC_OBSERVATIONS} "
@@ -1221,8 +1322,10 @@ def _as_generated(row: Question) -> GeneratedQuestion:
 async def _apply_tags(session, story: Story, segments, tagging: SceneTagResult) -> None:
     """Write per-segment tags and pick each segment's picture (§12)."""
     pool = (
-        await session.execute(select(Asset).where(Asset.theme_id == story.theme_id))
-    ).scalars().all()
+        (await session.execute(select(Asset).where(Asset.theme_id == story.theme_id)))
+        .scalars()
+        .all()
+    )
     for seg, tags in zip(segments, tagging.tags, strict=False):
         seg.scene_tags = list(tags)
         chosen = select_asset(tags, pool)
@@ -1523,9 +1626,7 @@ def _finish(
 
     parts = []
     if failures:
-        lines = "\n".join(
-            f"  #{sid}: {'; '.join(why)}" for sid, why in sorted(failures.items())
-        )
+        lines = "\n".join(f"  #{sid}: {'; '.join(why)}" for sid, why in sorted(failures.items()))
         parts.append(
             f"{len(failures)} story/stories reached the pool unenriched:\n{lines}\n"
             "Re-run with --backfill once the cause is fixed."
@@ -1672,8 +1773,7 @@ async def run_warm(stages: list[int], themes: list[str], target: int, effort: st
         detail = ""
         if api_failures:
             detail = (
-                f" — {len(api_failures)} generation(s) failed outright, "
-                f"first: {api_failures[0][2]}"
+                f" — {len(api_failures)} generation(s) failed outright, first: {api_failures[0][2]}"
             )
         raise SystemExit(f"make warm produced no warm stories{detail}")
     _finish(
@@ -2652,8 +2752,7 @@ def _render_stale_prompts(stale: Sequence[StalePrompt], limit: int = 12) -> list
     for s in stale[:limit]:
         cue = s.cue if s.cue else "<no cue_word>"
         out.append(
-            f"    q{s.question_id} story {s.story_id} stage {s.stage_id}: "
-            f"{s.prompt!r} (cue {cue})"
+            f"    q{s.question_id} story {s.story_id} stage {s.stage_id}: {s.prompt!r} (cue {cue})"
         )
     if len(stale) > limit:
         out.append(f"    ... and {len(stale) - limit} more")
@@ -2811,6 +2910,197 @@ async def run_mcq2_check() -> None:
     print(
         f"OK — all {total} require the story to answer: no question names the word that "
         f"distinguishes its two cards, and no false card is the true card negated.{pending}"
+    )
+
+
+# --- §5.5 story words: the SIXTH gate (DEVIATIONS 14.20) ---------------------
+# `--check-prompts` and `--check-mcq2` read what a QUESTION says. This one reads
+# what a picture CHIP is spent on, which is the other thing a child is shown that
+# no query had ever asked about.
+#
+# Free: one SQL query and a pure function over the frozen GPC inventory. No API
+# client, no vocabulary load, nothing written.
+
+
+@dataclass(frozen=True)
+class ChipOffence:
+    """One picture chip on one servable story that §5.5's band does not permit."""
+
+    story_id: int
+    stage_id: int
+    theme_slug: str
+    word: str
+    reason: str
+    #: `None` for a word the inventory can never align. Otherwise how many stages
+    #: of instruction separate the reader from the word — zero or negative means
+    #: they can already read it.
+    lookahead: int | None
+
+    @property
+    def wasted(self) -> bool:
+        """The reader can already decode it: a slot bought and thrown away."""
+        return self.lookahead is not None and self.lookahead <= 0
+
+
+#: Every picture chip a child can currently be shown. `stories.story_words` is the
+#: persisted DISTINCT list the reading view renders chips from (`StoryDTO`), so
+#: this counts SLOTS, not occurrences — the unit `MAX_STORY_WORDS` is denominated
+#: in (STATE invariant 3). Same `SERVABLE_STATUSES` + `ANSWERABLE_SQL` predicate as
+#: every other gate, imported and never re-spelled: a chip on a story the serving
+#: path refuses is not a chip any child is shown.
+_CHIPS_SQL = text(
+    f"""
+    SELECT s.id AS story_id, s.stage_id, t.slug AS theme_slug, s.story_words
+    FROM stories s
+    JOIN themes t ON t.id = s.theme_id
+    WHERE s.status = ANY(:statuses)
+      AND {ANSWERABLE_SQL.format(story="s")}
+    ORDER BY s.stage_id, t.slug, s.id
+    """
+)
+
+
+async def chip_offences(session) -> tuple[list[ChipOffence], int]:
+    """Every live picture chip §5.5's band refuses, and how many chips there are.
+
+    The judgement is `pipeline.story_word_refusal`, imported from beside the
+    constant rather than restated as a stage comparison here. The whole shape of
+    DEVIATIONS 11.60 was a rule that moved while a second copy of it did not.
+    """
+    rows = (await session.execute(_CHIPS_SQL, {"statuses": list(SERVABLE_STATUSES)})).all()
+    out: list[ChipOffence] = []
+    total = 0
+    for row in rows:
+        for word in row.story_words or []:
+            total += 1
+            reason = story_word_refusal(word, row.stage_id)
+            if reason is not None:
+                out.append(
+                    ChipOffence(
+                        story_id=row.story_id,
+                        stage_id=row.stage_id,
+                        theme_slug=row.theme_slug,
+                        word=word,
+                        reason=reason,
+                        lookahead=story_word_lookahead(word, row.stage_id),
+                    )
+                )
+    return out, total
+
+
+async def dead_bank_entries(session) -> list[tuple[str, str]]:
+    """(theme, word) rows in `story_word_bank` that NO stage can offer.
+
+    Not an exit condition — deleting a curated seed row is an operator's call —
+    but printed on every run, because seven of the twenty-four entries are in this
+    state and a bank whose contents are 29% inert is a bank an operator will
+    reason about wrongly.
+    """
+    rows = (
+        await session.execute(
+            text(
+                "SELECT t.slug, w.word, w.min_stage FROM story_word_bank w "
+                "JOIN themes t ON t.id = w.theme_id ORDER BY t.slug, w.word"
+            )
+        )
+    ).all()
+    return [
+        (r.slug, r.word)
+        for r in rows
+        if not any(story_word_is_eligible(r.word, s) for s in range(r.min_stage, MAX_STAGE + 1))
+    ]
+
+
+#: What an operator does about an over-the-band chip, and why — unlike the third
+#: and fourth gates — there is no free repair.
+_CHIP_HINT = (
+    "There is NO free repair for these. A chip is not a text defect — the word is "
+    "IN the story — so dropping it from `stories.story_words` would leave a word "
+    "the child cannot decode rendered as plain text with no picture, which is "
+    "strictly worse than the wrong chip. The remedy is generation: the band is "
+    "enforced in `pipeline.load_vocabulary`, so a story generated after DEVIATIONS "
+    "14.20 cannot carry one. Reject and re-generate the named stories with `python "
+    "-m storyforge.warm`, or hold the backlog knowingly. Verify with `python -m "
+    "storyforge.warm --check-story-words`."
+)
+
+
+def _render_chip_offences(offences: Sequence[ChipOffence], limit: int = 15) -> list[str]:
+    """The chips themselves with WHY each one — never just a count (8.43's rule)."""
+    out = [
+        f"    story {o.story_id} stage {o.stage_id} / {o.theme_slug}: {o.word!r} — {o.reason}"
+        for o in offences[:limit]
+    ]
+    if len(offences) > limit:
+        out.append(f"    ... and {len(offences) - limit} more")
+    return out
+
+
+async def run_story_word_check() -> None:
+    """`--check-story-words`: §5.5's decodability band as an exit code. Free.
+
+    The SIXTH gate, and the first that reads what a picture CHIP is spent on.
+    `--check-coverage` counts stories, `--check-promotability` counts §8 evidence,
+    `--check-prompts` and `--check-mcq2` read what a question SAYS. A story word is
+    the other thing a child is shown — three slots per story, each one a word the
+    child is GIVEN instead of decoding — and nothing had ever bounded which words
+    could fill one.
+
+    Measured when this gate was written: **225 of 326 live chips (69.0%) were spent
+    on a word the reader could already decode at their own stage**, and 23 more on
+    words 4-7 stages ahead. `dragon` is decodable from stage 1, so every dragons
+    story on the ladder carried a picture chip over a word its reader could sound
+    out — while `castle`, which no stage of this inventory can ever align, is the
+    word the chip was invented for.
+    """
+    async with SessionLocal() as session:
+        offences, total = await chip_offences(session)
+        dead = await dead_bank_entries(session)
+
+    print(f"\nPICTURE CHIPS — {total} slot(s) on servable stories", flush=True)
+    if dead:
+        print(
+            f"  FYI — {len(dead)} story_word_bank entr(ies) that NO stage can offer "
+            "(decodable from stage 1, so a chip there would teach nothing):",
+            flush=True,
+        )
+        print("    " + ", ".join(f"{t}/{w}" for t, w in dead), flush=True)
+        print(
+            "    Inert, not broken, and deliberately NOT this gate's exit code: "
+            "deleting a curated seed row is an operator's call.",
+            flush=True,
+        )
+
+    if offences:
+        wasted = [o for o in offences if o.wasted]
+        far = [o for o in offences if not o.wasted]
+        if wasted:
+            print(
+                f"  {len(wasted)} chip(s) on a word the reader can ALREADY decode "
+                f"({100 * len(wasted) / total:.1f}% of every slot):",
+                flush=True,
+            )
+            for line in _render_chip_offences(wasted):
+                print(line, flush=True)
+        if far:
+            print(
+                f"  {len(far)} chip(s) more than {STORY_WORD_MAX_LOOKAHEAD} stages "
+                "ahead of their reader:",
+                flush=True,
+            )
+            for line in _render_chip_offences(far):
+                print(line, flush=True)
+        raise SystemExit(
+            f"\n{len(offences)} of {total} picture-chip slot(s) sit outside §5.5's band "
+            f"(DEVIATIONS 14.20): {len(wasted)} spent on a word the child could already "
+            f"read, {len(far)} on a word the curriculum will teach properly first.\n"
+            f"A story carries at most {MAX_STORY_WORDS} chips, so every one of these is a "
+            "slot bought and then spent on nothing.\n" + _CHIP_HINT
+        )
+    print(
+        f"OK — all {total} chip(s) sit on a word the reader cannot decode at their own "
+        f"stage,\n     and that either never becomes decodable within this inventory or "
+        f"does within {STORY_WORD_MAX_LOOKAHEAD} stages."
     )
 
 
@@ -3260,6 +3550,17 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--check-story-words",
+        action="store_true",
+        help=(
+            "report every picture chip on a servable story that §5.5's decodability "
+            "band refuses — a word the reader can already decode, or one more than "
+            f"{STORY_WORD_MAX_LOOKAHEAD} stages ahead of them — and exit NON-ZERO "
+            "while any exists, then exit. No API calls, nothing spent. There is no "
+            "free repair; the band is enforced at generation (DEVIATIONS 14.20)"
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -3325,6 +3626,8 @@ def main() -> None:
             asyncio.run(run_prompt_check())
         elif a.check_mcq2:
             asyncio.run(run_mcq2_check())
+        elif a.check_story_words:
+            asyncio.run(run_story_word_check())
         elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
         elif a.mcq2_repair:

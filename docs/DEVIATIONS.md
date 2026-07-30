@@ -11547,6 +11547,460 @@ obvious candidate, and §06's "full card width" is the sentence it argues with),
 and this pass deliberately does not take it — the front end's job was to stop the
 page pretending to be finished, and it does that in portrait too (verified).
 
+## Phase 8 — three checks that passed because they asked the wrong question (21.1-21.3)
+
+The house defect, occurrences ten, eleven and twelve. Each of these ran, returned
+a verdict, and was believed; each was measuring a different object from the one
+its name claims. None is fixed by weakening a gate.
+
+### 21.1 — `passes_gate` certified a story with no words in it as fully decodable
+
+`decoder/validate.py` scores `counts["decodable"] / scored if scored else 1.0`.
+A draft that tokenizes to nothing — `""`, whitespace, `"... !!!"`, or a
+`StoryDraft` whose `segments` list came back empty, which the schema permits
+because `segments` has no `min_length` — therefore arrived at `passes_gate` with
+`decodability == 1.0`, `counts["oov"] == 0` and zero distinct story words. All
+three clauses were satisfied and not one of them had been asked about anything.
+
+Measured before, at stage 1:
+
+```
+'empty'      dec=1.0 counts={'decodable': 0, ...} scored=0 words=0 passes_gate=True
+'blank'      dec=1.0                              scored=0 words=0 passes_gate=True
+'punct only' dec=1.0                              scored=0 words=3 passes_gate=True
+```
+
+§1's guarantee is "every word in this story is one the child can read". Zero words
+satisfies it vacuously, and vacuously true is not true: the child is handed a blank
+screen, presses `Finish`, and §8 records a perfect reading of nothing. The verdict
+is a **hard refusal**, and it is made in `passes_gate` rather than in
+`validate_text`, because 1.0 is the honest value of a ratio with an empty
+denominator — the report is a measurement, the gate is the judgement, and §7's
+state machine reads the judgement. `api/stories.py::_is_decodable_for` already
+scored an empty body `0.0` at serve time (7.23); this is the same answer moved to
+where the story is still preventable.
+
+**The refusal is of no words, not of an empty denominator.** A text of nothing but
+sight and story words also has `scored_word_count == 0` and reaches 1.0 down the
+same branch, and it still passes — those are words, and the child can read them.
+The gate reads a new `TextReport.word_count` (word tokens, punctuation excluded),
+never `scored_word_count`, and `test_the_refusal_is_of_no_words_and_not_of_an_empty_denominator`
+is what stops the fix from becoming a quiet tightening of §5.1's denominator rule.
+
+Two consequences carried:
+
+- `build_rewrite_block` gains a FOURTH describable failure (9.45's invariant: no
+  gate failure may produce an empty problem list, and none may state a false
+  premise). None of its three loops can see an empty story — there is no
+  violation, no OOV and no story word to name — so it reached the generic
+  fallback and told a model that had written nothing that its story was under 95%
+  decodable. It now says the story came back empty and asks for the whole story.
+- `check_mcq2` got the guard its answer pair has had since 11.68. `"?"` ends with
+  a question mark and used to clear the gate on an empty denominator, so a
+  question with no words was judged decodable; the refusal would otherwise have
+  been reported as `uses words this child cannot read: ` with nothing after the
+  colon.
+
+**Proved at the pipeline, not at the reporting layer.**
+`test_the_pipeline_rejects_an_empty_draft_and_never_pays_to_moderate_it` stubs the
+model to return `segments=[]` and asserts `passed is False`, that all four
+attempts were spent asking for text, and that `moderate()` was never called —
+STATE invariant 11, never spend a Haiku call on a story that will not be served.
+`warm.persist` turns `passed=False` into `status="rejected"`.
+
+### 21.2 — the syllable cap was measured against a pronunciation the aligner could not use
+
+§5.4 drops a word from a stage's allowlist when it has more syllables than that
+stage permits. `precompute.compute_rows` counted them with
+`min_syllables(prons)`: the fewest syllables across **all** of CMUdict's
+pronunciations for the word, including the ones that do not align under the
+stage's mastered GPCs. Alignment and syllable count were taken from different
+pronunciations, so the cap was bounding a reading no child at that stage can
+produce.
+
+**Measured on the live table before the fix — this is not zero.** Of 34,288
+`allowed_words` rows, **199 carried a syllable count the reader cannot produce at
+that stage, and 67 of those were over their stage's cap** and were being offered
+to children, across 20 distinct words: `awfully`, `cabinet`, `cabinets`,
+`differences`, `different`, `every`, `family`, `frightening`, `gardening`,
+`happening`, `interested`, `interesting`, `leveling`, `offering`, `remembering`,
+`several`, `slippery`, `suffering`, `toweling`, `towering`.
+
+```
+every    /EH1 V ER0 IY0/ (3) and /EH1 V R IY0/ (2). At stage 5 only the 3-syllable
+         one aligns — counted 2, admitted under a cap of 2, read as three.
+towards  /T AH0 W AO1 R D Z/ (2) and /T AO1 R D Z/ (1). At stage 6 only the
+         2-syllable one aligns. Counted 1.
+fine     /F AY1 N/ (1) and the Italian /F IH1 N AH0/ (2). Silent-e is stage 4, so
+         at stages 1-3 the ONLY reading is the 2-syllable one — in the stage-1
+         allowlist as a one-syllable word on the strength of a reading no stage-1
+         child can produce.
+```
+
+`decoder/lexicon_util.aligned_syllables(word, prons, mastered)` replaces it:
+fewest syllables **among the pronunciations that align**, and `None` — never a
+number — when none of them do. Per-stage by construction, because alignability
+is: the usable set grows monotonically with the mastered set, so the count is
+non-increasing in stage and a word gets *shorter* as the child learns more
+(`fine` is 2 syllables at stage 1 and 1 at stage 4). `min_syllables` is kept, and
+its docstring now says where it is and is not the right question.
+
+**After**: 34,288 -> **34,221** rows, 11 stages, **769**-4,397 per stage
+(entry stage 771 -> 769), still every stage clear of §18's 150 floor, and
+`make precompute` still runs in 1.9s. `make precompute` was re-run against the
+live database.
+
+**Why the existing test could not see it.** `test_syllable_cap_is_honoured` reads
+`allowed_words.syllables` and compares it to `stages.max_syllables` — it proves
+precompute agrees with itself and nothing more, and it was green over all 67 rows.
+Two tests replace that blind spot, and both ask the ALIGNMENT rather than the row:
+`test_no_precomputed_row_is_capped_against_an_unusable_pronunciation` re-derives
+every one of the 34,221 rows from `compute_rows` with no database, and
+`test_the_live_syllable_cap_holds_for_the_reading_the_child_produces` scans the
+whole live table (its remedy when red is `make precompute`, which is free). The
+live one is a **full scan, not `ORDER BY random() LIMIT n`**: the defect touched
+0.6% of the table, which a 600-row sample misses about one run in forty, and a
+tripwire with a 2.6% false-green rate against its own defect is not a tripwire.
+
+### 21.3 — the vacuity ratchet was a property of a stage number, not of the inventory
+
+The anti-golden ratchet caps the fraction of an adult dictionary the inventory can
+decode with everything unlocked (44.75%, ceiling 50%). It measured
+`mastered_ids(MAX_STAGE)` — "what does the TOP STAGE decode" — where the question
+it exists to ask is "how permissive is the INVENTORY", a property of a 93-row CSV
+with no stage number in it.
+
+**Does the recorded 44.75% still describe the same measurement it did before the
+renumber? Yes — re-measured, not assumed.** Retiring Appendix A's stage 1
+(migration `f3a91c6d0e24`, 12.1-12.14) moved the top label from 12 to 11 without
+moving the set, because both sit at or above the highest stage any GPC is taught
+at (10), so `mastered_ids(12) == mastered_ids(11) == the full 93 GPCs`.
+
+**Would a future re-stage move it? Yes, silently.** Per-stage, at the pinned seed
+and sample size:
+
+```
+stage  8 -> 44.00%      stage 10 -> 44.75%
+stage  9 -> 44.375%     stage 11 -> 44.75%   (= full inventory, 93 GPCs)
+```
+
+Simulated by setting `MAX_STAGE = 8` and changing nothing else — a re-stage that
+strands GPCs above the top of the ladder, or two more stage retirements — the old
+formulation reports **44.00% and passes the 50% ceiling quietly**, while the new
+one reports **44.75%, unmoved**. That is five points of headroom arriving for a
+reason that has nothing to do with permissiveness, in the direction that looks
+safe. The coincidence was held together by a literal `MAX_STAGE == 11` in
+`tests/decoder/test_inventory.py` — the exact line a re-stage edits.
+
+The ratchet now measures `full_inventory()` (every GPC id in `gpcs.csv`), and
+`test_the_ratchet_is_invariant_under_re_staging` asserts its premise *where the
+measurement is made*: the top stage must teach the whole inventory, naming any
+stranded GPC. Its second assertion — that a smaller mastered set really does score
+lower — is what stops the first from being decorative: if the reading did not
+depend on the stage label, `mastered_ids(MAX_STAGE)` would have been a harmless
+spelling of `full_inventory()`. The SEED, SAMPLE SIZE, FLOOR and CEILING are
+untouched.
+
+### Sabotage — six, each restored and verified restored
+
+Every test written here was broken on purpose and confirmed red.
+
+```
+A1  passes_gate's empty clause -> `if False`      7 red, incl. the pipeline test
+                                                  ("moderation was asked to judge
+                                                   an empty story")
+A2  passes_gate reads scored_word_count instead   1 red — the sight/story-word-only
+    of word_count                                 text is refused, which it must not be
+A3  build_rewrite_block's `empty` flag -> False   1 red — the block falls back to
+                                                  "at least 95% decodable"
+B1  precompute back to min_syllables(prons)       1 red — 67 rows over the cap
+B2  aligned_syllables ignores the mastered set    3 red, incl. `fine` at stage 1
+C1  MAX_STAGE 11 -> 8 (a simulated re-stage)      1 red — names the stranded GPCs;
+                                                  test_gate_has_not_dissolved stays
+                                                  GREEN at 44.75%, which is the point
+C2  VACUITY_CEILING 0.50 -> 0.40                  1 red — the ceiling still fires
+C3  vacuity_ratio ignores its argument            1 red — the invariance test is not
+                                                  vacuous
+```
+
+### Gates — measured after the change, commands as run
+
+```
+pytest -q -p no:randomly (private copy sf_fix3)   1114 passed, 3 skipped, 1 failed
+                                                  (the failure is another agent's
+                                                  in-flight warm.py vs its own test;
+                                                  no file in it was touched here)
+python -m storyforge.warm --check-coverage        GREEN
+python -m storyforge.warm --check-prompts         GREEN — 136 of 136
+python -m storyforge.warm --check-mcq2            GREEN — 49 of 49
+python -m storyforge.warm --check-promotability   RED, unchanged shape: terminal
+                                                  stages [6, 7, 8, 9, 10]
+python -m storyforge.precompute (live)            34,288 -> 34,221 rows in 1.92s
+```
+
+### Not fixed here, and why
+
+- **`validate_text` still returns `decodability == 1.0` for a text with no
+  words.** It is a ratio over an empty denominator and that is its honest value;
+  the fix belongs in the judgement, not the measurement, and moving the number
+  would have left every other reader of `decodability` free to re-derive the same
+  lie. `eval.py`'s `meets_gate` compares raw `decodability` for the §14 report and
+  is left alone for the same reason — `passed` on the same row is the gate's
+  answer and is already `False`.
+- **`fine` is still offered at stage 1**, now honestly labelled as two syllables.
+  It is admitted because §5.2.5 lets ANY pronunciation pass and CMUdict carries the
+  Italian /F IH1 N AH0/. That is a separate question about §5.2.5's existence
+  semantics, not about the syllable cap.
+- **`VACUITY_CEILING`, `VACUITY_FLOOR`, the seed and the sample size are
+  untouched**, and the measured 44.75% is deliberately not pinned to an exact
+  value: the ceiling is the ratchet, and a hard pin would fire on every justified
+  GPC as well as every unjustified one.
+
+## Phase 8 — three ceilings that were not ceilings (14.20-14.32)
+
+Three separate findings with one shape: a bound that exists, is documented, is
+believed, and does not bind. §5.5's story word had no upper bound at all; §7's
+coverage gate bounded the wrong unit; §9.6's process budget was bounded by a
+display limit. None is fixed by weakening anything.
+
+### 14.20 — a story word had no decodability ceiling, and 69% of the picture-chip slots were spent on nothing
+
+A story word is a word the child is **given** — a picture chip with tap-to-hear
+(§07), excluded from the decodability denominator (§5.1) — instead of decoding.
+There are exactly `MAX_STORY_WORDS` = 3 slots per story. Nothing bounded which
+words could fill one: `story_word_bank.min_stage` was the only filter, and it is a
+hand-set **semantic** floor ("is this concept age-appropriate here") that has no
+relationship whatever to whether the reader can already read the word.
+
+**Measured over the live pool — 119 servable stories, 326 chip slots.** Distance
+is `min_decodable_stage(word) - story.stage_id`, where the first term is the first
+stage whose mastered GPCs admit a complete alignment (the decoder's own
+`min_stage`, the same function `precompute` builds `allowed_words` with):
+
+| distance | slots | share |
+|---|---|---|
+| ≤ 0 — the reader can ALREADY decode it | **225** | **69.0%** |
+| 1..3 — inside the band chosen below | 48 | 14.7% |
+| 4..7 | 23 | 7.1% |
+| never alignable in this 93-GPC inventory | 30 | 9.2% |
+
+Per stage, distance ≤ 0 is 31/64 at stage 1 and rises to 24/27 at stage 11 — the
+top of the ladder teaches no new GPCs, so almost everything is already decodable
+there. The offered bank was worse than the pool: of 253 (word, stage) offers,
+32.4% were never-alignable and 40.7% were already decodable.
+
+The one-word version: **`dragon` is decodable from stage 1**, so every dragons
+story on the ladder carried a picture chip over a word its reader could sound
+out — while `castle`, which no stage of this inventory can ever align, is the word
+the chip was invented for. `orbit` is `min_stage` 4 and decodable from stage 1, so
+it could only ever be offered at stages where it was useless.
+
+Seven of the twenty-four bank entries — `comet`, `dragon`, `forest`, `orbit`,
+`planet`, `rabbit`, `rocket` — are decodable from stage 1 and are not story words
+at all under any reading of §5.5. They are ordinary decodable words sitting in the
+story-word bank.
+
+**The rule chosen** (`pipeline.STORY_WORD_MAX_LOOKAHEAD = 3`), as one sentence:
+
+> A story word must be a word the reader cannot decode at their own stage, and
+> must either be permanently unalignable within this GPC inventory or become
+> decodable within three stages.
+
+Why both ends, and why "never" sits on the permitted side of the ceiling:
+
+- **Floor (≥ 1).** A chip over a word the child can sound out does three bad
+  things at once: it spends one of three slots, it paints a picture over the exact
+  decoding practice §1 exists to deliver, and it drops a decodable word out of the
+  scored denominator — the same denominator-shrinking STATE invariant 2 refuses
+  when the *model* claims it. The bank claiming it is no better. This is the half
+  that buys the 69%.
+- **Ceiling (≤ 3).** The distinction is **substitutability**. For `castle`,
+  `penguin`, `treasure` no amount of teaching replaces the chip — the inventory has
+  no path for a silent `t` or `su` → /ZH/ at any stage — so the chip is the only
+  route in, forever, and is permanently correct. For `giraffe` (decodable at stage
+  8) offered to a stage-1 reader, teaching **will** replace the chip; the only
+  question is whether the child meets the word now as a picture or in seven stages
+  as their own decoding. Spending a scarce slot on a word the curriculum is about
+  to teach properly is whole-word memorisation bought at the cost of a chip a
+  permanently-unalignable word needed. This half buys 23 of the 326.
+
+**Three and not two,** because three is where the bank stops being able to fill the
+slot: at 3 every (theme, stage) keeps at least one candidate; at 2 the stage-1
+dragons offer loses `cave` and `fire` and §18's "themes at stages 1-2 lean on story
+words + pictures for interest" starts to bite. It is a lookahead in **stages**
+rather than in missing GPCs because that is the unit the child's own progress is
+measured in (§8 promotes a stage at a time), so "three stages" reads as "the next
+three things you will be taught".
+
+**Enforced at generation, audited at validation.** `pipeline.load_vocabulary`
+applies the band when it builds the offer, so a story generated from now on cannot
+carry an out-of-band chip. `warm.run_story_word_check` (`--check-story-words`,
+`make story-word-check`) is the SIXTH gate and reads what is already in the pool.
+Both call the same `story_word_refusal`; the gate has no copy of the rule, because
+a rule that moved while a second copy did not is 11.60 exactly.
+
+**It is deliberately NOT re-asked in `validate_draft`.** That function is a
+*measurement* of a text against a vocabulary, and moving the band into it would
+make the same text score differently for a reason that has nothing to do with the
+text — including at serve time, where `api/stories.py::_is_decodable_for`
+re-scores an already-persisted story and a silently un-exempted word would drop a
+live story below the gate. Policy belongs where the offer is built.
+
+**The gate is RED today: 248 of 326 slots (76.1%)** — 225 already decodable, 23
+too far. There is **no free repair**, and that is a property of the defect rather
+than an omission: the word is *in* the story, so dropping it from
+`stories.story_words` would leave a word the child cannot decode rendered as plain
+text with no picture, which is strictly worse than the wrong chip. The remedy is
+generation.
+
+### 14.21 — the rule surfaced a data defect: (stage 1, space) had no story word at all
+
+Applying the band emptied exactly one cell of the matrix. `alien` and `astronaut`
+are permanently unalignable, which makes them the two best story words space has,
+and their hand-set `min_stage = 2` was withholding them from the one stage that
+most needs them. Everything else space offers at stage 1 (`moon`, `planet`,
+`rocket`, `stars`) is either already decodable or 5-6 stages out.
+
+An empty offer at stage-1 space is AUDIT-PHASE7 F1 — "a dragons story with no
+dragon in it" — reached by a second route, and against §18. Both moved to
+`min_stage` 1 in `data/seed/story_words.csv`; `make seed` is required to apply it
+(pure upserts, no DELETE). Every (stage, theme) now offers 1-6 candidates.
+`test_no_stage_and_theme_is_left_with_nothing_to_offer` is the guard, and it is
+the counterweight that stops the band being tightened until it starves the themes.
+
+Under §5.5's "5-8 candidates per (theme, stage)" the bank is now short at most
+cells. That is a **supply** finding, not a reason to keep the broken rule (the
+argument invariant 15 already makes about §8's floor): the bank is 24 words, 8 per
+theme, and 7 of them are inert. Not fixed here — curating a seed file is an
+operator's call, and `--check-story-words` prints the inert rows on every run so
+the number cannot rot.
+
+### 14.30 — the eval's process budget was defeated by a display limit
+
+`api/admin.py` carries two ceilings on spending money from a button:
+`MAX_BUDGET_USD = 8.0` per request and `PROCESS_BUDGET_USD = 16.0` cumulative
+across every launch in the process (9.6, whose stated rationale is "with only a
+per-run cap and a busy check, **ten sequential clicks are ten runs**").
+
+`_committed_usd()` summed `_launches`. `_launches` is capped at
+`MAX_LAUNCHES_KEPT = 10` by `_prune`, which deletes the oldest finished entry —
+and deleting the entry deleted its authorised dollars from the cumulative total.
+Ten is exactly the number 9.6's rationale names, so the retention limit re-enabled
+the precise scenario the ceiling was written to stop.
+
+The arithmetic: once the registry is pinned at ten, the check on launch 11 and
+every launch after it evaluates `10b + b > 16`, which fires only for
+`b > 16/11 ≈ $1.45`. **Any launch at $1.45 or less could be repeated an unbounded
+number of times.** `_committed_usd` asymptotes at `10b ≤ $14.54` no matter how
+much has actually been authorised. Secondary effect, shown to a human rather than
+to a branch: `process_remaining_usd` *increased* after every prune, so the portal
+reported headroom that had already been spent.
+
+`eval.py`'s own `--budget` check is clean and was checked: `items` is only ever
+appended to, the four summation sites all run over the whole list, and the
+`--resume` read carries no `LIMIT`. `--estimate-only` is a separate pure-token
+projection (`project_cost`) that never touches either collection.
+
+Fixed by carrying the number across the prune rather than by raising the limit:
+`_prune_launches` adds a dropped launch's `budget_usd` to `_committed_pruned_usd`
+*before* deleting the row, and `_committed_usd` returns carry + retained. What is
+forgotten is the record, never the spend; the registry stays bounded and still
+says `ephemeral: True` about itself.
+
+**Why the suite was green on this.** `test_the_process_ceiling_blocks_a_repeated_click`
+seeds **two** launches at `MAX_BUDGET_USD` each — two entries, well under ten, so
+it never reaches the pruning regime, and $16 trips the ceiling on the first try.
+No test used small budgets across more than ten launches. The new test drives
+sixteen real `POST /api/admin/eval-runs` launches with `run_full` stubbed, so the
+ceiling check, the registry write and the prune all run for real and nothing is
+spent. A first draft registered the launches by hand and **stayed green under
+sabotage** — it exercised `_prune_launches` in isolation while the endpoint's call
+site had been reverted. That is what the sabotage run is for.
+
+### 14.31 — the coverage gate was per-pair when the deliverable unit is per-stage
+
+`warm.TARGET_PER_PAIR = 3` and `mastery.STORIES_REQUIRED_AT_STAGE = 5` were two
+numbers in two files that never met. Measured on the live pool:
+
+```
+33 of 33 (stage, theme) pairs at target      → --check-coverage GREEN
+29 of those 33 pairs hold fewer than 5
+stages 5-11: every one of the 21 pairs holds exactly 3
+per-STAGE totals: 24 10 11 11 9 9 9 9 9 9 9  → every stage clear of 5
+```
+
+Read as cells that is a starved pool; read as stages it is a healthy one. **Stages
+is the correct unit, and it is the SORT KEY that makes it so.** Since commit
+`a3e5be2`, `_SERVE_SQL` orders `stage_id DESC`, then *unread by this kid*, and only
+then `(theme_id = :theme) DESC` — so a child at stage 7 who has read all three
+dragons stories is handed an unread animals story **at stage 7** before the ladder
+considers dropping a stage. The requested theme is a preference over the whole
+stage's pool, not a partition of it.
+
+`run_coverage_check` gains a per-stage assertion that **imports**
+`STORIES_REQUIRED_AT_STAGE` rather than restating it — the whole defect was one
+number living in two files — plus a stage-total column on the table, which is the
+column whose absence *is* the finding. Both floors are reported before either sets
+the exit code; short-circuiting on the pair gate would send an operator to
+`make warm` and back. Green today, and red the moment the theme list shrinks to one
+(3 < 5), which is the scenario the test pins.
+
+**`TARGET_PER_PAIR` is deliberately NOT raised to 5.** That would demand 165
+stories against today's 119 — roughly 46 stories of real API spend — to buy what
+the unread-by-this-kid sort key already delivers for nothing.
+
+### 14.32 — `api/catalog.py` quoted the serve order with the middle key missing
+
+The module docstring said `_SERVE_SQL` orders `stage_id DESC, (theme_id = :theme)
+DESC`. Still true, and incomplete since `a3e5be2`: the unread-by-this-kid key sits
+between them, above the theme preference. That omission is not cosmetic — it is
+precisely the fact that makes 14.31's unit the stage rather than the cell, and the
+paragraph was being read as an argument that per-theme depth is what a child's
+supply is made of.
+
+### Verification
+
+```
+pytest -q -p no:randomly                 1133 passed, 3 skipped, against a PRIVATE
+                                         copy (STATE.md's rule — a concurrent agent
+                                         was writing the shared one). Baseline 1076/3;
+                                         the rest is this pass plus a concurrent
+                                         agent's own additions.
+ruff check storyforge tests              All checks passed
+--check-coverage                         GREEN — 33/33 pairs, 11/11 stages
+--check-story-words                      RED — 248 of 326 slots (the finding)
+make eval EVAL_ARGS="--estimate-only"    $3.10 / $6.20 / $12.41, no API call
+```
+
+Sabotage, every check run against a broken source and confirmed red:
+
+| broken | red |
+|---|---|
+| `story_word_is_eligible` → always `True` | 5 tests |
+| `load_vocabulary` stops filtering | `test_the_offer_contains_only_words_inside_the_band` |
+| `chip_offences` reports nothing | `test_the_gate_finds_a_known_bad_chip_...` |
+| `STORY_WORD_MAX_LOOKAHEAD` 3 → 99 | 2 tests |
+| `stage_gaps` → always `[]` | 4 tests |
+| stage floor stops setting the exit code | 2 tests |
+| `stage_gaps` restates the literal `3` | 3 tests |
+| `_prune_launches` → `_prune`, carry removed | 2 tests |
+
+### Not fixed here, and why
+
+- **The 248 out-of-band chips already in the pool.** There is no free repair (see
+  14.20) and the remedy is regeneration, which is real money. The gate names every
+  one of them and exits non-zero; it is red honestly rather than quietly repaired
+  in a direction that would leave a child a word with neither a chip nor a hope of
+  decoding it.
+- **The seven inert bank rows and §5.5's "5-8 candidates".** Both are curation of
+  a seed file. Reported on every gate run, not deleted.
+- **`min_stage` is not re-derived.** It remains the semantic floor, which is a
+  judgement the decoder cannot make. Only the two entries that emptied a cell moved.
+- **The eval's concurrent-mode budget check still runs between stage batches**, so
+  a batch can overshoot `budget_usd` by up to one stage. Pre-existing, deliberate,
+  documented at the call site — and a different question from 14.30, which is about
+  the cumulative ceiling under-counting rather than about check granularity.
+
 ## Phase 8 — the title passed none of §13's three layers, and five schemas typed the ladder's length (17.1-17.3)
 
 Three findings from one adversarial pass. The first is a child-safety claim the
