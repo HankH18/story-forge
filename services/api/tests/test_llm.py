@@ -265,6 +265,143 @@ def test_no_gate_failure_can_produce_an_empty_problem_list():
         assert stated.lstrip().startswith("- "), name
 
 
+# --- the undeclared story word (DEVIATIONS 9.75-9.78) ------------------------
+# The other half of 9.42. `validate_draft` honours only the intersection of the
+# model's claim with the OFFERED bank (STATE invariant 2), so a story word the
+# model used but forgot to list is scored as an ordinary word and arrives in
+# `report.violations`. The violations loop then told the model to delete a word
+# the SAME message offered it, with `nearest_allowed` proposing "by, but, back,
+# before, best" for a burrow. Live: 131 violation tokens across recorded attempts
+# were offered story words for their own theme+stage, and story 7342 (stage 10,
+# animals, warm, story_words={}) serves four of them to children today.
+
+#: Stage 1 cannot sound out `cave`/`fire`/`wings`, so an UNDECLARED one lands in
+#: `report.violations` — which is the whole defect. `dragon` is decodable there,
+#: so it can be declared to fill a cap slot without becoming a violation itself.
+def _undeclared_cases():
+    return {
+        # nothing wrong but the missing declaration
+        "undeclared": (_rw_vocab(stage_id=1), "The dog sat in the cave.", []),
+        # ...alongside a word that really is unreadable
+        "undeclared+violation": (
+            _rw_vocab(stage_id=1),
+            "The dog ran to the shed. The cat sat in the cave.",
+            [],
+        ),
+        "undeclared+oov": (
+            _rw_vocab(stage_id=1),
+            "The dog ran to the zorp. The cat sat in the cave.",
+            [],
+        ),
+        # the cap is already full, so the fourth word genuinely has to go
+        "undeclared+cap_full": (
+            _rw_vocab(stage_id=1),
+            "The dragon sat in the cave. It had fire. It had big wings.",
+            ["dragon", "cave", "fire"],
+        ),
+    }
+
+
+def test_no_bullet_ever_orders_the_deletion_of_a_word_the_same_message_offers():
+    """DEVIATIONS 9.75. The guard is against the CLASS, not the instance, and it
+    is the assertion that was missing: the five `_rw` cases above never put a
+    story word in `report.violations` at all, so nothing pinned this.
+
+    Every replace-instruction bullet has the shape `- "word" - why. Replace with
+    one of: ...`. No head of one may be a word the STORY WORDS bank three lines
+    later offers, because the block also closes with "every replacement must come
+    from the permitted, sight, or story lists" — the same message would be
+    ordering a deletion and permitting the deleted word in one breath."""
+    from storyforge.pipeline import passes_gate
+
+    head = re.compile(r'^- "([^"]+)" — ', re.M)
+    for name, (vocab, body, claim) in _undeclared_cases().items():
+        report, block = _rw(body, claim, vocab=vocab)
+        assert passes_gate(report) is False, name
+        offered = {w.lower() for w in vocab.story_words}
+
+        # NOT VACUOUS: this case really does hand an offered story word to the
+        # bullet builder. Without this the guard passes on any input at all.
+        hit = {w.word.lower() for w in report.violations} & offered
+        assert hit, f"{name} was supposed to violate on an OFFERED story word"
+
+        proposed = {m.lower() for m in head.findall(block)}
+        assert not (proposed & offered), (
+            f"{name}: the block orders the deletion of {sorted(proposed & offered)}, "
+            f"which it offers as a story word in the same message"
+        )
+        # and the word is still ACCOUNTED FOR — deleting the bullet is not a fix
+        for word in hit:
+            assert f'"{word}"' in block, f"{name} stopped mentioning {word}"
+
+
+def test_declaring_the_story_word_is_the_whole_difference():
+    """The counterfactual, measured rather than argued: the reason the bullet must
+    not say "cannot be sounded out" is that the identical text passes the gate
+    untouched once the word is declared. Nothing about the prose was unreadable —
+    one field of `story_words_used` was empty."""
+    from storyforge.pipeline import DECODABILITY_GATE, passes_gate, validate_draft
+
+    vocab, body = _rw_vocab(stage_id=1), "The dog sat in the cave."
+    silent = validate_draft(vocab, body, [])
+    declared = validate_draft(vocab, body, ["cave"])
+
+    assert passes_gate(silent) is False and silent.decodability < DECODABILITY_GATE
+    assert passes_gate(declared) is True and declared.decodability == 1.0
+    assert declared.distinct_story_words == ["cave"]
+
+
+def test_adopting_an_undeclared_story_word_never_breaks_the_cap():
+    """The trap in fixing 9.75 naively. Telling a model that already declared
+    three story words to declare a fourth trades a decodability failure for a cap
+    failure — one gate condition fixed by breaking another. The declared keepers
+    take their slots first; a fourth word is EVICTED, not adopted, and the count
+    the model is shown is the number its text actually holds (4), not the number
+    it declared (3)."""
+    from storyforge.pipeline import (
+        MAX_STORY_WORDS,
+        story_word_verdict,
+        undeclared_story_words,
+    )
+
+    vocab, body = _rw_vocab(stage_id=1), (
+        "The dragon sat in the cave. It had fire. It had big wings."
+    )
+    claim = ["dragon", "cave", "fire"]
+    report, block = _rw(body, claim, vocab=vocab)
+
+    keep, drop = story_word_verdict(report)
+    assert (keep, drop) == (["cave", "dragon", "fire"], [])  # cap already full
+    assert undeclared_story_words(report, vocab) == ["wings"]
+
+    # `wings` is not adopted — there is no slot for it — so it joins the drop side
+    assert "You used 4 DIFFERENT story words" in block
+    assert 'Remove every use of "wings"' in block
+    assert 'add it to story_words_used' not in block
+    # and the kept set is still exactly the cap, never one over
+    kept = block.split("KEEP ", 1)[1].split(" and use each", 1)[0]
+    assert kept.count('"') // 2 == MAX_STORY_WORDS
+
+
+def test_the_theme_sentence_is_correct_english_for_every_seeded_slug():
+    """DEVIATIONS 9.78. `f"a {theme} story"` interpolates the SLUG, so `animals`
+    shipped "It must still be a animals story." on every rewrite — inside a
+    request whose cached `SYSTEM_RULES` prefix demands "every sentence must be
+    correct English ... no word is missing or left over" (rule 4)."""
+    for theme, article in (("dragons", "a"), ("space", "a"), ("animals", "an")):
+        _report, block = _rw(
+            "The dog ran to the shed.", [], vocab=_rw_vocab(stage_id=1), theme=theme
+        )
+        assert f"It must still be {article} {theme} story." in block
+        # the theme still reaches the model, which is what the sentence is for
+        assert f"{theme} story" in block
+    # the shipped defect, named so it cannot come back
+    _report, block = _rw(
+        "The dog ran to the shed.", [], vocab=_rw_vocab(stage_id=1), theme="animals"
+    )
+    assert "a animals story" not in block
+
+
 def test_the_cap_instruction_drops_one_word_and_keeps_the_rest():
     """§5.5 and STATE invariant 3. The cap counts DISTINCT words and repetition is
     correct decodable-reader behaviour, so "use fewer story words" is the defect

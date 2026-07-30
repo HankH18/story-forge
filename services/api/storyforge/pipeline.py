@@ -261,6 +261,40 @@ def story_word_verdict(
     return ranked[:cap], ranked[cap:]
 
 
+def undeclared_story_words(report: TextReport, vocab: Vocabulary) -> list[str]:
+    """The OFFERED story words the text uses but the model never declared.
+
+    DEVIATIONS 9.75, the other half of `story_word_verdict`. `validate_draft`
+    honours only the intersection of the model's `story_words_used` claim with
+    the offered bank (STATE invariant 2 — the claim is untrusted), so a story
+    word the model forgot to list is scored as an ordinary word, fails to align
+    against the stage's taught GPCs, and lands in `report.violations`. It is not
+    unreadable; it is undeclared, and one empty field is the whole difference:
+    the same stage-10 text measures 62.5% having used `burrow` silently and
+    100.0% having said so.
+
+    Ranked by the same rule `story_word_verdict` uses — occurrences descending,
+    alphabetical tie-break — so both halves of the story-word budget are settled
+    deterministically and a test can assert the outcome.
+    """
+    offered = {w.lower() for w in vocab.story_words}
+    counts: dict[str, int] = {}
+    for w in report.violations:
+        if w.word.lower() in offered:
+            counts[w.word] = counts.get(w.word, 0) + 1
+    return sorted(counts, key=lambda w: (-counts[w], w))
+
+
+def _article(word: str) -> str:
+    """`a` or `an` for a theme SLUG (DEVIATIONS 9.78).
+
+    `f"a {theme} story"` shipped "a animals story" on every `animals` rewrite,
+    inside a request whose cached `SYSTEM_RULES` prefix tells the model that
+    "every sentence must be correct English".
+    """
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
 def build_rewrite_block(
     report: TextReport, vocab: Vocabulary, body: str, theme: str = ""
 ) -> str:
@@ -294,9 +328,48 @@ def build_rewrite_block(
     the ask is "drop the extra one, keep repeating the rest" and never "use fewer
     story words". Removing the theme from a themed story is the defect, not a
     resolution of it.
+
+    **The FOURTH thing it could not say (DEVIATIONS 9.75-9.77).** 9.42 covered the
+    story words the model DECLARED; the opposite mistake — using an offered story
+    word and forgetting to list it — arrived here as an ordinary violation, and
+    the loop below told the model to delete it. One message said `burrow` was
+    unreadable and must go, offered `burrow` in the STORY WORDS bank, and closed
+    with "every replacement must come from the permitted, sight, or story lists",
+    while `nearest_allowed` proposed `by, but, back, before, best` for a burrow.
+    Live: 131 violation tokens across recorded attempts were offered story words
+    for their own story's theme and stage, and story 7342 (stage 10, animals,
+    `warm`) is serving four of them to children with `story_words` empty.
+
+    So the violations are partitioned on membership of the bank first. A word
+    outside the bank keeps its bullet unchanged. A word inside it never reaches
+    `nearest_allowed` — it is named as a story word the model already owns.
+
+    The trap is the cap: telling a model that already declared three to declare a
+    fourth trades a decodability failure for a cap failure. Both directions are
+    therefore settled against ONE budget — declared keepers take their slots
+    first, undeclared words take what is left, and the remainder joins `drop`,
+    because with the cap full the honest instruction really is to remove them.
+    When nothing is undeclared the cap strings are byte-identical to 9.42's.
     """
+    offered = {w.lower() for w in vocab.story_words}
+    keep, drop = story_word_verdict(report)
+    undeclared = undeclared_story_words(report, vocab)
+    adopt = undeclared[: max(0, MAX_STORY_WORDS - len(keep))]
+    evict = undeclared[len(adopt) :]
+    #: what the model ends up holding, declared or not — the cap's only books
+    kept, dropped = keep + adopt, drop + evict
+
     lines = []
-    for w in report.violations:
+    for w in adopt:
+        lines.append(
+            f'- "{w}" is one of your STORY WORDS, not a word this child cannot '
+            f"read. Keep it exactly as it is and add it to story_words_used — a "
+            f"declared story word is free, because the child is shown a picture "
+            f"for it and hears it read aloud."
+        )
+
+    unreadable = [w for w in report.violations if w.word.lower() not in offered]
+    for w in unreadable:
         if w.missing_gpcs:
             why = f"uses letter-sounds not yet taught ({', '.join(w.missing_gpcs)})"
         else:
@@ -311,14 +384,13 @@ def build_rewrite_block(
     if oov:
         lines.append(f"- Unknown words that must be removed entirely: {', '.join(oov)}")
 
-    keep, drop = story_word_verdict(report)
-    if drop:
+    if dropped:
         lines.append(
-            f"- You used {len(keep) + len(drop)} DIFFERENT story words "
-            f"({_quoted(keep + drop)}), and at most {MAX_STORY_WORDS} different ones "
-            f"are allowed. KEEP {_quoted(keep)} and use each of them as often as you "
+            f"- You used {len(kept) + len(dropped)} DIFFERENT story words "
+            f"({_quoted(kept + dropped)}), and at most {MAX_STORY_WORDS} different ones "
+            f"are allowed. KEEP {_quoted(kept)} and use each of them as often as you "
             f"like — repeating a story word is free and costs nothing. Remove every "
-            f"use of {_quoted(drop)} instead, and say that part with a permitted or "
+            f"use of {_quoted(dropped)} instead, and say that part with a permitted or "
             f"sight word. Do NOT drop the story words you are keeping: the story "
             f"still has to be about them."
         )
@@ -336,12 +408,20 @@ def build_rewrite_block(
             f"without changing what the story is about."
         )
 
-    if report.violations or oov:
+    # 9.44 made the headline conditional so it could never be false; 9.77 keeps it
+    # that way. A story whose only violations were undeclared story words did NOT
+    # use words this child cannot read, so that sentence is unreachable for it.
+    if unreadable or oov:
         headline = "Your story used words this child cannot read. Rewrite it."
-    elif drop:
+    elif dropped:
         headline = (
-            f"Your story is readable, but it used {len(keep) + len(drop)} DIFFERENT "
+            f"Your story is readable, but it used {len(kept) + len(dropped)} DIFFERENT "
             f"story words where at most {MAX_STORY_WORDS} are allowed. Rewrite it."
+        )
+    elif adopt:
+        headline = (
+            "Your story is readable, but it used story words without declaring "
+            "them. Rewrite it."
         )
     else:
         headline = "Your story did not pass the reading check. Rewrite it."
@@ -357,7 +437,7 @@ def build_rewrite_block(
         if offered
         else ""
     )
-    about = f" It must still be a {theme} story." if theme else ""
+    about = f" It must still be {_article(theme)} {theme} story." if theme else ""
 
     return (
         f"{headline}\n\n"

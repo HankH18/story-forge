@@ -8950,3 +8950,218 @@ reintroduces.
   database that outlives its transaction, nothing touched on DigitalOcean. Live
   spend $0.00.** Every measurement above is from the owned-pool fixture, whose
   transaction is rolled back, or from a read-only `EXPLAIN ANALYZE`.
+
+## Phase 8 — the rewrite prompt ordered the model to delete a word it offered in the same message (9.75-9.78)
+
+Numbered in the 9.40-9.45 block's family because this is **AUDIT-PHASE7 F1
+revisited**: the same finding — *"a rewrite prompt that is provably incapable of
+stating the failure it was invoked for, whose measured outcome is the deletion of
+the theme"* — in the one branch F1's fix did not cover. Logged **before** the
+change. Every number below was measured in this tree: the reproduction is
+DB-free and makes no model call, and the live figures are read-only SQL over the
+`storyforge` Postgres. Live spend $0.00.
+
+**9.75 — `build_rewrite_block` could describe every way the GATE says no, and
+still could not describe the commonest way a STORY WORD goes wrong: the model
+used one and forgot to declare it.**
+
+9.42's `story_word_verdict` covers the story words the model DID declare — too
+many of them, and the code picks which one goes. Nothing covered the other
+direction. A story word the model used without listing it in `story_words_used`
+is not honoured by `validate_draft` (STATE invariant 2: the claim is intersected
+with the OFFERED bank, and an unclaimed word is never in the claim), so it falls
+through to normal scoring, fails to align against the stage's GPCs, and arrives
+in `report.violations` as an ordinary undecodable word. The violations loop then
+did the one thing it must never do to a themed story — it told the model to
+delete it:
+
+```
+$ cd services/api && .venv/bin/python - <<'PY'   # no DB, no API call, $0
+from storyforge.pipeline import Vocabulary, validate_draft, passes_gate, build_rewrite_block
+v = Vocabulary(stage_id=10, stage_name="Stage 10", target_min=120, target_max=200,
+    allowed_words=["by","but","back","before","best","rabbit","forest","tree","big","day"],
+    sight_words=["the","a","to","and","it","is","in","for","of"],
+    story_words={"burrow":"a hole an animal lives in","rabbit":"a small animal with long ears"})
+body = "The rabbit had a burrow. The rabbit ran to the burrow. It is a big burrow."
+print(validate_draft(v, body, []).decodability)          # used `burrow`, did not declare it
+print(validate_draft(v, body, ["burrow"]).decodability)  # the one-field fix
+PY
+0.625   gate FAIL
+1.0     gate PASS
+```
+
+and the block that failure produced, verbatim:
+
+```
+PROBLEMS (3):
+- "burrow" — cannot be sounded out with any taught letter-sounds. Replace with one of: by, but, back, before, best
+- "burrow" — cannot be sounded out with any taught letter-sounds. Replace with one of: by, but, back, before, best
+- "burrow" — cannot be sounded out with any taught letter-sounds. Replace with one of: by, but, back, before, best
+
+STORY WORDS — at most 3 DIFFERENT ones, only from this list:
+- burrow: a hole an animal lives in
+- rabbit: a small animal with long ears
+...
+Keep the same story ... Change only what is listed. Every replacement must come
+from the permitted, sight, or story lists.
+```
+
+**One message says `burrow` is unreadable and must go, offers `burrow` as a
+permitted story word, and says every replacement must come from the story list.**
+That is F1's shape exactly — a prompt that cannot state its own failure — and the
+counterfactual is measured, not argued: the identical text goes from 62.5% (gate
+FAIL) to 100% (gate PASS) on the strength of one field the model left empty. The
+replacement list is the sharpest part of it: `nearest_allowed("burrow", …)`
+returns same-initial-letter neighbours, so the prompt proposes `by, but, back,
+before, best` for a burrow.
+
+**9.76 — it is not hypothetical, and one instance is child-facing today.**
+
+Read-only SQL over `storyforge`, counting violation tokens across every recorded
+attempt whose word is an OFFERED story word for that story's own theme at or
+below its own stage:
+
+| word | violation tokens | stories |
+|---|---|---|
+| burrow | 67 | 13 |
+| moon | 26 | 10 |
+| stars | 14 | 8 |
+| feathers | 8 | 6 |
+| astronaut / fire | 4 | 2 / 3 |
+| cave | 3 | 2 |
+| wings / whiskers | 2 | 2 / 1 |
+| scales | 1 | 1 |
+
+**131 tokens in all.** One survived into the pool a child can be served:
+
+```
+id=7342  stage_id=10  theme=animals  status=warm  decodability=0.9608  story_words={}
+  attempt 0  generate  dec 0.9474  violations ["many","liked","near","quiet"]
+  attempt 1  rewrite   dec 0.9608  violations ["burrow","burrow","burrow","burrow"]   <- served
+```
+
+`story_words` is EMPTY and `burrow` is spending four of that story's violation
+budget. `burrow` is in the bank for `animals` from `min_stage=2` with the gloss
+*"a hole an animal lives in"*. So the story clears §1's gate by 0.6 points while
+serving, as an unreadable word, a word for which the product holds a gloss and a
+chip — §11's *"story words render as chips with picture + auto-audio on first
+appearance"*, and §18's *"themes lean on story words + pictures for interest"*.
+
+**9.77 — the fix: partition the violations, and give the cap ONE honest set of
+books.**
+
+`build_rewrite_block` now splits `report.violations` on membership of
+`vocab.story_words` before it builds a single bullet. A word that is NOT in the
+bank keeps today's bullet unchanged, `nearest_allowed` and all. A word that IS in
+the bank never reaches `nearest_allowed`; it is named as a story word the model
+already owns and told to declare it.
+
+The trap in doing only that is the cap. §4 allows three DIFFERENT story words,
+and telling a model that already declared three to declare a fourth converts a
+decodability failure into a cap failure — fixing one gate condition by breaking
+another, which is the failure mode this file exists to remember. So the two
+directions are settled against ONE budget rather than separately:
+
+* `story_word_verdict` is UNCHANGED and still answers *"of the words it declared,
+  which stay"* → `keep` / `drop`;
+* the undeclared story words are ranked by the same rule (occurrences desc,
+  alphabetical tie-break, so the choice is deterministic and testable) and take
+  whatever slots `keep` leaves — `adopt` for the ones that fit, and the remainder
+  simply joins `drop`, because with the cap full the honest instruction is to
+  remove them;
+* the cap bullet and the cap headline then count `keep + adopt` against
+  `drop + evict`, so the number the model is shown is the number of distinct
+  story words its text actually contains — declared or not. When nothing is
+  undeclared, `adopt` and `evict` are empty and both strings are byte-identical
+  to 9.42's, which is why the existing cap tests are untouched.
+
+The headline is conditional for the same reason 9.44 made it conditional: a
+story whose only violations were undeclared story words did NOT *"use words this
+child cannot read"*, so that sentence is no longer reachable for it.
+
+**9.78 — `a animals story`, in a prompt whose rule 4 demands correct English.**
+
+`about = f" It must still be a {theme} story."` interpolates the theme SLUG, and
+two of the three slugs make that sentence wrong: it has been shipping *"It must
+still be a animals story."* on every `animals` rewrite. `SYSTEM_RULES` rule 4 is
+*"Every sentence must be correct English ... no word is missing or left over"*,
+quoted at the model in the cached prefix of the same request. The article is now
+chosen by the slug's first letter. Only the article is touched: `a dragons story`
+is a plural attributive, not an article error, and the tests that assert the
+theme reaches the model assert on `"dragons story"` / `"animals story"`, which
+both remain literal substrings — so no existing assertion moves and
+justify-test-edit is not engaged.
+
+**NOT changed: `llm/generate.py`'s `build_request_block`, which renders the same
+`Write a {theme} story.`** It has the identical article bug. It is also the
+prompt every first draft is generated from, on the path that spends money, and
+9.78 has no before/after measurement for generation quality. Moving it is a
+separate change with its own measurement, not a rider on this one. Recorded here
+so it is not lost.
+
+**What the fix does to the live instance.** Story 7342's own text, re-scored
+against the vocabulary its own stage and theme actually offer (read-only load
+from the live Postgres, no model call):
+
+```
+as persisted (story_words={}):  dec=0.9608  gate=True  violations=['burrow' x4]
+declaring 'burrow' alone:       dec=1.0000  gate=True
+
+headline now: Your story is readable, but it used story words without declaring them. Rewrite it.
+PROBLEMS (1):
+- "burrow" is one of your STORY WORDS, not a word this child cannot read. Keep it
+  exactly as it is and add it to story_words_used — a declared story word is free,
+  because the child is shown a picture for it and hears it read aloud.
+...It must still be an animals story.
+```
+
+Three bullets became one, the one that is left is true, and the theme sentence is
+grammatical. Note that 7342 CLEARS §1's gate either way — 0.9608 is above 0.95 —
+so this was never a gate story. It is a story serving a chip word as an
+unreadable word, which is a §11/§18 defect the gate cannot see.
+
+**Tests — four added, none changed.** They sit beside
+`test_no_gate_failure_can_produce_an_empty_problem_list`, which is 9.45's guard
+against the same class.
+
+- `test_no_bullet_ever_orders_the_deletion_of_a_word_the_same_message_offers` —
+  the missing assertion, and the one this file exists for. It regex-matches the
+  head of every `- "word" — ... Replace with one of:` bullet across four cases and
+  asserts none is a word `vocab.story_words` offers. **It asserts its own premise
+  first** (`report.violations` ∩ offered bank must be non-empty), because the
+  five pre-existing `_rw` cases have story words `{dragon, cave, wings, fire}` and
+  violations only `shed`/`zorp` — a guard written over those inputs would have
+  been vacuous from birth, which is the trap 8.50-8.56 was.
+- `test_declaring_the_story_word_is_the_whole_difference` — the counterfactual as
+  an assertion, so the bullet's claim stays honest: same text, gate FAIL at 0.75
+  and gate PASS at 1.0, on one field.
+- `test_adopting_an_undeclared_story_word_never_breaks_the_cap` — the naive fix,
+  refused. Three declared + one undeclared: the fourth is EVICTED, the KEEP list
+  is still exactly `MAX_STORY_WORDS`, and the count shown is 4.
+- `test_the_theme_sentence_is_correct_english_for_every_seeded_slug` — all three
+  seeded slugs, and `"a animals story" not in block` by name.
+
+**Sabotage sweep — three, each restored and verified restored.**
+
+| sabotage | the defect it stages | result |
+|---|---|---|
+| `no_partition` | `undeclared = []` + `unreadable = list(report.violations)` — the shipped code | **2 RED**: `AssertionError: undeclared: the block orders the deletion of ['cave'], which it offers as a story word in the same message` |
+| `cap_overrun` | `adopt = undeclared` — the naive fix, ignoring the slots | **1 RED**: cap test, headline came back "used story words without declaring them" with a fourth word adopted |
+| `article` | `_article` → `return "a"` | **1 RED**: `'It must still be an animals story.' in '... be a animals story. ...'` |
+
+`no_partition` leaving the cap test green and `cap_overrun` leaving the class
+guard green is the point: the two failures are independent, so neither test is
+carrying the other.
+
+**Gates.**
+- `cd services/api && .venv/bin/python -m pytest -p no:randomly` — **1025 passed,
+  3 skipped**, against a measured baseline of **1021 passed, 3 skipped** on
+  `8690a5a`. Exactly the four tests claimed, and nothing else moves. (The task
+  brief said 1008; that number is stale, as 9.74 already recorded.)
+- `.venv/bin/ruff check storyforge tests scripts` — all checks passed.
+- `cd apps/web && bunx tsc --noEmit && bun test src` — clean, **232 pass, 0
+  fail**. No web file is touched.
+- **No `make warm`, no `make eval`, no `make eval-smoke`, no model call, nothing
+  written to any database, nothing touched on DigitalOcean. Live spend $0.00.**
+  Every live figure above is a read-only `SELECT`; the re-score loads the
+  vocabulary and runs the pure decoder in-process.
