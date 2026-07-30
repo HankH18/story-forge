@@ -43,7 +43,6 @@
 
 import { useEffect, useState } from 'react'
 import { postAnswer, type Question } from '../lib/api'
-import { cutoutFor } from '../lib/art'
 import { localGrade } from '../lib/grade'
 import { cueWord, spokenInstruction, taskKind } from '../lib/questions'
 import { speak } from '../lib/speech'
@@ -276,14 +275,19 @@ export default function Comprehension({
           </div>
         ) : (
           // mcq2: the prompt IS the question and it is a real sentence, so it
-          // leads. Story words are chipped — `QuestionDTO.story_words` exists
-          // precisely so a stage-1 reader is not handed "rocket" bare.
-          <StoryText
-            text={question.prompt}
-            size={size}
-            storyWords={question.story_words}
-            assetFor={cutoutFor}
-          />
+          // leads.
+          //
+          // NO CHIPS, and the comment that used to sit here said the opposite
+          // while passing two props that could not render one (DEVIATIONS 13.6).
+          // §07's chip sentence ends "...then behaves like any tappable word",
+          // and by the question screen the introduction has happened: 11.26
+          // decided that comprehension prompts render no chips, and every word
+          // here is still tappable and still speaks (§11), which is the safety
+          // net for a reader who has forgotten it. The second reason is louder —
+          // a chip auto-speaks on first appearance, this screen already speaks
+          // the instruction, and §11 allows exactly one utterance at a time. The
+          // one that would lose is the sentence saying what to do.
+          <StoryText text={question.prompt} size={size} />
         )}
 
         <ul
@@ -314,15 +318,10 @@ export default function Comprehension({
             and it is not available: §03 puts an absolute 28px floor under story
             text and nothing in `StoryText` may go below it, and tinting it to
             ink-500 would land at ~6.5:1 against paper where §11 requires ≥7:1
-            for story text. Reading order is the one axis with no rule on it. */}
-        {isTapWord ? (
-          <StoryText
-            text={question.prompt}
-            size={size}
-            storyWords={question.story_words}
-            assetFor={cutoutFor}
-          />
-        ) : null}
+            for story text. Reading order is the one axis with no rule on it.
+
+            No chips here either, for the reasons above the mcq2 prompt. */}
+        {isTapWord ? <StoryText text={question.prompt} size={size} /> : null}
       </main>
     </div>
   )

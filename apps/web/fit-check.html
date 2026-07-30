@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Story Forge — §10 fit check</title>
+  </head>
+  <body>
+    <!--
+      The measurement harness for `bun run fit-check` (DEVIATIONS 13.2).
+
+      It is a SECOND Vite entry, emitted only when SF_FIT_HARNESS is set, so a
+      normal `bun run build` ships exactly what it shipped before. See
+      vite.config.ts.
+    -->
+    <div id="root"></div>
+    <script type="module" src="/fit-check/main.tsx"></script>
+  </body>
+</html>

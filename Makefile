@@ -11,7 +11,7 @@ WEB := apps/web
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
         migrate seed precompute warm warm-check promote-check prompt-check \
-        mcq2-check warm-plan eval eval-smoke codegen clean
+        mcq2-check fit-check warm-plan eval eval-smoke codegen clean
 
 # `[0-9]` is load-bearing: `mcq2-check` was invisible to `make help` without it,
 # which is a target that exists and cannot be discovered — the same class as a
@@ -130,6 +130,20 @@ prompt-check: ## Refuse a pool serving tap-a-word instructions no current frame 
 # empty a story) followed by `--backfill` (DEVIATIONS 11.99-11.103).
 mcq2-check: ## Refuse a pool serving two-choice questions answerable without reading the story
 	cd $(API) && uv run python -m storyforge.warm --check-mcq2
+
+# The FIFTH gate, and the first one that looks at what a child SEES rather than
+# at what the database holds. §10: "One segment per screen, no scrolling on
+# tablet — if text overflows, generation length is wrong, not the layout." Four
+# green gates over a pool in which the LAST page of every story at stages 8-11 —
+# the page carrying the ending — did not fit the screen, and clipped BETWEEN
+# lines, so it read as finished under a `Finish` button (DEVIATIONS 13.1-13.3).
+# It renders every servable segment through the real `ReadingView` in the real
+# production bundle at both §10 viewports and both §11 reading sizes. Free: one
+# SQL query, a build, and a headless browser; no API client. The remedy is a
+# per-stage length budget on GENERATION — never a smaller font (§03 floors it at
+# 28px) and never a shorter tap target (§11 floors it at 48px).
+fit-check: ## Refuse a pool whose pages do not fit the §10 screen at either reading size
+	cd $(WEB) && bun run fit-check
 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run

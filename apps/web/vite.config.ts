@@ -18,8 +18,25 @@ declare const process: { env: Record<string, string | undefined> }
  */
 const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:8000'
 
+/**
+ * The §10 fit-check harness is a SECOND build entry, and it is opt-in.
+ *
+ * `scripts/fit-check.mjs` measures every servable segment against the real
+ * `ReadingView` in the real production bundle (DEVIATIONS 13.2) — a hand-written
+ * HTML replica would measure a layout the app does not have, and drift silently
+ * the first time either side is edited. So the harness must be compiled by this
+ * config. It must equally never reach a deploy, so it is emitted only when
+ * `SF_FIT_HARNESS` is set, which only `bun run fit-check` sets. With the flag
+ * unset this object is empty and `bun run build` emits exactly what it always
+ * did.
+ */
+const FIT_HARNESS = Boolean(process.env.SF_FIT_HARNESS)
+
 export default defineConfig({
   plugins: [react()],
+  build: FIT_HARNESS
+    ? { rollupOptions: { input: { index: 'index.html', 'fit-check': 'fit-check.html' } } }
+    : {},
   server: {
     port: Number(process.env.VITE_DEV_PORT ?? 5173),
     strictPort: true,

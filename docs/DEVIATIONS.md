@@ -11405,3 +11405,144 @@ cd services/api && DATABASE_URL=…/sfunread .venv/bin/python -m pytest -p no:ra
 
 Repo-wide `ruff` is red on another agent's in-flight `llm/moderate.py`, which is
 not this change's.
+
+### PROVED — driven in a real browser, dev AND the production bundle
+
+Environment, because "verified" without it is a claim about a screenshot: a
+second API on `:8091` started with `DEMO_BYPASS_AUTH=false` and checked before
+anything else — `GET /api/health` 200, `GET /api/kids` with **no** token 401,
+with a **garbage** token 401. A Vite dev server on `:5191` and `vite preview`
+on `:4194` both proxied at it. Signed in with a Clerk sign-in ticket for
+`user_3HBc8LNBQdWzlwbgKrzXYdH1SDa`; the session was revoked afterwards. The
+reader is kid 19161 "Ten", added at stage 10 through the real add-kid form, plus
+kid 1648 at stage 1.
+
+**1. The clipped last page — before.** `/read/19161`, animals, 1024x768. Pages
+1-6 `scrollHeight == clientHeight == 583`. Page 7, button `Finish`:
+`scrollHeight 1776 / clientHeight 583`, **73 word tokens entirely below the clip
+edge**, beginning "to look at the water", ending "...was a good place for the
+rabbit". The clip fell between lines; nothing was sliced.
+
+**2. After.** Same page: button `More words ↓`, `aria-label="more words on this
+page"`, hand-lettered `keep reading` + gold-700 chevron in the footer, and
+`box-shadow: rgba(43,33,24,0.35) 0px -10px 10px -10px inset` on the reading box.
+Three presses scrolled 0 → 511 → 1022 → 1265 (`scrollTop + clientHeight ==
+scrollHeight`), at which point the button became `Finish →` and the shadow went.
+The child reads "The rabbit did not go far again." before `Finish` exists.
+`ArrowRight` behaved identically (511 → 1022 → end, then advanced), so the
+keyboard cannot skip what the button will not. Pages 1-6 still show `Next` on
+arrival — the affordance is invisible on a page that fits.
+
+**3. `atEnd` is about WORDS, not about `scrollHeight`.** Nine live segments make
+the box scrollable by exactly 6px at 40px portrait with every word on screen —
+`pb-8` is 32px of deliberate blank space and `.sf-word` carries 12px of padding
+plus 5px of margin under its glyph box. Measured on story 1662 page 7: last word
+token bottom **892**, box bottom **924**, raw overflow 6px, button `Finish →`.
+Crying "More words" over 32px of blankness would spend the credibility of the one
+control the child has, so the test is the content bottom, and the gate's test is
+the deepest text rect. Story 7343 page 7, the real case, is unaffected: 1254px of
+text below the edge in the same portrait viewport, button `More words ↓`.
+
+**4. The celebration cutouts.** Before: `[{"t":"cave","img":false},...]`.
+After, on the same three-word card: `[{"t":"burrow","img":true},
+{"t":"forest","img":true},{"t":"rabbit","img":true}]`, amber ground unchanged.
+Verified in `dist/` too. Sabotage: deleting `assetUrl={cutoutFor(word)}` gives
+`TS2741: Property 'assetUrl' is missing`; passing `storyWords` to `StoryText`
+without the other three gives `TS2322 ... missing assetFor, shouldAnnounce,
+onAnnounced`.
+
+**5. §06's tinted fallback.** Story 8897 page 1 ("Sam sat.") — the page reported
+as a blank striped half-screen — now renders `/assets/art/v1/dragons/cover.svg`
+at computed `opacity: 0.4`, `object-fit: cover`, `position: absolute`,
+`naturalWidth 800`, over the unchanged `.sf-stripes` gradient, with the frame's
+`aria-label` still "a picture is on its way" and the tint `aria-hidden`.
+
+**6. The spent choice card, sampled from the PNG rather than read off the
+stylesheet** — the last finding in this area was a bounding-box artefact that was
+never painted, so both states were measured on real pixels:
+
+```
+before (opacity .6 + ink-500, reconstructed in the same browser):
+        glyph rgb(167,152,133) on rgb(248,238,218)  = 2.44:1
+after   glyph rgb( 74, 58, 42) on rgb(246,234,210)  = 9.13:1
+idle    glyph rgb( 43, 33, 24) on rgb(255,251,240)  = 15.23:1
+computed opacity 1, border-style dashed, "try again" also rgb(74,58,42)
+```
+
+**7. STATE invariant 7 — the production bundle, not just dev.** `bun run build`
+then `vite preview`, and every class this pass added survives the purge:
+the arbitrary-value inset shadow renders as
+`rgba(43,33,24,0.35) 0px -10px 10px -10px inset`; the cue is Kalam at
+`rgb(74,58,42)`; the chevron stroke is `rgb(168,122,34)` (gold-700); the tint is
+`opacity: 0.4`; the spent label is `rgb(74,58,42)` at `opacity: 1`. A default
+`bun run build` emits **no** `dist/fit-check.html` — the harness is behind
+`SF_FIT_HARNESS` and cannot reach a deploy.
+
+**8. The gate agrees with the app to the pixel.** Segment 15953 (story 7343 idx
+6, stage 10, 549 chars), measured by `fit-check` at 1024x768 @34px: box **583**,
+**1193px** of text below the edge. Measured by hand in the live app before any of
+this was written: `scrollHeight 1776 - clientHeight 583` = **1193**. Same number,
+independently arrived at.
+
+### The measurement — what `make fit-check` says about the pool today
+
+825 servable segments (it was 832 when this pass started; a concurrent
+`services/api` sweep retired one stage-4 story mid-flight).
+
+```
+viewport / size          box     clipped segments   word tokens below the fold
+1024x768 landscape 34px  583px    65 of 825          6135
+1024x768 landscape 40px  583px    68 of 825          6952
+768x1024 portrait  34px  839px    74 of 825          7210
+768x1024 portrait  40px  839px    75 of 825          7867
+```
+
+**Every clipped segment is `idx = 6` — the last page — at every one of the four
+configurations.** It is one generator behaviour, not a spread of long pages:
+
+```
+stage   spine (idx 0-5)  n/avg/max chars     last page (idx 6)  n/avg/max     last pages clipped, L34/L40/P34/P40
+  1        144 / 20 /  52                      20 /  45 / 100                  0 / 0 /  0 /  1  of 20
+  2         60 / 21 /  35                       8 /  37 /  81                  0 / 0 /  0 /  0  of  8
+  3         66 / 22 /  57                       9 /  53 / 148                  0 / 1 /  1 /  1  of  9
+  4         66 / 23 /  42                      11 / 148 / 328                  4 / 4 / 10 / 10  of 11
+  5         54 / 28 /  52                       9 / 207 / 266                  7 / 9 /  9 /  9  of  9
+  6         54 / 29 /  50                       9 / 227 / 326                  9 / 9 /  9 /  9  of  9
+  7         54 / 27 /  41                       9 / 245 / 427                  9 / 9 /  9 /  9  of  9
+  8         54 / 27 /  45                       9 / 577 / 809                  9 / 9 /  9 /  9  of  9
+  9         54 / 31 /  79                       9 / 586 / 769                  9 / 9 /  9 /  9  of  9
+ 10         54 / 28 /  55                       9 / 552 / 718                  9 / 9 /  9 /  9  of  9
+ 11         54 / 29 /  66                       9 / 509 / 603                  9 / 9 /  9 /  9  of  9
+```
+
+The spine is 20-31 characters at **every** stage. The last page is 45 characters
+at stage 1 and 586 at stage 9 — twenty times its own story's other pages. The
+generator is not writing long stories; it is writing six short pages and then
+putting the whole ending on page seven.
+
+**The budget, measured rather than chosen** — the longest segment in the pool
+that fits, and the shortest that does not, at each configuration:
+
+```
+1024x768 landscape 34px   fits <= 157   clips >= 161
+1024x768 landscape 40px   fits <= 131   clips >= 148
+768x1024 portrait  34px   fits <= 100   clips >= 107
+768x1024 portrait  40px   fits <=  81   clips >= 100
+```
+
+So: **<= 131 characters** per segment holds the §10 reference viewport at both
+reading sizes, and **<= 81 characters** holds every configuration including
+portrait at 40px. Stages 1-3 already live inside the second number on their spine
+and mostly on their last page; nothing above stage 3 has a length rule at all.
+Character count is a proxy — the real variable is rendered lines — so the gate,
+not the number, is the thing to re-run.
+
+**Portrait at 40px is a second, separate finding.** At 768x1024 the §10 portrait
+layout puts the 4:3 illustration at full width: 540 of the 839px box, leaving
+roughly three lines of 40px text. That is the reading size §11 prescribes for a
+dyslexic reader. It is why one stage-1 last page clips there and nowhere else,
+and no generation budget short of ~80 characters fixes it. It is a §06/§10/§11
+tension, it needs a design decision (a portrait height cap on the art is the
+obvious candidate, and §06's "full card width" is the sentence it argues with),
+and this pass deliberately does not take it — the front end's job was to stop the
+page pretending to be finished, and it does that in portrait too (verified).

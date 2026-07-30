@@ -33,18 +33,25 @@ window. Before believing a red suite, re-run it against a private copy:
 `docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfscratch'`
 then `DATABASE_URL=…/sfscratch uv run pytest`. The 775/2 above is from exactly that
 (DEVIATIONS 8.47).
-**Web: 137 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers.
+**Web: 232 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers —
+the line said 137 for several phases after the number had moved.
 `make test` = `test-api` + `test-web`, and **`test-web` is now typecheck AND
 tests** — it was typecheck alone for five phases, which is why the "395 tests
 green" line that used to sit here described 395 *Python* tests and zero lines of
 web behaviour (DEVIATIONS 7.30). Component tests are still absent by decision;
-the components are verified in a real browser.
+the components are verified in a real browser — and `bun test src` therefore
+covers **no** component behaviour at all, which is how a chip could ship with no
+picture and a page could ship clipped under a green suite (DEVIATIONS 13.4,
+13.1). Two of this pass's fixes are held by the TYPE system instead
+(`StoryWordChip.assetUrl`, `StoryText`'s all-or-nothing chip props) and one by
+`make fit-check`, because those are the two things a suite of pure-helper tests
+structurally cannot see.
 Lint: `cd services/api && uv run ruff check storyforge tests`.
 
 ## Commands
 ```
 make dev | test | seed | precompute | warm | warm-plan
-make warm-check | promote-check | prompt-check | mcq2-check      # the four gates
+make warm-check | promote-check | prompt-check | mcq2-check | fit-check   # the five gates
 make eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
@@ -84,7 +91,24 @@ under `enrichment`** — `_record_enrichment` replaces that sub-object wholesale
 design, so the first version of the archive was erased by the very next
 `--backfill`, four rows of two real children's history (11.117). A key that must
 outlive an enrichment must not live inside one.
-All four are free, and none implies the others.
+**`make fit-check` is the FIFTH gate and the first that looks at what a child
+SEES rather than at what the database holds** — §10: "One segment per screen, no
+scrolling on tablet — if text overflows, generation length is wrong, not the
+layout." It renders every servable segment through the real `ReadingView` in the
+real production bundle at both §10 viewports and both §11 reading sizes and
+exits non-zero on any text below the clip edge. **RED today, and it has never
+been green**: 65-75 of 825 segments are clipped, **every one of them `idx = 6`,
+the last page**, which is the page carrying the ending — and because the clip
+falls between lines nothing looked sliced, so a child pressed `Finish` on a story
+they had not read the end of (DEVIATIONS 13.1-13.3). The spine is 20-31
+characters at every stage while the last page averages 45 at stage 1 and 586 at
+stage 9; the measured budget is <=131 chars at the §10 reference viewport and
+<=81 including portrait at 40px. The remedy is a per-stage length budget on
+GENERATION — never a smaller font (§03 floors story text at 28px) and never a
+shorter tap target (§11 floors it at 48px). Free: one SQL query, a build, and a
+headless browser (`BROWSE_BIN=`), no API client. **It exits 2 when it cannot
+run** — no browser, no database, no build are never a pass.
+All five are free, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
 `reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest

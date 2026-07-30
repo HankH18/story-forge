@@ -24,6 +24,7 @@
  */
 
 import type { CompleteResult, Progress, Story } from '../lib/api'
+import { cutoutFor } from '../lib/art'
 import { speak } from '../lib/speech'
 import Button from '../ui/Button'
 import Card from '../ui/Card'
@@ -171,10 +172,20 @@ export default function Celebration({
                 node, so chips rendered straight into a <p> shared edges: three
                 62px targets with a 0px gap at every viewport, against §11's 8px
                 floor. The seals row above already had it right. */}
+            {/* `assetUrl` was OMITTED here for two phases, so the one screen a
+                child is rewarded on was the one screen still drawing a coloured
+                box around a word with no picture in it — the exact treatment
+                11.27 removed, for the exact reason it removed it. It is a
+                required prop now (DEVIATIONS 13.4). */}
             <div className="mt-3 flex flex-wrap items-center justify-center gap-3
                             font-read text-read text-ink-900">
               {story.story_words.map((word) => (
-                <StoryWordChip key={word} word={word} onSpeak={(w) => speak(w)} />
+                <StoryWordChip
+                  key={word}
+                  word={word}
+                  assetUrl={cutoutFor(word)}
+                  onSpeak={(w) => speak(w)}
+                />
               ))}
             </div>
           </Card>

@@ -41,6 +41,15 @@
  *   collapse — and a 24px square inside a word is not that hole; it is
  *   decoration that means nothing (11.25). `onError` drops the picture the same
  *   way, so an asset that is not deployed yet degrades to a plain amber word.
+ *
+ * **`assetUrl` is REQUIRED** (DEVIATIONS 13.4). It was optional, and the
+ * celebration screen omitted it: three story words on an amber ground with zero
+ * `<img>` between them — the same three that had rendered with their cutouts in
+ * the reading view minutes earlier, and precisely the boxed-word treatment 11.27
+ * removed. `lib/art.test.ts` was green throughout, because it asserts the MAP
+ * holds a URL for every live story word and no test of a lookup table can see a
+ * caller that never asks it. `null` is still a legal answer — it is what a word
+ * outside the map means. Forgetting to ask is no longer expressible.
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -48,7 +57,8 @@ import type { WordState } from './WordToken'
 
 export interface StoryWordChipProps {
   word: string
-  assetUrl?: string | null
+  /** The cutout for this word, or `null` when the pool has none. Required. */
+  assetUrl: string | null
   /** Plain-language definition from `story_word_bank.gloss`, when the API has one. */
   gloss?: string | null
   autoSpeakOnFirstView?: boolean

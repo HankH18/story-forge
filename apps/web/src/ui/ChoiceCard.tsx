@@ -20,6 +20,18 @@
  * palette reserves). No buzzer, no score, no lockout: a wrong card stops being
  * tappable so the child cannot re-hit the same dead end, and the others stay
  * live until one of them is right.
+ *
+ * **`wrong` dims by INK, never by `opacity`** (DEVIATIONS 13.9). The frame used
+ * to end `opacity-60`, and sampled from the rendered PNG that put the option
+ * label at `rgb(167,152,133)` on `rgb(248,238,218)` — **2.44:1**, where an idle
+ * option is 15.23:1 and §11 puts a *non-negotiable* 7:1 floor under story text.
+ * The label is Andika at `text-read`, the same class as the reading view, and the
+ * "try again" caption — the only instruction on the screen — was inside the same
+ * dimmed box at the same ratio. A container `opacity` multiplies through to every
+ * descendant, including text that passed a contrast audit on its own, and no
+ * audit of the palette can see it. §07's "dim and go dashed" is delivered by the
+ * dashed ink-300 border, the paper-warm ground and an ink-700 label, all of which
+ * clear the floor.
  */
 
 import SpeakerIcon from './SpeakerIcon'
@@ -39,7 +51,7 @@ export interface ChoiceCardProps {
 
 const FRAME: Record<ChoiceState, string> = {
   idle: 'sf-lift-kid border-[3px] border-ink-900 bg-paper-card',
-  wrong: 'border-[3px] border-dashed border-ink-300 bg-paper-warm opacity-60',
+  wrong: 'border-[3px] border-dashed border-ink-300 bg-paper-warm',
   correct: 'sf-lift-kid border-[3px] border-leaf-500 bg-leaf-100',
 }
 
@@ -82,7 +94,9 @@ export default function ChoiceCard({
             className={[
               'font-read text-left',
               textClassName ?? SIZE_CLASS[size],
-              spent ? 'text-ink-500' : 'text-ink-900',
+              // ink-700, not ink-500: a visible step down from ink-900 that is
+              // still over §11's 7:1 story-text floor. ink-500 lands at 5.9:1.
+              spent ? 'text-ink-700' : 'text-ink-900',
             ].join(' ')}
           >
             {label}
@@ -90,8 +104,10 @@ export default function ChoiceCard({
         </span>
         {/* Under the word, never beside it: at tap_word width there is no room
             next to the label and the note used to run under the speak button. */}
+        {/* The only instruction on this screen, so it is held to the story-text
+            floor rather than to §11's 4.5:1 body-text one. */}
         {spent ? (
-          <span className="font-hand text-[20px] text-ink-500">try again</span>
+          <span className="font-hand text-[20px] text-ink-700">try again</span>
         ) : null}
       </button>
 

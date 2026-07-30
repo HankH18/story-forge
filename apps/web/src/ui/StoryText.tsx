@@ -34,17 +34,47 @@ export const SIZE_CLASS: Record<ReadingSize, string> = {
   large: 'text-read-lg',
 }
 
-export interface StoryTextProps {
+/**
+ * The paragraph's own classes, exported because `scripts/fit-check.mjs` measures
+ * the pool against this exact paragraph (DEVIATIONS 13.2). Every fragment is a
+ * literal so Tailwind's extractor still finds them (STATE invariant 7).
+ */
+export function storyTextClass(size: ReadingSize = 'default'): string {
+  // §03: left-aligned, no hyphenation, no justification.
+  return `font-read text-left text-ink-900 [hyphens:none] ${SIZE_CLASS[size]}`
+}
+
+/**
+ * The four props the §07 chip needs, and it needs ALL of them.
+ *
+ * They used to be four independent optionals, and `Comprehension` supplied two:
+ * `storyWords` + `assetFor` with no `shouldAnnounce`, which `introductionIndices`
+ * answers with an empty list — so both question prompts carried two props that
+ * could not render anything, under a comment claiming they did (DEVIATIONS
+ * 13.5, 13.6). A union makes "half-wired chips" unrepresentable: a caller is
+ * either introducing story words or it is not.
+ */
+type ChipProps =
+  | {
+      storyWords?: undefined
+      assetFor?: undefined
+      shouldAnnounce?: undefined
+      onAnnounced?: undefined
+    }
+  | {
+      /** Distinct undecodable theme words for this story (§5.5), any case. */
+      storyWords: string[]
+      /** Curated cutout for a story word, when the pool has one (§06). */
+      assetFor: (word: string) => string | null
+      /** Session-level: has this story word already announced itself once? */
+      shouldAnnounce: (word: string) => boolean
+      onAnnounced: (word: string) => void
+    }
+
+export type StoryTextProps = ChipProps & {
   text: string
   size?: ReadingSize
-  /** Distinct undecodable theme words for this story (§5.5), any case. */
-  storyWords?: string[]
-  /** Curated cutout for a story word, when the API has one (§06). */
-  assetFor?: (word: string) => string | null
   glossFor?: (word: string) => string | null
-  /** Session-level: has this story word already announced itself once? */
-  shouldAnnounce?: (word: string) => boolean
-  onAnnounced?: (word: string) => void
   className?: string
 }
 
@@ -121,14 +151,7 @@ export default function StoryText({
   }, [])
 
   return (
-    <p
-      className={[
-        // §03: left-aligned, no hyphenation, no justification.
-        'font-read text-left text-ink-900 [hyphens:none]',
-        SIZE_CLASS[size],
-        className,
-      ].join(' ')}
-    >
+    <p className={`${storyTextClass(size)} ${className}`}>
       {parts.map((part, i) => {
         if (part.kind === 'gap') {
           // Punctuation and spaces live outside every button (§07).

@@ -22,15 +22,82 @@
  * focused word).
  *
  * Everything decodable on this screen is Andika and tappable (see StoryText).
+ *
+ * **When a segment does not fit, the way forward says so** (DEVIATIONS 13.1).
+ * §10's sentence is about generation length and this file does not argue with
+ * it — but a too-long segment is in the pool today, the clip lands BETWEEN lines
+ * so nothing is visibly sliced, and the button underneath said `Finish`. A child
+ * pressed it having never seen the ending. So while any of the segment is below
+ * the clip edge the primary button is `More words ↓` and scrolls; only the last
+ * line turns it back into `Next`/`Finish`. `make fit-check` measures the same box
+ * over the whole pool so the generator's half of this is not invisible.
  */
 
-import { useEffect } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Segment, Story } from '../lib/api'
 import { cutoutFor } from '../lib/art'
 import Button from '../ui/Button'
 import ProgressDots from '../ui/ProgressDots'
 import SegmentArt from '../ui/SegmentArt'
 import StoryText, { type ReadingSize } from '../ui/StoryText'
+
+/**
+ * The §10 reading box, as one string, because `scripts/fit-check.mjs` imports it
+ * and measures the pool against exactly the box this renders (DEVIATIONS 13.2).
+ * A gate that re-spells the layout it is checking measures a different layout the
+ * first time either side is edited.
+ *
+ * Written as a literal, never composed: Tailwind's extractor scans source text,
+ * and a class assembled at runtime is a class purged from the production bundle
+ * (STATE invariant 7).
+ */
+export const READING_MAIN_CLASS =
+  'sf-page-in mx-auto flex w-full min-h-0 max-w-[1024px] flex-1 flex-col gap-8 overflow-y-auto py-4 pb-8 [scrollbar-gutter:stable] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-ink-300 [&::-webkit-scrollbar]:w-3 lg:grid lg:grid-cols-2 lg:content-start lg:items-start'
+
+/**
+ * The clip-edge lip, painted only while there is more of the page below.
+ *
+ * An INSET shadow, and that is the whole reason it is allowed to exist: an inset
+ * shadow paints above the element's background and below its content, so it
+ * shades the paper at the bottom of the reading box and never lands on a glyph.
+ * The obvious alternative — a gradient fade over the last visible line — buys the
+ * same cue by taking contrast off the exact words the child is reading, and §11
+ * puts a 7:1 floor under story text with the word "non-negotiable" over it.
+ */
+const EDGE_CLASS: Record<'more' | 'end', string> = {
+  more: 'shadow-[inset_0_-10px_10px_-10px_rgba(43,33,24,0.35)]',
+  end: '',
+}
+
+/** Overlap kept between screenfuls, so a press never jumps a whole line away. */
+const SCROLL_OVERLAP_PX = 72
+
+/** Sub-pixel line heights make an exact bottom comparison flap; 2px of slack. */
+const AT_END_SLACK_PX = 2
+
+function prefersReducedMotion(): boolean {
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  } catch {
+    return false
+  }
+}
+
+/** §07's chevron idiom, pointing at the words the clip edge is hiding. */
+function MoreBelowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-7 w-7 shrink-0">
+      <path
+        d="M6 9l6 6 6-6"
+        fill="none"
+        stroke="var(--sf-gold-700)"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
 
 export interface ReadingViewProps {
   story: Story
@@ -61,14 +128,93 @@ export default function ReadingView({
   shouldAnnounce,
   onAnnounced,
 }: ReadingViewProps) {
-  // §11: "Tab through words, Enter to speak, → for next."
+  const box = useRef<HTMLElement | null>(null)
+  /**
+   * Has the child reached the bottom of this page? `true` for every segment that
+   * fits, which is the overwhelming majority — the whole affordance below is
+   * invisible until the pool hands over a page that does not.
+   */
+  const [atEnd, setAtEnd] = useState(true)
+
+  /**
+   * "Is anything a child could READ still below the clip edge?" — not "does this
+   * box scroll", which is a different and wronger question.
+   *
+   * `pb-8` is 32px of deliberate blank space at the end of the scroll (it keeps
+   * the last line off the footer), and `.sf-word` carries 12px of padding and 5px
+   * of margin under its glyph box. Nine segments in the live pool overflow by
+   * exactly 6px at 40px portrait: no word is hidden, only the tail of that
+   * blankness. Measuring raw `scrollHeight` would put `More words ↓` on a page
+   * whose every word is on screen — a false alarm on the one control the child
+   * has, which is how an affordance stops being believed. So the content bottom
+   * is `scrollHeight` less the container's own bottom padding. A genuinely hidden
+   * line is 62-78px tall and clears this by a wide margin.
+   */
+  const measure = useCallback(() => {
+    const el = box.current
+    if (!el) return
+    const padBottom = Number.parseFloat(window.getComputedStyle(el).paddingBottom) || 0
+    const contentBottom = el.scrollHeight - padBottom
+    setAtEnd(el.scrollTop + el.clientHeight >= contentBottom - AT_END_SLACK_PX)
+  }, [])
+
+  // A new page starts at the top, and it starts by asking whether it fits.
+  // Layout effect: measuring after paint would flash `Finish` on a clipped page.
+  useLayoutEffect(() => {
+    const el = box.current
+    if (el) el.scrollTop = 0
+    measure()
+  }, [measure, segment.id, size])
+
+  /**
+   * Re-measure on anything that can change the answer: the viewport (a tablet
+   * rotating), the paragraph reflowing, and the WEB FONT arriving — Andika loads
+   * after first paint and a paragraph set in the fallback face is a different
+   * height, which is exactly the kind of "measured once, wrongly" this file has
+   * already been bitten by.
+   */
+  useEffect(() => {
+    const el = box.current
+    if (!el) return
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    for (const child of Array.from(el.children)) observer.observe(child)
+    window.addEventListener('resize', measure)
+    if (typeof document !== 'undefined' && document.fonts) {
+      void document.fonts.ready.then(measure).catch(() => {})
+    }
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [measure, segment.id])
+
+  /**
+   * The one way forward, and it does the honest thing with the page it is on:
+   * more of this segment first, the next screen only after the last line.
+   */
+  const advance = useCallback(() => {
+    const el = box.current
+    if (el && !atEnd) {
+      const step = Math.max(el.clientHeight - SCROLL_OVERLAP_PX, Math.round(el.clientHeight * 0.6))
+      el.scrollBy({ top: step, behavior: prefersReducedMotion() ? 'auto' : 'smooth' })
+      // `scrollBy` fires `scroll`, which re-measures; this covers the case where
+      // it does not move at all because we were already there.
+      window.setTimeout(measure, 0)
+      return
+    }
+    onNext()
+  }, [atEnd, measure, onNext])
+
+  // §11: "Tab through words, Enter to speak, → for next." `→` goes through
+  // `advance`, so the keyboard cannot skip what the button will not.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey && !e.altKey) onNext()
+      if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey && !e.altKey) advance()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onNext])
+  }, [advance])
 
   return (
     // `h-screen` + a scrollable middle, not a scrollable page. §10 wants one
@@ -137,15 +283,17 @@ export default function ReadingView({
           more words existed was a chip sliced in half at the bottom edge. */}
       <main
         key={segment.id}
-        className="sf-page-in mx-auto flex w-full min-h-0 max-w-[1024px] flex-1 flex-col
-                   gap-8 overflow-y-auto py-4 pb-8
-                   [scrollbar-gutter:stable] [&::-webkit-scrollbar-thumb]:rounded-full
-                   [&::-webkit-scrollbar-thumb]:bg-ink-300 [&::-webkit-scrollbar]:w-3
-                   lg:grid lg:grid-cols-2 lg:content-start lg:items-start"
+        ref={box}
+        onScroll={measure}
+        className={`${READING_MAIN_CLASS} ${EDGE_CLASS[atEnd ? 'end' : 'more']}`}
       >
         {/* `shrink-0`: the 4:3 frame is §06's contract and must not be squashed
             to make a long segment fit — that is what the scroll is for. */}
-        <SegmentArt asset={segment.asset} className="w-full shrink-0" />
+        <SegmentArt
+          asset={segment.asset}
+          themeSlug={story.theme_slug}
+          className="w-full shrink-0"
+        />
         {/* `assetFor` was never passed, which is why every story-word chip in
             the live app showed a grey striped square instead of a picture —
             §07's "picture cutout on the left" had no picture to render
@@ -160,9 +308,34 @@ export default function ReadingView({
         />
       </main>
 
-      <footer className="flex justify-end">
-        <Button variant="kid-primary" size="kid" onClick={onNext}>
-          {isLast ? 'Finish' : 'Next'} <span aria-hidden="true">→</span>
+      {/* The cue lives IN the footer row, not in a strip above it: a strip would
+          cost `main` its own height plus a flex gap and push more segments over
+          the clip edge — the fix would have widened the defect (13.1). */}
+      <footer className="flex items-center justify-between gap-4">
+        {atEnd ? (
+          <span />
+        ) : (
+          <span className="flex items-center gap-2">
+            <MoreBelowIcon />
+            {/* §12: one Kalam phrase per screen. This is the reading view's. */}
+            <span className="font-hand text-[20px] text-ink-700">keep reading</span>
+          </span>
+        )}
+        <Button
+          variant="kid-primary"
+          size="kid"
+          onClick={advance}
+          aria-label={atEnd ? undefined : 'more words on this page'}
+        >
+          {atEnd ? (
+            <>
+              {isLast ? 'Finish' : 'Next'} <span aria-hidden="true">→</span>
+            </>
+          ) : (
+            <>
+              More words <span aria-hidden="true">↓</span>
+            </>
+          )}
         </Button>
       </footer>
     </div>
