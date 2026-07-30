@@ -9534,3 +9534,237 @@ it instead is `docs/DEPLOY.md` §4: `--check-prompts` is now listed as a MANDATO
 free check with `--backfill` on the line under it, and §6 re-runs it after any
 restore. That is the difference between this residual and 11.61's — an operator is
 told, by an exit code, in the console where the remedy runs.
+
+## Phase 8 — the practice list is chosen by FREQUENCY where §8 needs COVERAGE (11.86-11.90)
+
+Numbered in the 11.60-11.85 block because it is the generation-side half of
+11.70's finding — `make promote-check` is RED, and its own remedy text says the
+part `make warm` cannot fix is *"a stage whose stories contain no word using a
+sound that stage introduces — that is an allowlist and generation problem"*.
+5.17 built the lever for exactly that (`llm/generate.practice_words`) and then
+selected with the wrong statistic. Logged **before** the change. Every number
+below was measured against the live local `storyforge` Postgres, read-only, with
+the product's own functions. No API call, no `make warm`, no `make eval`, live
+spend **$0.00**.
+
+**11.86 — the practice list truncates by frequency, and four stages lose a sound
+the allowlist could have named. Stage 2 loses `sh`.**
+
+`practice_words` walks the allowlist in frequency order, keeps every word that
+uses a GPC the stage introduces, and cuts at `PRACTICE_WORD_LIMIT = 24`. §8 does
+not need the 24 most common such words; it needs the stage's introduced GPCs to
+be *reachable* — a `tap_word` can only ask about a grapheme the STORY contains,
+and the story can only contain what the prompt pointed at. Measured over the
+live top-400 windows (`ORDER BY freq_rank LIMIT 400`, `pipeline.load_vocabulary`'s
+own query), counting only GPCs the window can actually express — sight words and
+blocklisted words excluded, as `practice_words` excludes them:
+
+```
+stage  introduces  expressible   named by     the GPCs the list never names
+        #GPCs      in the window  PRACTICE
+    2       13          12           10       ['qu|K.W', 'sh|SH']
+    4        7           7            6       ['u_e|UW']
+    5       10          10            9       ['oa|OW']
+    7        8           8            6       ['au|AO', 'oy|OY']
+```
+
+Every missing word was sitting in the same 400 words the list was drawn from:
+`sh|SH` → short, wish, shall, **ship**, cash, finish; `qu|K.W` → quick, quit;
+`u_e|UW` → june, rule; `oa|OW` → road, goal, coach; `oy|OY` → **boy**, enjoy;
+`au|AO` → august. Stage 2's omission is the loudest: `sh` is the stage's headline
+digraph, §5.7's golden case and §17's demo sentence, and `ship` is rank-eligible.
+Stage 7 is one of the six TERMINAL stages of invariant 15.
+
+The mechanism is visible in what the slots are spent on instead. Stage 3, whose
+Appendix A content is "-s -es -ed -ing endings":
+
+```
+stage 3 — 24 practice words, by the new sound they are credited with:
+   ('s|Z',)   16  as, his, has, things, kids, hands, fans, plans, jobs, levels,
+                  happens, records, seconds, runs, songs, tells
+   ('ed|T',)   6  asked, finished, passed, helped, stopped, missed
+   ('ed|D',)   2  happened, lived
+```
+
+Sixteen of twenty-four slots on one GPC of six, and the three most frequent
+(`as`, `his`, `has`) carry no inflectional ending at all. They are honest
+evidence — `s|Z` is what stage 3 introduces and `word_gpc_ids` credits it — but
+they are sixteen slots that could not name `ed|D`.
+
+**Corroborated in the pool, and stated as correlation.** The same read-only pass
+over the 120 servable stories asks which introduced GPCs their TEXT contains at
+all — the ceiling on what `sound_targets` could ever ask about:
+
+```
+stage 2 (10 stories): never contains ng|NG, qu|K.W, sh|SH, v|V, wh|W, y|Y, z|Z
+stage 4 (12 stories): never contains u_e|UW
+stage 5 ( 9 stories): never contains oa|OW, ow|OW
+stage 7 ( 9 stories): never contains au|AO, oi|OY
+```
+
+Five of the six GPCs the practice list never named are also absent from every
+story at their stage (`sh`, `qu`, `u_e`, `oa`, `au`). That is consistent with the
+mechanism and is not proof of it — the pool predates nothing here, and stage 2's
+`v`, `y` and `z` are named by the list and still missing from the stories, which
+is the honest counter-example. This change moves what future generation is
+pointed at; it cannot move a story already written.
+
+**11.87 — the fix is the SELECTION, not the ORDER: round-robin across the
+introduced GPCs first, then top up by frequency.**
+
+Same allowlist, same `PRACTICE_WORD_LIMIT`, same block position, same one
+`cache_control` breakpoint, no API call. One pass guarantees every expressible
+GPC a word (its most frequent one); further rounds spread the remaining slots
+across the GPCs instead of pouring them into the most common one; anything left
+is filled by frequency. **The offer is still emitted in allowlist-frequency
+order**, so the head of the list is still the part a thirty-word story can carry
+— the defect was which 24 words survive the cut, not the order they are printed
+in. After:
+
+```
+stage  introduces  expressible  named BEFORE  named AFTER  offered
+    1       34          31          0 (silent)   0 (silent)     0
+    2       13          12         10           12            24
+    3        6           3          3            3            24
+    4        7           7          6            7            24
+    5       10          10          9           10            24
+    6        5           4          4            4            24
+    7        8           8          6            8            24
+    8        6           5          5            5            22
+    9        1           1          1            1             3
+   10        3           2          2            2             2
+   11        3           2          2            2             2
+```
+
+Stages 2, 4, 5 and 7 close to full available coverage; nothing else moves a
+number. `expressible < introduces` at stages 1, 6, 8, 10 and 11 is an allowlist
+fact (the window holds no word using `or|AO.R`, `ph|F`, `ture|CH.ER`, …) and no
+selection rule can fix it. Stage 1 stays SILENT — `PRACTICE_SATURATION` is
+unchanged and its sounds are unavoidable — and stage 11's allowlist reads as
+stage 10's, both already documented at `allowlist_stage`.
+
+Stage 3's composition, which is the same 24 slots spent differently:
+
+```
+   s|Z    9  as, his, has, things, kids, hands, fans, plans, jobs
+  ed|T    9  asked, finished, passed, helped, stopped, missed, dropped, picked, fixed
+  ed|D    6  happened, lived, filled, planned, formed, scored
+```
+
+**11.88 — what deliberately does NOT change.** Each was checked, not assumed.
+
+- **§0 / invariant 1.** Every word offered is still a word the caller handed in
+  and still passes `word_gpc_ids` at the stage. `test_nothing_is_invented` is the
+  standing assertion and is untouched. The change is WHICH allowlist words are
+  offered, never what counts as decodable.
+- **`PRACTICE_WORD_LIMIT` (24), `PRACTICE_SATURATION` (0.5) and the PREFERENCE
+  framing.** Raising the limit would have closed the same four stages and is the
+  wrong remedy: the list is a hint inside a cached prefix, and the section is
+  explicitly *"a preference and never a licence to break a rule above"*. The
+  saturation ratio is still computed over the FULL candidate list, before any
+  truncation, so a stage's silence is decided by the stage and not by the picker.
+- **STATE invariant 10.** The block still lives at the end of
+  `build_vocabulary_block`, inside the per-stage cached half; `SYSTEM_RULES` is
+  byte-identical; `generation_system_blocks` still sets exactly one
+  `cache_control` breakpoint, on the last block. Nothing per-request moved in.
+- **The prompt's size and shape.** Same header, same count, same trailing prose,
+  same 24 comma-separated words. Measured over the whole ladder, the practice
+  lists total **1152 → 1151 characters**, and no stage moves by more than 3.
+  The one-time cost is a cache MISS at the six stages whose list content changed
+  (**2 through 7**) on the next generation at each — one write of a prefix that
+  is read back at 0.1x thereafter. Stage 6's list changes without its coverage
+  number changing: it already named all 4 of the GPCs its window can express, and
+  the rebalance only redistributes the slots among them.
+
+**11.89 — the tests: the missing quantifier, added BESIDE the existing one and
+driven off the LIVE allowlist.**
+
+`test_every_offered_word_would_earn_evidence` calls itself the load-bearing
+property and asserts `∀ offered word · it names an introduced GPC`. That is a
+real property and it stays. It is also satisfied by twenty-four copies of one
+`s|Z` word. The property §8 actually needs is the other quantifier —
+`∀ introduced GPC the allowlist can express · some offered word names it` — and
+nothing asserted it. Both existing tests run against the synthetic 40-word
+`STAGE4_ALLOWED` fixture, which never truncates, so neither has ever seen the
+distribution 11.86 measured. That is why the new assertions read the real
+`allowed_words` table for all eleven stages.
+
+`justify-test-edit` was **not needed: no existing assertion is edited, weakened,
+deleted, skipped or xfailed.** In particular `test_the_offer_is_frequency_ordered`
+stays exactly as written and stays GREEN, because 11.87 changed the selection and
+not the order — the order it pins is a real property (the head of the list is what
+a short story can carry) and pinning it never required the omission.
+
+**11.90 — the residual, stated first: `make promote-check` is still RED, and this
+change alone cannot make it green.** The gate measures the §8 evidence the
+EXISTING pool can yield. Every one of those 120 stories was generated before this
+change, and nothing here rewrites a story — the remedy for the pool is `make warm`
+plus re-enrichment (11.70's own hint), which costs money and is out of scope for
+this finding. What ships here is that the next story generated at stages 2, 4, 5
+and 7 is pointed at the sounds its stage teaches, including the six the prompt has
+never once named. This was filed as one contributor and it is reported as one.
+
+Re-run after the change, unchanged in every line: **9 stage(s) below the floor, 6
+TERMINAL — stages [3, 6, 7, 8, 9, 10]**, `1 of 10 stage(s) can promote a reader
+within 5 stories`, exit 1. That is the expected result and not a disappointment:
+a generation-side change that moved a gate measuring stories generated last week
+would mean the gate was reading something other than the pool.
+
+**Sabotage — two, each restored and verified restored.** What actually went red,
+not what was expected to.
+
+| sabotage | the defect it stages | result |
+|---|---|---|
+| `return tuple(picked[:PRACTICE_WORD_LIMIT])` — the pre-11.87 selection, restored | the finding itself | **2 RED**, and only those two: `stage 2: the practice list never names ['qu\|K.W', 'sh\|SH'], though the allowlist can: {'sh\|SH': 'short', 'qu\|K.W': 'quick'}` (live) and the starved fixture. The other 24 tests in the file stayed green — which is the measurement of how invisible this was |
+| `PRACTICE_SATURATION = 0.05` — most stages fall silent | a future change that empties the offer and makes the coverage test vacuously true | **RED**, including `test_the_practice_section_speaks_at_every_live_stage_but_the_saturated_one`. The coverage test itself went GREEN in that run, over an empty offer, which is exactly why the vacuity guard is a separate assertion |
+
+**The prompt, rendered from the live database rather than described.**
+`generation_system_blocks` at stage 2 (Digraphs) and stage 7 (Diphthongs): three
+system blocks, `cache_control` on **[2]** only — the last, exactly one breakpoint,
+STATE invariant 10 intact — `SYSTEM_RULES` byte-identical, and the section now
+reads
+
+```
+NEW SOUNDS AT THIS STAGE (24) — permitted words that use a letter-sound this stage is the first to teach:
+  stage 2: that, with, this, will, just, when, which, them, think, well, much, long,
+           thing, having, getting, yet, job, yes, thank, given, short, wish, quick, quit
+  stage 7: about, how, now, our, good, too, down, look, house, without, looking, point,
+           power, took, law, food, room, saw, soon, points, boy, august, oil, enjoy
+```
+
+`sh` arrives as `short` and `wish` rather than as `ship` — the picker takes each
+sound's most FREQUENT word, and `ship` is not it. The ask is unchanged: the same
+"prefer them where a sentence can carry one naturally … still fine" paragraph.
+
+**One REAL generation per changed stage, because a green suite proves the picker
+and not the prompt.** Through `llm/generate.generate_story` and the decoder only —
+deliberately not the pipeline, whose `llm/moderate.py` and `llm/questions.py` are
+mid-edit by another agent, and whose rewrite node would hide a first draft's
+faults. Live model, live `allowed_words`, dragons:
+
+- **stage 2 — 41 words, decodability 100.0%, 0 violations.** *"The dragon had a
+  wish to rest in the cave. But fire was hot at the cave. The dragon did not quit.
+  …"* Introduced GPCs the story uses: `qu|K.W`, `sh|SH`, `th|DH`, `w|W`. **It took
+  `wish` and `quit` — the two sounds the practice list had never named** — so the
+  loop this change exists to close is closed in a real story, not in a fixture.
+- **stage 7 — 76 words, decodability 92.3%, 3 violations, all of them one word:
+  `could` ×3.** An irregular (`ould` → /ʊd/), unrelated to this change and the
+  same class as `of` in `docs/EVAL.md` §9; §7 allows the rewrite node three
+  attempts and this draft never saw it. The story used none of the newly-named
+  stage-7 words, which is exactly what "PREFERENCE, not requirement" means.
+
+Live spend for both: **$0.0776**. Nothing was persisted — `generate_story` writes
+no row — and no `make warm`, no `make eval`, no `make eval-smoke` was run.
+
+**Gates.** `cd services/api && .venv/bin/python -m pytest -p no:randomly` →
+**1035 passed, 1 failed, 3 skipped**, against the brief's 1030/3 baseline: +6
+(the six new tests), and the one failure is
+`test_questions.py::test_sight_and_story_words_are_never_offered`, which
+**reproduces with `HEAD`'s `generate.py` restored in place** — it is the other
+agent's in-flight `llm/questions.py`, not this change. `.venv/bin/ruff check
+storyforge tests scripts` — all checks passed. The suite was run against a
+**private `pg_dump` copy** (`sfcover`), per STATE's note: a second agent was
+working in this tree throughout, and the shared-Postgres run produced four
+*moving* failures in `test_auth`/`test_kids` that all pass when those files are
+run alone. **Nothing touched on DigitalOcean.**
+

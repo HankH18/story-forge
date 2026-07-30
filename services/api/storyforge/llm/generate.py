@@ -35,6 +35,13 @@ a grapheme the STORY contains. Stage 4 teaches nothing but word-final `-s -es
 unreachable however well the child reads it. The allowlist already holds the
 words that would fix that; the prompt simply never pointed at them.
 `practice_words` names them, inside the cached half of the prompt.
+
+**And it names them for COVERAGE, not for frequency** (DEVIATIONS 11.86-11.87).
+§8's question is which of the stage's new sounds a story can be ASKED about, so
+the twenty-four most common words that happen to use one of them is the wrong
+selection: it spent sixteen of stage 3's slots on one GPC of six, and it never
+once named stage 2's `sh` — the stage's headline digraph, §5.7's golden case and
+§17's demo sentence — while `ship` sat in the same 400 words it was drawing from.
 """
 
 from __future__ import annotations
@@ -209,6 +216,81 @@ def allowlist_stage(allowed_words: tuple[str, ...]) -> int | None:
     return max(stages) if stages else None
 
 
+def _fill_by_coverage(
+    picked: list[str],
+    covers: dict[str, frozenset[str]],
+) -> tuple[str, ...]:
+    """`PRACTICE_WORD_LIMIT` words chosen for COVERAGE, printed in frequency order.
+
+    `picked` is every candidate word, in allowlist-frequency order; `covers[word]`
+    is the introduced GPCs that word is credited with. The old rule was
+    `picked[:PRACTICE_WORD_LIMIT]`, and DEVIATIONS 11.86 measured what that costs:
+    the cut fell on whole SOUNDS, not on spare words. Four stages lost a GPC the
+    allowlist could express — stage 2 lost `sh` and `qu`, stage 4 `u_e`, stage 5
+    `oa`, stage 7 `au` and `oy` — because sixteen commoner words used the stage's
+    commonest new sound and got there first. A `tap_word` can only ask about a
+    grapheme the STORY contains, so a sound the prompt never names is a sound §8
+    can never collect evidence on, however well the child reads.
+
+    Three passes, in this order:
+
+    1. **coverage** — one word per introduced GPC, its most frequent, skipping a
+       GPC an earlier pick already covers (a word can name two of the stage's
+       sounds, and spending a second slot on the same sound is the defect in
+       miniature);
+    2. **balance** — further rounds, one more word per GPC per round, so the
+       slots left over spread across the stage's sounds instead of pouring into
+       its commonest one;
+    3. **frequency** — top up with whatever is left, which only bites if the
+       rounds run dry first.
+
+    **The ORDER of the offer is unchanged**: the result is emitted in
+    allowlist-frequency order, so the head of the list is still the part a
+    thirty-word story can actually carry, and a list that fits inside the limit
+    comes back exactly as it was handed in. The defect was which twenty-four words
+    survive the cut, never the order they are printed in.
+    """
+    rank = {word: i for i, word in enumerate(picked)}
+    by_gpc: dict[str, list[str]] = {}
+    for word in picked:
+        for gpc in covers[word]:
+            by_gpc.setdefault(gpc, []).append(word)
+    # Deterministic, and it puts the commonest sounds at the front of round 1,
+    # where the limit can never cut them off.
+    order = sorted(by_gpc, key=lambda gpc: rank[by_gpc[gpc][0]])
+
+    chosen: set[str] = set()
+    covered: set[str] = set()
+    for gpc in order:  # 1. coverage
+        if len(chosen) >= PRACTICE_WORD_LIMIT:
+            break
+        if gpc in covered:
+            continue
+        # `gpc not in covered` means no chosen word names it, so its own list is
+        # entirely unchosen and the first entry is its most frequent word.
+        word = by_gpc[gpc][0]
+        chosen.add(word)
+        covered |= covers[word]
+
+    while len(chosen) < PRACTICE_WORD_LIMIT:  # 2. balance
+        before = len(chosen)
+        for gpc in order:
+            if len(chosen) >= PRACTICE_WORD_LIMIT:
+                break
+            spare = next((w for w in by_gpc[gpc] if w not in chosen), None)
+            if spare is not None:
+                chosen.add(spare)
+        if len(chosen) == before:  # every candidate is already offered
+            break
+
+    for word in picked:  # 3. frequency
+        if len(chosen) >= PRACTICE_WORD_LIMIT:
+            break
+        chosen.add(word)
+
+    return tuple(word for word in picked if word in chosen)
+
+
 @lru_cache(maxsize=32)
 def practice_words(
     allowed_words: tuple[str, ...],
@@ -220,6 +302,10 @@ def practice_words(
     toward promotion, and `llm/questions.py` cannot conjure one the story never
     used. Frequency order is inherited from `allowed_words`, so the head of the
     list is the part a five-year-old story can actually carry.
+
+    Which words survive `PRACTICE_WORD_LIMIT` is decided by COVERAGE of the
+    stage's introduced GPCs, not by frequency — see `_fill_by_coverage`, which
+    also explains why the printed order is still frequency's.
 
     Sight words are dropped: `questions.sound_targets` refuses them as tap-a-word
     options (the child recognised the shape, they did not decode it), so a story
@@ -241,6 +327,11 @@ def practice_words(
     blocked = load_blocklist()
     candidates = 0
     picked: list[str] = []
+    # What each candidate is CREDITED with, kept from the same call that admitted
+    # it. The selection needs the alignment, not just the yes/no, and re-deriving
+    # it in the picker would be a second copy of "which GPCs does this word use" —
+    # the drift this module imports `word_gpc_ids` to avoid.
+    covers: dict[str, frozenset[str]] = {}
     seen: set[str] = set()
     for raw in allowed_words:
         word = raw.strip().lower()
@@ -252,12 +343,17 @@ def practice_words(
         candidates += 1
         if word in blocked:
             continue
-        if introduced & set(word_gpc_ids(word, stage)):
+        hit = introduced & frozenset(word_gpc_ids(word, stage))
+        if hit:
             picked.append(word)
+            covers[word] = hit
 
+    # The saturation ratio is measured over the FULL candidate list, before any
+    # truncation: whether a stage's sounds are scarce is a fact about the stage,
+    # never about how the twenty-four slots are filled.
     if not picked or len(picked) > candidates * PRACTICE_SATURATION:
         return ()
-    return tuple(picked[:PRACTICE_WORD_LIMIT])
+    return _fill_by_coverage(picked, covers)
 
 
 def build_practice_block(allowed_words: list[str], sight_words: list[str]) -> str:

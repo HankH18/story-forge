@@ -37,6 +37,11 @@ from storyforge.llm.generate import (
 )
 from storyforge.llm.questions import sound_targets
 from storyforge.mastery import word_gpc_ids
+
+# The prompt's own window, imported rather than re-spelled as `LIMIT 400`: a test
+# that measured a different slice of `allowed_words` from the one the model is
+# handed would be measuring nothing (`pipeline.load_vocabulary`).
+from storyforge.pipeline import PROMPT_WORD_LIMIT
 from storyforge.precompute import load_blocklist
 
 # A suffix-stage-shaped allowlist: mostly stages 1-2, with the handful of
@@ -58,6 +63,20 @@ STAGE4_SIGHT = ["the", "a", "i", "is", "to", "no", "go", "he", "she", "we", "me"
 # Every word here is decodable at stage 1, so stage 1's own sounds are
 # unavoidable — the section has nothing to add.
 STAGE1_ALLOWED = ["and", "in", "it", "at", "can", "did", "man", "sat", "cat", "dad"]
+
+# The shape DEVIATIONS 11.86 measured, reduced to a fixture: more words carrying
+# the stage's COMMONEST new sound than there are slots, and the other two sounds
+# it teaches sitting past the cut. Every `s|Z` word below is a real stage-3
+# allowlist word in its real frequency order; `helped` (`ed|T`) and `lived`
+# (`ed|D`) are real too, and rarer than all of them. The 40 leading fillers are
+# there because `PRACTICE_SATURATION` measures scarcity over the whole candidate
+# list — without them the section would fall silent and prove nothing.
+STARVED_ALLOWED = STAGE4_ALLOWED[:40] + [
+    "as", "his", "has", "things", "kids", "hands", "fans", "plans", "jobs",
+    "levels", "happens", "records", "seconds", "runs", "songs", "tells",
+    "classes", "dogs", "ends", "forms", "wins", "legs", "taxes", "films",
+    "begins", "brings",
+] + ["helped", "lived"]
 
 # Takes the hint: "kids" and "jumped" both need a stage-3 suffix GPC.
 STAGE4_STORY_WITH = (
@@ -89,6 +108,16 @@ async def session():
 
 
 # --- what the prompt is allowed to offer -------------------------------------
+# TWO quantifiers, and §8 needs both (DEVIATIONS 11.86-11.89). The test below is
+# the first — every offered WORD names an introduced GPC — and it was the only one
+# asserted for two phases. It is satisfied by twenty-four copies of one `s|Z`
+# word, which is close to what the live stage-3 list actually was. The second —
+# every introduced GPC the allowlist can EXPRESS is named by some offered word —
+# is `test_every_introduced_sound_the_live_allowlist_can_express_is_offered`, at
+# the foot of this file. Neither implies the other, and neither replaces the
+# other. Both fixture-based tests here run on the 40-word `STAGE4_ALLOWED`, which
+# never reaches `PRACTICE_WORD_LIMIT`, so the second one is deliberately driven
+# off the live table: the fixture is precisely why the omission was invisible.
 def test_every_offered_word_would_earn_evidence():
     """The load-bearing property. A word the grader would not credit is worse
     than no word at all: the story looks like it closed the loop and did not."""
@@ -135,6 +164,38 @@ def test_the_offer_is_frequency_ordered():
     words = offered()
     ranks = [STAGE4_ALLOWED.index(w) for w in words]
     assert ranks == sorted(ranks)
+
+
+def test_an_offer_that_fits_is_returned_exactly_as_it_came():
+    """Coverage selection only decides what SURVIVES the limit.
+
+    Below `PRACTICE_WORD_LIMIT` nothing is dropped and nothing is reordered, so
+    every fixture-based expectation above still describes the same list it did
+    before DEVIATIONS 11.87. Stated as an assertion rather than left as an
+    argument about two loops."""
+    words = offered()
+    assert len(words) < PRACTICE_WORD_LIMIT
+    assert list(words) == [w for w in STAGE4_ALLOWED if w in set(words)]
+
+
+def test_the_limit_is_spent_on_the_stage_s_SOUNDS_not_on_its_commonest_one():
+    """DEVIATIONS 11.86, as a fixture. `picked[:24]` gave all twenty-four slots
+    to `s|Z` and never named `ed|T` or `ed|D` — two of the three sounds this
+    stage teaches that the list can express — so no story taking the hint could
+    ever be asked about them, and §8 could never collect the evidence.
+
+    Note what is NOT claimed: the frequent words are not dropped, and `s|Z` still
+    gets the largest share. The slots are shared, not reassigned."""
+    words = practice_words(tuple(STARVED_ALLOWED), frozenset(STAGE4_SIGHT))
+    assert len(words) == PRACTICE_WORD_LIMIT
+    named = {gpc for w in words for gpc in stage_gpcs(3) & set(word_gpc_ids(w, 3))}
+    assert named == {"s|Z", "ed|T", "ed|D"}
+    assert "helped" in words and "lived" in words
+    # still an allowlist word, still frequency-ordered, still the common head
+    assert set(words) <= set(STARVED_ALLOWED)
+    ranks = [STARVED_ALLOWED.index(w) for w in words]
+    assert ranks == sorted(ranks)
+    assert words[0] == "as"
 
 
 # --- when the section must stay silent ---------------------------------------
@@ -279,3 +340,134 @@ async def test_the_suffix_stage_really_has_words_to_offer(session):
     assert len(words) == PRACTICE_WORD_LIMIT
     for word in words:
         assert stage_gpcs(3) & set(word_gpc_ids(word, 3)), word
+
+
+# --- the coverage direction, against the LIVE allowlist (DEVIATIONS 11.86-11.89)
+# Every assertion below reads `allowed_words` for all eleven stages, because the
+# omission this closes was invisible to the synthetic fixture by construction: 40
+# words never reach the limit, so nothing was ever cut, so no sound was ever lost.
+async def _live_window(session, stage: int) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Exactly the vocabulary `pipeline.load_vocabulary` hands the prompt."""
+    rows = tuple(
+        r[0]
+        for r in await session.execute(
+            text(
+                "SELECT word FROM allowed_words WHERE stage_id = :s "
+                "ORDER BY freq_rank LIMIT :n"
+            ),
+            {"s": stage, "n": PROMPT_WORD_LIMIT},
+        )
+    )
+    assert rows, f"stage {stage} has no allowlist — run `make precompute`"
+    sight = frozenset(
+        r[0].strip().lower()
+        for r in await session.execute(
+            text("SELECT word FROM sight_words WHERE stage_id <= :s"), {"s": stage}
+        )
+    )
+    return rows, sight
+
+
+def _expressible(window: tuple[str, ...], sight: frozenset[str], stage: int) -> dict[str, str]:
+    """Introduced GPCs this window CAN name -> the first allowlist word naming one.
+
+    Derived from the raw window, the decoder and the blocklist — never from
+    `practice_words`, so a bug in the picker cannot make the assertions pass.
+    Sight words and blocklisted words are excluded because the picker excludes
+    them: a sound only reachable through `is` or `killed` is not reachable.
+    """
+    blocked = load_blocklist()
+    out: dict[str, str] = {}
+    for raw in window:
+        word = raw.strip().lower()
+        if not word or word in sight or word in blocked:
+            continue
+        for gpc in stage_gpcs(stage) & set(word_gpc_ids(word, stage)):
+            out.setdefault(gpc, word)
+    return out
+
+
+def _named(offer: tuple[str, ...], stage: int) -> set[str]:
+    return {gpc for word in offer for gpc in stage_gpcs(stage) & set(word_gpc_ids(word, stage))}
+
+
+async def test_the_practice_section_speaks_at_every_live_stage_but_the_saturated_one(session):
+    """Pins the vacuity of the two tests below: they say nothing about a stage
+    whose offer is empty, so which stages those are has to be an assertion.
+
+    Stage 1 is silent by design (`PRACTICE_SATURATION`) — every word in its
+    window uses a stage-1 sound, so naming a sample would only narrow the
+    vocabulary. If any other stage ever falls silent, that is the finding."""
+    silent = []
+    for stage in range(1, MAX_STAGE + 1):
+        window, sight = await _live_window(session, stage)
+        if not practice_words(window, sight):
+            silent.append(stage)
+    assert silent == [1]
+
+
+async def test_every_introduced_sound_the_live_allowlist_can_express_is_offered(session):
+    """§8's quantifier, and the one nothing asserted (DEVIATIONS 11.86).
+
+    A `tap_word` can only ask about a grapheme the STORY contains, and the story
+    can only contain what the prompt pointed at — so an introduced GPC that no
+    offered word names is a sound the stage can never be asked about, however
+    well the child reads. Measured before the fix: stage 2 named 10 of the 12 its
+    allowlist can express and dropped `sh|SH` (its headline digraph, §5.7's
+    golden case, §17's demo sentence) while `ship` sat in the same 400 words;
+    stage 4 dropped `u_e|UW`, stage 5 `oa|OW`, stage 7 `au|AO` and `oy|OY`.
+
+    This is NOT a claim that a stage's whole inventory is reachable: several
+    stages introduce sounds no word in the top-400 window spells at all
+    (`or|AO.R`, `ph|F`, `ture|CH.ER`), and that is an allowlist fact no selection
+    rule can fix. The claim is that nothing the allowlist CAN say is thrown away
+    by the picker."""
+    for stage in range(1, MAX_STAGE + 1):
+        window, sight = await _live_window(session, stage)
+        offer = practice_words(window, sight)
+        if not offer:
+            continue
+        aligned = allowlist_stage(window)
+        available = _expressible(window, sight, aligned)
+        assert len(available) <= PRACTICE_WORD_LIMIT, (
+            f"stage {stage}: {len(available)} expressible sound(s) and only "
+            f"{PRACTICE_WORD_LIMIT} slots — full coverage is no longer reachable, "
+            "and this test would otherwise quietly weaken into a partial one"
+        )
+        named = _named(offer, aligned)
+        missing = {gpc: word for gpc, word in available.items() if gpc not in named}
+        assert not missing, (
+            f"stage {stage}: the practice list never names {sorted(missing)}, "
+            f"though the allowlist can: {missing}"
+        )
+
+
+async def test_every_word_the_live_offer_names_still_earns_evidence(session):
+    """The FIRST quantifier, on the live table rather than on the fixture.
+
+    Coverage selection must not buy a sound by offering a word the grader would
+    not credit — that is the failure the fixture-based
+    `test_every_offered_word_would_earn_evidence` was written against, and §0
+    forbids inventing a word regardless. Both directions, live, or the pair is
+    only half measured."""
+    for stage in range(1, MAX_STAGE + 1):
+        window, sight = await _live_window(session, stage)
+        offer = practice_words(window, sight)
+        aligned = allowlist_stage(window)
+        allowed = {w.strip().lower() for w in window}
+        for word in offer:
+            assert word in allowed, (stage, word)
+            assert word not in sight, (stage, word)
+            assert word not in load_blocklist(), (stage, word)
+            assert stage_gpcs(aligned) & set(word_gpc_ids(word, aligned)), (stage, word)
+
+
+async def test_the_live_offer_is_still_frequency_ordered(session):
+    """Selection changed; ORDER did not (DEVIATIONS 11.87). The fixture cannot
+    show this — it never truncates — and the head of the list is what a short
+    story can actually carry."""
+    for stage in range(1, MAX_STAGE + 1):
+        window, sight = await _live_window(session, stage)
+        offer = practice_words(window, sight)
+        ranks = [window.index(word) for word in offer]
+        assert ranks == sorted(ranks), stage
