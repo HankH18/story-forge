@@ -12383,3 +12383,262 @@ stories contain no word the child could not already read.
   because a concurrent agent re-statused 13 stories while this ran). Regeneration
   cost at $0.026/story: **12 stories / $0.31** for the too-far half alone, **47
   stories / $1.22** for every remaining out-of-band story. Not spent.
+
+## Phase 8 — a precomputed input changed and the pool built from it was never re-checked (22.1-22.9)
+
+The user's loudest complaint about this product was one word: *"`amid` showed up in
+almost every sentence. No five-year-old is using the word `amid`."* It was fixed in
+11.7-11.11, by replacing §5.4's literal "intersect with SUBTLEX top ~20k" — adult
+film-subtitle frequency, which proves a word is common in ADULT speech and says
+nothing about a five-year-old — with a Dale-Chall register filter and a Hunspell
+proper-noun filter.
+
+That fix changed the vocabulary the generator is **given**. It changed nothing
+whatever about the stories already in the pool. Two phases later, measured on the
+live database: **`amid` is absent from `allowed_words` at every one of the eleven
+stages, and nine servable stories still contained it — three of them offering it to
+a stage-1 child as a tappable option on the question screen.**
+
+### 22.1 — why no gate could see it, and the general principle
+
+`amid` is **decodable**. a-m-i-d is four one-to-one GPCs and aligns from stage 1,
+so `pipeline.passes_gate` passed it at generation time and
+`api/stories.py::_is_decodable_for` re-scores and passes it at every serve. The
+objection is REGISTER, not phonics, and register lives in `allowed_words` alone —
+a table no query had ever compared the pool against.
+
+Six gates were green or red for their own reasons and none of them was about this.
+`--check-coverage` counts stories. `--check-promotability` counts §8 evidence.
+`--check-prompts` and `--check-mcq2` read what a question SAYS. `--check-story-words`
+reads what a chip is spent on. Every one of them reads something the pool
+*contains*. This is the first that reads the pool against something *outside* it.
+
+The principle, which is bigger than `amid` and is the reason this is a gate rather
+than a script: **a precomputed input changing must invalidate the artefacts built
+from it.** It is the same shape as 11.60 (a prompt frame the ladder no longer
+produces, served to 120 children), 11.64/11.99 (an mcq2 the generator would now
+refuse, 7 of them pointing the child at the wrong card) and 14.20 (a picture chip
+outside §5.5's band, 248 of 326). Four instances, four different artefacts, one
+defect: a rule moved forward and the pool stayed where it was.
+
+### 22.2 — asking the right question, which took two attempts
+
+The first census censused warm stories against `allowed_words(stage) + sight_words +
+story_word_bank` and reported **57 of 108 offenders**. That number was not
+trustworthy and was discarded, because the list it produced was dominated by `sam`,
+`dan`, `tom`, `jack` and by `every`, `could`, `would`, `saw`, `around` — which is
+the signature of a wrong allowed set, not of a broken pool.
+
+What the generator is actually permitted to emit is stated in `SYSTEM_RULES` rule 1,
+verbatim: *"Every word must come from the PERMITTED WORDS list, the SIGHT WORDS
+list, or the STORY WORDS list. There are no other options."* So the permitted set
+for a story at stage S is exactly:
+
+* **`allowed_words` WHERE `stage_id = S`** — the WHOLE stage, not the 400-word
+  prompt window. `load_vocabulary` applies `ORDER BY freq_rank LIMIT
+  PROMPT_WORD_LIMIT`, which is a decision about how big a PROMPT may be; a word at
+  rank 401 is permitted vocabulary this particular request had no room to name. A
+  census on the window would have reported thousands of false offences.
+* **`sight_words` WHERE `stage_id <= S`** — cumulative, as `load_vocabulary` reads
+  them. This is what `every`, `could` and `saw` were missing from the first census.
+* **that story's own `stories.story_words`** — NOT the 24-row global
+  `story_word_bank`, which is a per-theme OFFER and is a different set from what a
+  given story actually carries chips for.
+* **there is no character-name allowlist.** Searched for and absent: `common_forms()`
+  filters proper nouns out of `allowed_words` by design (11.9) and nothing puts them
+  back. `sam`, `dan`, `kim`, `pam` are in `allowed_words` at zero stages.
+
+Two things are then excluded from the judgement, and both are exclusions of a
+DIFFERENT gate's business rather than concessions to make this one green:
+
+* **A word not decodable at the story's stage.** `precompute.compute_rows` drops any
+  word the inventory cannot align (`if first is None: continue`), so `allowed_words`
+  is *structurally unable* to contain `could`, `would`, `goes` or `around` at any
+  stage. Counting them here would silently turn this into a second decodability gate
+  with no slack, which is a different proposition — §1 permits 5% — with a different
+  remedy. 88 tokens.
+* **A possessive of a permitted word.** §5.2.1's tokeniser keeps the clitic, so
+  `rabbit's` is one token while `rabbit` is offered. Reporting it would be
+  manufacturing a finding out of a regex. 3 tokens.
+
+Both are COUNTED and printed, so an operator sees what the gate declined to judge
+instead of inferring it from a number that got smaller.
+
+### 22.3 — the honest number
+
+**49 of 119 servable stories** (`SERVABLE_STATUSES` + `ANSWERABLE_SQL`) contained at
+least one of **17 words** that is decodable at that story's own stage and that the
+current vocabulary does not permit there. 10,705 word tokens read, across titles and
+bodies.
+
+Every one of the 17 is genuine drift, not a census artefact: re-running §5.4 as
+originally specified (frequency list ∩ CMUdict ∩ literal blocklist, no register
+filter, no proper-noun filter) offers **all seventeen** at the stages they appear
+at. Three classes, three remedies:
+
+| class | words | stories | what it is |
+|---|---|---|---|
+| **REGISTER** | `amid` (9), `dragon` (3), `action` (2), `admit` (2), `national` (2), `international`, `problem`, `span` | 16 | adult register no stage offers and Dale-Chall does not vouch for. **The child-facing defect.** |
+| **proper-noun-shaped** | `sam` (28), `dan` (5), `jack` (2), `tom` (2), `kim`, `pam` | 33 | capitalised at every occurrence in the whole pool, so used as a NAME |
+| **wrong-stage** | `every` (10), `family`, `together` | 11 | child register, offered at SOME stage but not this one |
+
+Three findings inside that table are worth more than the count:
+
+1. **`amid` reached the question screen, not just the story.** Three servable
+   `tap_word` rows at stage 1 offered it as an option: *"Tap the word that starts
+   with the same sound as run."* → `["spin", "amid", "rocket"]`. `check_tap_word`
+   requires every option to be a word OF THE STORY, so the questions inherited the
+   defect from the bodies exactly as designed.
+2. **The name class is a rules conflict, not adult register, and `SYSTEM_RULES`
+   contains both halves of it.** Rule 1 says there are no options beyond the three
+   lists; rule 6 says *"`Sam sat. A cat sat on Sam.` is correct output, not a first
+   draft to improve on."* The frozen system prompt demonstrates a name the
+   vocabulary it ships with does not permit. Not fixed here — see 22.9.
+3. **`every` is the same defect from a DIFFERENT precomputed input.** It is not a
+   register casualty at all: 21.2 moved the syllable cap from `min_syllables` over
+   every CMUdict entry to `aligned_syllables` over the ones that actually align.
+   `every` has a 2-syllable CMUdict entry but aligns at stage 5 only in three
+   syllables, against a cap of two — so it went from offered to not-offered, and ten
+   stage-5/6 stories still contain it. That is why the gate is about staleness in
+   general and not about `amid`.
+
+### 22.4 — the gate: `--check-vocabulary`, the SEVENTH
+
+`python -m storyforge.warm --check-vocabulary` / `make vocab-check`. Two SQL
+queries and the decoder; no API client, nothing spent, nothing written. Exits
+non-zero while any servable story's title or body holds a word the current
+vocabulary does not permit at its stage.
+
+The help text states the boundary, because a gate whose scope is guessed at is how
+five green checks coexisted with `amid`:
+
+* **COVERS** pool drift after `make precompute` — a word the generator was offered
+  when the story was written and is not offered now.
+* **DOES NOT COVER** whether a word is DECODABLE (§1's 0.95 gate and
+  `_is_decodable_for` own that, and this gate skips every token that fails it);
+  whether a picture chip is well spent (`--check-story-words`); what a question SAYS
+  (`--check-prompts`, `--check-mcq2`); or QUESTION text, whose vocabulary rule is
+  `INSTRUCTION_WORDS` + decodability and not this one.
+
+Two design decisions carry the weight:
+
+* **The classifier may mis-sort; it may never forgive.** `classify_offence` decides
+  the ORDER of the report and is never consulted for the exit code, so a
+  misclassified word is still an offence. A class the gate forgave would be the
+  fourteenth instance of this codebase's signature defect.
+* **8.44's vacuity rule.** A vocabulary check over zero servable stories finds zero
+  offences and exits 0 — on a fresh deploy, which is exactly when an operator would
+  believe it. It refuses instead.
+
+### 22.5 — sabotage
+
+Nine sabotages, each against the source the tests cover, each confirmed red and
+reverted:
+
+| # | sabotage | went red |
+|---|---|---|
+| 1 | stop skipping words undecodable at the stage | 3 tests |
+| 2 | count a possessive of a permitted word as drift | 1 |
+| 3 | stop reading the title | 1 |
+| 4 | report every offence and exit 0 | 2 |
+| 5 | narrow the allowed set to a frequency window | 2 |
+| 6 | remove the empty-pool refusal | 1 |
+| 7 | make the exit code depend on the CLASSIFIER | 1 |
+| 8 | drop `ANSWERABLE_SQL` from the gate's query | 1 |
+| 9 | widen the permitted set by hand with `{amid, sam, dan}` | 2 |
+
+Sabotage 5 initially caught only one test, because
+`test_the_gate_reads_the_whole_stage_and_not_the_prompt_window` asserted the prompt
+window is a *proper subset* — which stays true when the gate's own set is narrowed.
+The test now asserts the gate's per-stage counts EQUAL `SELECT count(*) ... GROUP BY
+stage_id`, and sabotage 5 fails it. That assertion only exists because the sabotage
+run was done.
+
+### 22.6 — remediation: 13 quarantined, 4 regenerated, coverage held
+
+**Quarantined 13 stories** — the adult-register class — by `UPDATE stories SET
+status = 'rejected'`, with the reason, the words, the previous status and the gate
+name written to `gen_meta.vocabulary_quarantine`. At the TOP level of `gen_meta`,
+never under `enrichment`: `_record_enrichment` replaces that sub-object wholesale by
+design, which erased four rows of two real children's history once already (11.117).
+
+**Nothing was deleted.** `answers.question_id` is `ON DELETE CASCADE` and
+`questions.story_id` cascades from `stories`, so a DELETE here would erase a real
+child's history to fix our defect. Verified after the write: 13 of 13 rows still
+exist, 14 readings and 5 answers preserved. Two of the quarantined stories carry
+recorded answers and both keep them.
+
+Measured after: `amid` appears in **0** servable bodies and **0** servable questions.
+
+**Coverage was checked before acting, not after.** Quarantining all 49 offenders
+would have taken 18 of 33 pairs below target and two stages below
+`STORIES_REQUIRED_AT_STAGE` — stage 5 to **zero** servable stories. Quarantining the
+13 took three pairs to 2/1/2 and left all 11 stages above the §8 floor. Those three
+pairs were then refilled: 4 stories generated over stages 8/10/11, **$0.45** actual
+against a $0.15 `--dry-run` floor (one story was rejected and still cost). Both
+gates green afterwards: `--check-coverage` **33 of 33 pairs, 11 of 11 stages**.
+
+`dragon` was deliberately NOT quarantined. It is absent from `allowed_words` because
+Dale-Chall's 1948 familiar-word list does not contain it, not because it is adult
+register, and quarantining three dragons stories over the word `dragon` would be a
+data fix disguised as a purge — see 22.9.
+
+The 33 name-class and 11 wrong-stage stories are **held knowingly**. Regenerating
+them at the pool's own observed mean (`observed_cost_per_story`: $0.03674 over 119
+priced stories, not the $0.026 estimate) is **36 stories / $1.32**. Not spent.
+
+### 22.7 — the finding this gate turned up on the way: titles are never validated
+
+`run_pipeline` scores `draft_text(draft)`, which joins SEGMENT text and nothing
+else. So `stories.title` — child-facing, on the reading view and in every
+`StoryDTO` — has passed §13 moderation (17.1 routed it there, and stopped) and
+**neither the decodability gate nor the vocabulary rule**, ever. 30 of the 49
+offenders offend in the title.
+
+This is a GENERATION-path gap, not pool drift, and it is a different defect with a
+different owner. The gate reads titles anyway, reports them separately, and prints
+the reason — because nothing else reads them at all. Not otherwise fixed here.
+
+### 22.8 — the same class of staleness elsewhere: four inputs, four verdicts
+
+`allowed_words` is not the only precomputed input. Each was checked against the pool
+rather than assumed; the method is stated because the verdict is only worth what the
+method is.
+
+| input | verdict | how it is known |
+|---|---|---|
+| **`allowed_words`** | **table CURRENT, pool STALE** | `compute_rows` re-run in memory against the live `stages.max_syllables` produces 34,221 rows over 11 stages — **+0 / −0** against the live table, so `make precompute` has been run since the last data change. The POOL is the stale artefact, not the table. (`docs/STATE.md` still records 34,288 / 771 at stage 1; the live numbers are 34,221 / 769 — documentation drift, no code effect.) |
+| **blocklist** | **CONSISTENT** | Both matchers applied to the pool, because they are deliberately different (11.6): `load_blocklist()` — the literals `moderate.blocklist_check` matches — finds **0** hits across every servable body and **0** across every servable question's prompt, payload and answer; `blocked_forms()` — literals plus inflections, what precompute filters on — finds **0** inflected-only hits. So the 11.1-11.5 morphology expansion, which found 50 live inflections in `allowed_words`, has no counterpart in the pool. |
+| **sight-word set** | **CONSISTENT** | The 38 `sight_words` rows are identical, as `(stage, word)` pairs, to `data/seed/sight_words.csv`. And the pool depends on them correctly: re-scoring all 119 servable bodies with today's cumulative sight set gives a decodability that matches the stored `stories.decodability` to 4 d.p. on **119 of 119**, and **0** fall below the 0.95 gate. |
+| **GPC inventory** | **CONSISTENT** | The 93 `gpcs` rows are identical, as `(gpc_id, stage_id)` pairs, to the decoder package's frozen CSV. This is the strongest evidence in the audit and it is the same measurement as the row above: the inventory HAS moved since parts of the pool were generated — the eleven-stage renumber (12.1-12.14, migration `f3a91c6d0e24`) and `wh`→/w/ (8.13) — and every stored `decodability` still reproduces exactly. Monotonicity (§5.7c) plus a migration that moved `stage_id` on the data as well as the ladder is why. |
+| **moderation rules** | **RECEIPTS CONSISTENT; the JUDGEMENT cannot be verified from data** | All 119 servable stories carry a `gen_meta.moderation` receipt; **0** have `well_formed` NULL (6.24's defect, where the grammar half was computed and then dropped on write, is closed and stays closed); **0** are `approved = false` or `well_formed = false`. **That is the whole of what stored data can establish, and it is the weakest verdict here.** §13 layer 3 is a MODEL, its prompt has been rewritten four times (8.70-8.82), and every one of those passes broke a case that had been passing. Whether today's judge would still approve a body approved by the judge of two phases ago is not answerable by re-reading a receipt — it needs a re-run against the live judge over the 40-case fixture in BOTH directions (STATE invariant 5), at ~$0.14 a run plus the cost of re-judging 110 bodies. Not spent, and **not claimed**. Layers 1 and 2 are pure functions and both are clean today, which is the row above. |
+| **`story_word_bank` / §5.5 band** | **STALE — already owned by another gate** | Not in this gate's scope but measured while here: **7 of 24** bank rows are eligible at NO stage at or above their own `min_stage` (`dragon`, `rocket`, `planet`, `comet`, `orbit`, `rabbit`, `forest`), and 248 persisted chip slots sit outside the 14.20 band. `--check-story-words` is the gate for it and 14.40-14.42 is the repair. |
+
+### 22.9 — not fixed here, and why
+
+- **`dragon` (3 stories) and the theme nouns generally.** The correct remedy is a
+  DATA fix — add `dragon`, `rocket`, `planet` and their kind to
+  `data/child-vocabulary.txt` and re-run `make precompute` — not a pool purge. Every
+  five-year-old in the target audience knows the word `dragon`; its absence is a gap
+  in a 1948 vendored word list, not a judgement about register. Adding words is
+  monotone, so it can only shrink this gate's offence set, never grow it, and it
+  would also free 43 of the wasted picture chips 14.42 had to leave. NOT done here
+  because it rewrites `allowed_words` on the shared database while three other agents
+  are running against it, and because widening the child-vocabulary list is a
+  curriculum decision.
+- **The 33 name-class stories.** The rules conflict in `SYSTEM_RULES` (rule 1 versus
+  rule 6's own worked example) has to be resolved before it is clear whether these
+  are defects at all. Two coherent resolutions exist — a small curated name allowlist
+  fed into the prompt and into the permitted set, or an instruction to use only names
+  the allowlist already contains — and both are prompt changes, which invalidate
+  every cached prefix (STATE invariant 10). Named, priced ($1.32 for all 36 held
+  stories), not chosen.
+- **`--check-vocabulary` is RED and stays red**, at 36 of 110 after the quarantine
+  and refill. Green is reachable only by spending the $1.32 or by making one of the
+  two decisions above.
+- **Question text is not covered.** An `mcq2` prompt and its options are model
+  authored and are gated on `readable()` — decodability plus sight words plus story
+  words plus `INSTRUCTION_WORDS` — and not on `allowed_words` at all. So the register
+  filter does not reach them by design, and extending this gate to them would be
+  asserting a rule that was never made. Stated in the help text rather than silently
+  omitted.

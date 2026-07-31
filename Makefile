@@ -11,7 +11,8 @@ WEB := apps/web
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
         migrate seed precompute warm warm-check promote-check prompt-check \
-        mcq2-check fit-check story-word-check warm-plan eval eval-smoke codegen clean
+        mcq2-check fit-check story-word-check vocab-check warm-plan eval eval-smoke \
+        codegen clean
 
 # `[0-9]` is load-bearing: `mcq2-check` was invisible to `make help` without it,
 # which is a target that exists and cannot be discovered — the same class as a
@@ -159,6 +160,25 @@ fit-check: ## Refuse a pool whose pages do not fit the §10 screen at either rea
 # is IN the story, so the remedy is generation (DEVIATIONS 14.20).
 story-word-check: ## Refuse a pool whose picture chips sit on words the reader can already decode
 	cd $(API) && uv run python -m storyforge.warm --check-story-words
+
+# The SEVENTH gate, and the first that reads the pool against something OUTSIDE
+# it. Every other gate asks about what a story CONTAINS — a count, a prompt, an
+# mcq2, a chip. This one re-validates every servable title and body against the
+# CURRENT `allowed_words`, which is a PRECOMPUTE: `make precompute` rebuilds it
+# from `data/*`, and the stories in the pool were written against whatever it held
+# that day. DEVIATIONS 11.7-11.11 replaced §5.4's SUBTLEX intersection with a
+# child-register filter *because `amid` was reaching five-year-olds*, and that
+# changed the vocabulary the generator is GIVEN while changing nothing about the
+# 119 stories already servable: `amid` is absent from `allowed_words` at all
+# eleven stages and nine servable stories still contained it, three offering it to
+# a stage-1 child as a tappable option. Nothing caught it because nothing could —
+# `amid` IS decodable, so the 0.95 gate and the serve-time re-check pass it every
+# time. The objection is REGISTER, not phonics. The principle, which is bigger
+# than `amid`: **a precomputed input changing must invalidate the artefacts built
+# from it.** Free: two SQL queries and the decoder, no API client. There is no
+# free repair — a word sits inside a sentence (DEVIATIONS 22.1-22.9).
+vocab-check: ## Refuse a pool whose stories use words the current allowlist no longer permits
+	cd $(API) && uv run python -m storyforge.warm --check-vocabulary
 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run

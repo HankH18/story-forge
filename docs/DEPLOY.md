@@ -133,8 +133,22 @@ python -m storyforge.warm --check-prompts    # MANDATORY. Non-zero = retired ins
 python -m storyforge.warm --backfill         # ^ that check's remedy. No API call when nothing is unenriched.
 python -m storyforge.warm --check-mcq2       # MANDATORY. Non-zero = questions answerable unread. Free.
 python -m storyforge.warm --mcq2-repair      # ^ that check's remedy, then --backfill again.
+python -m storyforge.warm --check-vocabulary # MANDATORY. Non-zero = the pool uses words the
+                                             # CURRENT allowlist no longer permits. Free.
 ```
 
+- **`--check-vocabulary` guards `precompute`, not `warm`.** It is written last
+  because it is cheap, but the step it is about is `make precompute`: that command
+  rebuilds `allowed_words` from `data/*`, and every story already in the pool was
+  written against whatever that table held on the day it was generated. Re-run it
+  after ANY change to `data/child-vocabulary.txt`, `data/common-words-en.txt`,
+  `data/blocklist.txt`, `data/frequency-en.csv` or the syllable caps in `stages` —
+  **a precomputed input changing must invalidate the artefacts built from it.**
+  DEVIATIONS 11.7-11.11 removed `amid` from the allowlist *because it was reaching
+  five-year-olds*, and nine servable stories went on containing it for two phases
+  under five green gates, because `amid` is decodable and every existing check asks
+  about phonics. There is NO free repair: the remedy is to re-status the named
+  stories and re-fill, which costs money (DEVIATIONS 22.1-22.9).
 - `make seed`'s `migrate` prerequisite is already satisfied by the PRE_DEPLOY job.
 - All of them are **idempotent**; re-running them is safe.
 - `python -m storyforge.warm` calls Anthropic per story, takes many minutes, and is
