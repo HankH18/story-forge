@@ -1,6 +1,6 @@
 # RESUME — regenerated automatically, do not hand-edit
 
-**Generated:** 2026-07-30 22:00:01 CDT by `scripts/refresh_resume.sh`.
+**Generated:** 2026-07-31 10:35:05 CDT by `scripts/refresh_resume.sh`.
 Every figure here was read from the thing it describes at that moment. If a number
 looks stale, the generator is the bug, not the number.
 
@@ -8,9 +8,9 @@ looks stale, the generator is the bug, not the number.
 
 | | |
 |---|---|
-| HEAD | `4bcc141` on `k5-learning-app-gstack-setup` |
+| HEAD | `87200d6` on `k5-learning-app-gstack-setup` |
 | uncommitted files | 0 |
-| GitHub `master` | `4bcc141` |
+| GitHub `master` | `87200d6` |
 | stages in local db | 11 |
 | smallest allowed_words stage | 769 (§18's floor is 150) |
 | git worktrees | 2 (1 main + 1 sibling checkout = quiet; more = loop fixers in flight) |
