@@ -1,6 +1,6 @@
 # RESUME — regenerated automatically, do not hand-edit
 
-**Generated:** 2026-07-30 18:33:03 CDT by `scripts/refresh_resume.sh`.
+**Generated:** 2026-07-30 19:33:57 CDT by `scripts/refresh_resume.sh`.
 Every figure here was read from the thing it describes at that moment. If a number
 looks stale, the generator is the bug, not the number.
 
@@ -8,9 +8,9 @@ looks stale, the generator is the bug, not the number.
 
 | | |
 |---|---|
-| HEAD | `6fa8db6` on `k5-learning-app-gstack-setup` |
-| uncommitted files | 6 |
-| GitHub `master` | `5a7b4f2` |
+| HEAD | `1e3851e` on `k5-learning-app-gstack-setup` |
+| uncommitted files | 1 |
+| GitHub `master` | `1e3851e` |
 | stages in local db | 11 |
 | smallest allowed_words stage | 769 (§18's floor is 150) |
 | git worktrees | 2 (1 main + 1 sibling checkout = quiet; more = loop fixers in flight) |
@@ -50,26 +50,39 @@ provider connected. §17's demo runs end to end; its playground step is now
 
 ## What is NOT done, and the first one matters
 
-1. **Prod's SCHEMA is current; its CONTENT is not.** Measured read-only on
-   2026-07-30 against cluster `storyforge-pg`, db `storyforge`:
-   `alembic_version = f3a91c6d0e24`, **11 stages (1-11)** — so the renumber
-   HAS applied and the earlier "prod is pre-renumber with 12 stages" claim in
-   this file was FALSE. Prod holds 111 stories (105 warm / 3 rejected / 3
-   complete), 4 kids, 6 readings, 5 answers.
-   What is stale is the POOL, generated under the old prompts and old word
-   list: `--check-mcq2` against prod reports **13 of 52 servable two-choice
-   rows answerable with the story unread (25%), 4 of them pointing at the
-   WRONG card**, plus 2 rows with recorded answers needing an explicit
-   decision. Prod stories still contain `amid` — the exact word the user
-   reported ("no five-year-old is using the word 'amid'").
-   Rebuilding the image is `docker build --platform linux/amd64` (arm64 gives
-   `exec format error` — that already cost one deploy), push, update the tag.
-2. Prod's pool should be REPLACED, not repaired row by row. Re-warming from
-   scratch costs real money — the local warm's own recorded figure is
-   **$16.29 across 637 generated stories ($0.0256 avg)**. Copying the
-   already-gated local pool in is free and is the better route, but prod has
-   4 real kids and 6 readings whose story_id references would cascade, so it
-   needs a migration, not a truncate.
+1. **Prod is CURRENT as of 2026-07-30 19:30 CDT — code and pool both.** Image
+   `1e3851e-amd64`, pool swapped from the gated local one, test kids wiped with
+   the owner's authorisation. Verified by what the ORIGIN SERVES: the new
+   bundle 200s, the old one 404s, `/api/health` is ok with
+   `demo_bypass_auth: false`, a garbage token 401s, `/api/themes` 200s.
+   Prod: 667 stories / 104 warm / 204 questions / 34,221 allowed_words / 0 kids
+   / 0 readings / 0 answers / 1 user / 33 assets. `amid` appears in **0**
+   servable bodies and **0** servable questions.
+   Gates against prod: `--check-coverage` 0, `--check-mcq2` 0,
+   `--check-vocabulary` 1, `--check-story-words` 1. The two reds are the
+   SAME documented residual local carries (`dragon`, `planet` — absent from
+   Dale-Chall 1948, not adult register), ~$1.32 of regeneration, deliberately
+   unspent.
+2. **NEVER trust a DigitalOcean deploy's `phase`. Read `cause`.** A
+   PRE_DEPLOY failure aborts the deploy and App Platform then AUTO-ROLLS BACK
+   to the previous image — and the rollback is itself a deployment that reaches
+   phase **ACTIVE**. So `doctl apps list-deployments` says ACTIVE, health
+   answers 200, the spec lists the new tag, and the OLD code serves.
+       doctl apps list-deployments <app> --format ID | head -1
+       curl -sH "Authorization: Bearer $TOKEN" .../deployments/<id> | jq -r .deployment.cause
+       # "app spec updated"                       -> real
+       # "automated rollback after failed deploy" -> you shipped nothing
+   THREE deploys were lost to this. The always-correct check is what the origin
+   serves: fetch `/`, read the `index-*.js` hash, and confirm the NEW hash
+   200s and the OLD one 404s.
+   Two causes, both now fixed and tested (`test_deploy_spec.py`): the migrate
+   job's `run_command` used shell syntax (`cd X && alembic ...`) but App
+   Platform EXEC-forms it, so it hunted for a binary named `cd` and exited
+   128; and the LIVE spec's migrate job had **no envs at all**, so alembic fell
+   back to config.py's default and tried to reach `localhost:5433` from a
+   container. The live spec has drifted from `.do/app.yaml` generally — live
+   names the service `app`, the file names it `api` — so the committed spec
+   is NOT a description of what is running.
 3. Open, documented, not blockers: one grammar false positive on coordinated
    subjects (`"Sam and the rabbit spin."`); §1.6's p95<12s recorded as unmet and
    unreachable with the criterion unrelaxed; `ruff format --check` fails on ~39
