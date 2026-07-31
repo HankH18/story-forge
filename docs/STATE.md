@@ -8,7 +8,7 @@ are the numbers of their day; commands and invariants are current.
 
 Spec: `.context/attachments/D8l1e3/story-forge-build-doc.md` — all § refs are to it.
 Style: `.context/attachments/Lln7Af/Story Forge Style Guide.dc.html`.
-Every deviation with rationale: `docs/DEVIATIONS.md` (~150 entries, numbered by phase).
+Every deviation with rationale: `docs/DEVIATIONS.md` (406 entries, numbered by phase).
 Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 
 ## Done — phases 0-7, every claim verified live
@@ -19,21 +19,30 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 | 1 decoder | Pure validator, **93**-GPC inventory, vendored SHA-pinned CMUdict. 18/18 §5.7 goldens. Anti-golden suite + vacuity ratchet (**44.75%**, ceiling 50%) — both sabotage-tested, and the ratchet has now refused a real proposed row (DEVIATIONS 8.12). `wh`→/w/ added at the digraph stage (8.13; stage 2 since the renumber). |
 | 2 precompute | `make seed` idempotent; `make precompute` → **34,366** rows / 12 stages in 1.9s, **4,397** distinct words. `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **228** entries → **1,009** forms with inflections, **38** sight words (DEVIATIONS 8.10–8.17, 8.73–8.74, 8.81, **11.1–11.12**). **Two filters replaced §5.4's SUBTLEX intersection and the row counts moved a long way: 64,296 → 34,366.** (a) The blocklist match is **morphology-aware** — it was `if word in blocked` against a list of BASE forms, so the exact-match hit count read **0** while 50 inflections of blocked entries (`fucks`, `asses`, `killings`, `corpses`, `punching`, `addicts`) sat in the live table; `moderate.blocklist_check` deliberately still matches literals, because a layer-1 hit short-circuits layer 3 (11.6). (b) §5.4 named the **wrong corpus** — adult film-subtitle frequency proves a word is common in adult speech, not that a five-year-old knows it, and `amid` (rank 7,528), `lebron`, `nixon` and `nasa` were offered at stage 1. Dale-Chall familiar words now filter register and lowercase Hunspell headwords filter proper nouns. **Stage 1 is 78 and that is a measured CEILING**: its nine GPCs can spell only 78 child words, and its old 157 cleared §18's 150 floor only because 27 were proper nouns and 61 were adult register. It is the ONLY stage below the floor — every other stage is 771–4,397 — so the authorised remedy is **retiring stage 1** (inventories are cumulative, so new stage 1 = old stage 2 = 771 words). **That renumbering is now DONE** (12.1-12.14): stage rows, GPC/sight-word assignments, `MAX_STAGE` (canonical home now `storyforge.decoder`), the §5.7 goldens (re-derived, not decremented), the vacuity ratchet (re-measured: 44.75%, unmoved — the top stage's cumulative set is the same 93 GPCs), §17's demo (stage 2), and live `stage_id` data via migration `f3a91c6d0e24`, sabotage-verified per old stage. `make precompute` now writes **34,221** rows / 11 stages, **769**–4,397 per stage — every stage clears §18's 150 floor. **The 34,288/771 those numbers replace were measured with the syllable cap asking the wrong question** (DEVIATIONS 21.2): the cap was checked against `min_syllables(prons)` — the fewest syllables in ANY CMUdict pronunciation, including ones the aligner could not use at that stage — so **67 rows over 20 words (`every`, `family`, `several`, `towards`, `different`…) were offered at stages whose cap they broke**, and 199 rows carried a count from a reading no child there can produce. It is now `aligned_syllables`, counted per stage over the pronunciations that actually align, and `test_syllable_cap_is_honoured` could never see this because it compares the STORED number to the cap — precompute agreeing with itself. **The vacuity ratchet is also no longer a property of a stage number** (21.3): it measured `mastered_ids(MAX_STAGE)`, which equals the full inventory only by the convention that the top stage is review, so a re-stage moves the reading without moving permissiveness (simulated at `MAX_STAGE=8`: 44.00% and a quiet pass, against 44.75% unmoved). It measures `full_inventory()` now, and asserts the top stage teaches all 93. |
 | 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` **targets** ≥3 per (stage,theme) over all 11 stages × 3 themes, idempotent — see the pool row below for what the database actually holds. Moderation = free blocklist + Haiku judge. |
-| warm pool | **`make warm-check` is GREEN: 36 of 36 (stage,theme) pairs hold ≥3 servable stories.** Filled in three passes for **$0.35** total, because `make warm` fills only the shortfall — it is not a re-run. Two earlier versions of this row were wrong in opposite directions and both are worth remembering: the first claimed "`make warm` fills ≥3 per (stage,theme)" when the command defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories across 3 stages — and §17's demo is dragons at a low stage, so **the demo would have passed with nine stages empty**. The second recorded the pool as 13/36 with the gate red, which was honest when written and is now stale. The lesson is the gate, not the number: `make warm-check` exits non-zero and is the only claim here that cannot rot (DEVIATIONS 8.40–8.48). |
+| warm pool | **`make warm-check` is GREEN: 33 of 33 (stage,theme) pairs hold ≥3 servable stories, and 11 of 11 STAGES hold ≥5** — the pair count fell 36→33 with the stage-1 retirement, and the per-stage floor was added because the pair gate read green while 29 of 33 pairs held fewer than 5, which is §8's actual promotion requirement. Filled in three passes for **$0.35** total, because `make warm` fills only the shortfall — it is not a re-run. Two earlier versions of this row were wrong in opposite directions and both are worth remembering: the first claimed "`make warm` fills ≥3 per (stage,theme)" when the command defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories across 3 stages — and §17's demo is dragons at a low stage, so **the demo would have passed with nine stages empty**. The second recorded the pool as 13/36 with the gate red, which was honest when written and is now stale. The lesson is the gate, not the number: `make warm-check` exits non-zero and is the only claim here that cannot rot (DEVIATIONS 8.40–8.48). |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
 
-**API: 775 passed, 2 skipped** (`cd services/api && uv run pytest`; the suite uses
+**API: 1190 passed, 3 skipped** (`cd services/api && uv run pytest`; the suite uses
 pytest-randomly and has pre-existing order-dependent failures under a random seed
-— use `-p no:randomly` for a clean baseline).
+— use `-p no:randomly` for a clean baseline). Web: **239 pass**, `tsc` clean,
+`bun run build` clean. This row read "775 passed, 2 skipped" for long enough to be
+stale by 415 tests; an agent flagged it rather than trusting it.
+
+**Postgres is on port 5433, not 5432** — `services/api/.env` is the authority, and
+source it BEFORE overriding `DATABASE_URL`, never after. Hardcoding 5432 gives
+`connection refused`, which surfaces as a DIFFERENT set of failures every run
+(each run dies wherever it first needs the database) and reads exactly like the
+concurrent-writer problem described below. It is not. Prove which by connecting
+once by hand before diagnosing a race.
 **The suite shares one live Postgres, so a concurrent writer makes it lie.** Two
 agents running it at once produced *moving* failures — `test_eval.py` x7, then
 `test_readings`, then `test_auth` — none reproducible alone, because these tests
 sweep real rows (`SELECT … WHERE status = ANY(SERVABLE_STATUSES)`) and delete by id
 window. Before believing a red suite, re-run it against a private copy:
 `docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfscratch'`
-then `DATABASE_URL=…/sfscratch uv run pytest`. The 775/2 above is from exactly that
+then `DATABASE_URL=…/sfscratch uv run pytest` (note port 5433). The counts above are from exactly that
 (DEVIATIONS 8.47).
-**Web: 232 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers —
+**Web: 239 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers —
 the line said 137 for several phases after the number had moved.
 `make test` = `test-api` + `test-web`, and **`test-web` is now typecheck AND
 tests** — it was typecheck alone for five phases, which is why the "395 tests
