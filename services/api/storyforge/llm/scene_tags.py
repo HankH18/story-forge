@@ -29,7 +29,7 @@ it is a normal outcome, not an error.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from enum import StrEnum
 from typing import Protocol
 
@@ -246,12 +246,35 @@ def select_asset(
     assets: Iterable[TaggedAsset],
     *,
     kind: str | None = "segment",
+    avoid: Collection[int] = (),
 ) -> TaggedAsset | None:
-    """Pick the best-matching asset: most tag overlap, tiebreak by asset id (§12).
+    """Pick the best-matching asset: most tag overlap, then a NOVELTY tiebreak,
+    then asset id (§12).
 
-    Pure. Same tags + same pool => same asset, always. Two children reading the
-    same story must see the same pictures, and the eval harness must be able to
-    reproduce a run.
+    Pure. Same tags + same pool + same `avoid` => same asset, always. Two
+    children reading the same story must see the same pictures, and the eval
+    harness must be able to reproduce a run.
+
+    **`avoid` is the ids already spent on this story, and it is a TIEBREAK, not
+    a penalty.** §12's rule is "most tag overlap, deterministic tiebreak by
+    asset id", and the second half of that sentence is what went wrong: when two
+    assets overlap equally, lowest-id-always-wins is not a tiebreak between
+    pictures, it is a fixed preference that repeats down the whole story. The
+    animals pool holds exactly two rabbit pictures (`forest-02`, `burrow-01`),
+    so every screen tagged `rabbit` and nothing else that matched scored 1 on
+    both, and asset 24 — the lower id — took all seven pages. Measured on the
+    live pool before this changed: **4 servable stories showed ONE picture on
+    every page and 40 more showed two**, and a story whose seven screens carry
+    one repeated picture is what the owner meant by "there are no images in the
+    stories".
+
+    Overlap still comes first and is never traded away. Demoting a better match
+    because it has been seen would put a *wrong* picture on the page — a cat in
+    a story about a dragon — and §12's promise is that the segment renders the
+    best-matching asset. Novelty only decides between assets that match the
+    segment EQUALLY WELL, where §12 was choosing arbitrarily anyway. Once every
+    equally-good match is spent, the lowest id wins again, so a story with more
+    screens than pictures repeats instead of falling back to the placeholder.
 
     `kind` defaults to `"segment"` because the pool also holds 1:1 theme covers
     and 1:1 transparent story-word cutouts (style guide §06). Dropping a square
@@ -266,15 +289,53 @@ def select_asset(
     if not wanted:
         return None
 
+    spent = set(avoid)
     best: TaggedAsset | None = None
-    best_overlap = 0
-    # Ascending id + strict `>` is the deterministic tiebreak: the first asset
-    # to reach a given overlap keeps it, and the first is the lowest id.
+    best_key: tuple[int, int] | None = None
+    # Ascending id + strict `>` on the key is the deterministic tiebreak of last
+    # resort: the first asset to reach a given (overlap, unseen) keeps it, and
+    # the first is the lowest id.
     for asset in sorted(assets, key=lambda a: a.id):
         if kind is not None and asset.kind != kind:
             continue
         overlap = len(wanted & set(asset.tags))
-        if overlap > best_overlap:
-            best_overlap = overlap
+        if overlap == 0:
+            continue
+        key = (overlap, 0 if asset.id in spent else 1)
+        if best_key is None or key > best_key:
+            best_key = key
             best = asset
     return best
+
+
+def select_story_assets(
+    story_tags: Sequence[Sequence[str]],
+    assets: Iterable[TaggedAsset],
+    *,
+    kind: str | None = "segment",
+) -> list[TaggedAsset | None]:
+    """Pick every picture in ONE story, in reading order (§12).
+
+    This is where `select_asset`'s `avoid` set is threaded, and it exists as a
+    named pure function because the story — not the segment — is the unit the
+    repeat is visible in. A per-segment selector cannot see that it has already
+    used this picture six times; nothing else in the pipeline was looking at the
+    story as a whole, which is how three stories came to carry asset 24 on all
+    seven pages.
+
+    Order is significant and must be READING order (`story_segments.idx`): page
+    1 gets first claim on the best match, later pages take the best of what is
+    left. Deterministic for a given order, which is what §12's reproducibility
+    promise actually needs — the same story always renders the same book.
+
+    Returns one entry per input, `None` where §06's placeholder is the answer.
+    """
+    pool = list(assets)
+    used: set[int] = set()
+    picks: list[TaggedAsset | None] = []
+    for tags in story_tags:
+        chosen = select_asset(tags, pool, kind=kind, avoid=used)
+        if chosen is not None:
+            used.add(chosen.id)
+        picks.append(chosen)
+    return picks

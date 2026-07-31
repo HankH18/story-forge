@@ -22,6 +22,7 @@ from storyforge.llm.scene_tags import (
     StoryTagging,
     _enforce_vocabulary,
     select_asset,
+    select_story_assets,
 )
 from storyforge.seed import SEED_DIR, _rows
 
@@ -150,6 +151,68 @@ def test_selection_is_repeatable():
     assets = [FakeAsset(i, ["cave", "dragon"]) for i in range(20, 0, -1)]
     picks = {select_asset(["cave", "dragon"], assets).id for _ in range(50)}
     assert picks == {1}
+
+
+# --- the tiebreak breaks AWAY from a picture this story already used ---------
+# The live defect (DEVIATIONS 26.1): lowest-id-always-wins is not a tiebreak
+# between two pictures, it is a standing preference for one of them, and it
+# repeats on every screen. Four servable stories rendered ONE picture on every
+# page; asset 24 was on 160 segments across 32 stories.
+def test_an_asset_already_used_in_this_story_loses_the_tie():
+    assets = [FakeAsset(4, ["cave", "dragon"]), FakeAsset(7, ["cave", "dragon"])]
+    assert select_asset(["cave", "dragon"], assets).id == 4
+    assert select_asset(["cave", "dragon"], assets, avoid={4}).id == 7
+
+
+def test_novelty_never_beats_overlap():
+    """§12's rule is unchanged: most tag overlap wins, and novelty only decides
+    between assets that match EQUALLY WELL. Demoting a better match because it
+    has been seen would put a wrong picture on the page."""
+    assets = [
+        FakeAsset(1, ["cave", "dragon", "sleeping"]),
+        FakeAsset(2, ["cave"]),
+    ]
+    assert select_asset(["cave", "dragon", "sleeping"], assets, avoid={1}).id == 1
+
+
+def test_when_every_equal_match_is_spent_the_lowest_id_comes_back():
+    """A story with more screens than pictures repeats rather than falling back
+    to the placeholder — a repeat is worse than a fresh picture and far better
+    than no picture."""
+    assets = [FakeAsset(4, ["cave"]), FakeAsset(7, ["cave"])]
+    assert select_asset(["cave"], assets, avoid={4, 7}).id == 4
+
+
+def test_a_story_stops_showing_one_picture_on_every_page():
+    """The live case, with the live rows: the animals pool holds exactly two
+    rabbit pictures, and story 7291's seven screens were all asset 24."""
+    pool = [
+        FakeAsset(23, ["forest", "fox", "day"]),
+        FakeAsset(24, ["forest", "rabbit", "hiding"]),
+        FakeAsset(25, ["rabbit", "digging", "meadow"]),
+    ]
+    tags = [["rabbit", "forest"], ["rabbit"], ["rabbit", "friendly_creature"]]
+    picks = select_story_assets(tags, pool)
+    assert [p.id for p in picks] == [24, 25, 24]
+    assert len({p.id for p in picks}) > 1
+
+
+def test_select_story_assets_is_deterministic_and_keeps_the_placeholder():
+    pool = [FakeAsset(1, ["cave"]), FakeAsset(2, ["cave"])]
+    tags = [["cave"], [], ["water"], ["cave"]]
+    first = select_story_assets(tags, pool)
+    assert [p.id if p else None for p in first] == [1, None, None, 2]
+    for _ in range(10):
+        again = select_story_assets(tags, pool)
+        assert [p.id if p else None for p in again] == [1, None, None, 2]
+
+
+def test_a_cover_is_still_refused_when_the_segment_pool_is_exhausted():
+    """§06's aspect-ratio rule outranks novelty: a 1:1 cover in the 4:3 frame is
+    a real bug, and 'we have run out of segment art' is not a licence."""
+    pool = [FakeAsset(1, ["cave"], kind="segment"), FakeAsset(2, ["cave"], kind="cover")]
+    picks = select_story_assets([["cave"], ["cave"]], pool)
+    assert [p.id for p in picks] == [1, 1]
 
 
 # --- no match returns None so the UI can draw the placeholder (§06) ----------

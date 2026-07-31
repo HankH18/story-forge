@@ -99,6 +99,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -133,7 +134,11 @@ from storyforge.llm.questions import (
     tap_word_prompt,
     word_graphemes,
 )
-from storyforge.llm.scene_tags import SceneTagResult, select_asset, tag_segments
+from storyforge.llm.scene_tags import (
+    SceneTagResult,
+    select_story_assets,
+    tag_segments,
+)
 
 # §8's evidence rule, imported rather than restated: `tap_word` is the only
 # question type that ever moved `gpc_stats`, so it is the only one whose row is
@@ -168,6 +173,8 @@ from storyforge.pipeline import (
 # Dale-Chall set `precompute.compute_rows` filters on, so the gate's account of
 # WHY a word is not offered cannot drift from the reason it is not offered.
 from storyforge.precompute import child_forms
+
+log = logging.getLogger(__name__)
 
 TARGET_PER_PAIR = 3
 
@@ -1214,7 +1221,7 @@ async def enrich(
             meta["scene_tags_error"] = f"{type(tagging).__name__}: {tagging}"
         else:
             cost += _usage_cost(tagging.usage, today)
-            await _apply_tags(session, story, segments, tagging)
+            await _apply_tags(session, story, segments, tagging, meta)
             meta["scene_tags_degraded"] = tagging.degraded
 
         # Counted off the rows rather than off the node's reply, so a re-run over
@@ -1328,17 +1335,75 @@ def _as_generated(row: Question) -> GeneratedQuestion:
     )
 
 
-async def _apply_tags(session, story: Story, segments, tagging: SceneTagResult) -> None:
-    """Write per-segment tags and pick each segment's picture (§12)."""
+def art_shortfall(
+    tag_lists: Sequence[Sequence[str]], picks: Sequence[object | None]
+) -> dict[str, list]:
+    """Name the screens that will render §06's placeholder, and say WHY.
+
+    Two causes, and they need different remedies, which is the whole reason
+    they are recorded apart:
+
+    * `untagged` — SCENE_TAGGING returned an empty list for that screen. Its
+      own prompt invites this ("If a screen is just dialogue or feeling with
+      nothing to draw, return an empty list"), so it is a sanctioned answer and
+      not an error; the remedy, if 2.5% of screens is too many, is the prompt.
+    * `unmatched` — the screen HAS tags and no asset in the theme carries any
+      of them. That is a hole in the asset library, and the tags name the hole:
+      every one on the live pool was a dragons screen tagged `celebrating` or
+      `running`, neither of which any dragons picture has.
+
+    Before this, a story recorded `segments_with_art: 5` of 6 and stopped. The
+    count let you infer how many screens lost their picture; it never said
+    WHICH, and it never distinguished "the model saw nothing to draw" from "we
+    do not own this picture" — so the second, which is a curation backlog with
+    a shopping list attached, was indistinguishable from the first, which is
+    normal.
+    """
+    untagged = [i for i, tags in enumerate(tag_lists) if not [t for t in tags if t]]
+    unmatched = [
+        {"idx": i, "tags": list(tags)}
+        for i, (tags, pick) in enumerate(zip(tag_lists, picks, strict=False))
+        if pick is None and [t for t in tags if t]
+    ]
+    return {"untagged": untagged, "unmatched": unmatched}
+
+
+async def _apply_tags(
+    session, story: Story, segments, tagging: SceneTagResult, meta: dict | None = None
+) -> None:
+    """Write per-segment tags and pick each segment's picture (§12).
+
+    `segments` is in `idx` order (its caller selects it that way) and that
+    matters now: `select_story_assets` gives page 1 first claim on the best
+    match and lets later pages take the best of what is left, so a story stops
+    being seven copies of one picture.
+    """
     pool = (
         (await session.execute(select(Asset).where(Asset.theme_id == story.theme_id)))
         .scalars()
         .all()
     )
-    for seg, tags in zip(segments, tagging.tags, strict=False):
+    tag_lists = [list(tags) for _, tags in zip(segments, tagging.tags, strict=False)]
+    picks = select_story_assets(tag_lists, pool)
+    for seg, tags, chosen in zip(segments, tag_lists, picks, strict=True):
         seg.scene_tags = list(tags)
-        chosen = select_asset(tags, pool)
         seg.asset_id = chosen.id if chosen else None
+
+    shortfall = art_shortfall(tag_lists, picks)
+    if meta is not None:
+        meta["art_untagged_idx"] = shortfall["untagged"]
+        meta["art_unmatched"] = shortfall["unmatched"]
+        meta["art_distinct"] = len({p.id for p in picks if p is not None})
+    if shortfall["untagged"] or shortfall["unmatched"]:
+        log.warning(
+            "story %s (%s): %d screen(s) will render the §06 placeholder — "
+            "untagged idx %s, unmatched %s",
+            story.id,
+            story.theme_id,
+            len(shortfall["untagged"]) + len(shortfall["unmatched"]),
+            shortfall["untagged"],
+            [u["tags"] for u in shortfall["unmatched"]],
+        )
 
 
 def _record_verdict(meta: dict, verdict: ModerationResult) -> None:
@@ -3757,6 +3822,303 @@ async def run_vocabulary_check() -> None:
     )
 
 
+# --- §12 illustration: the EIGHTH gate (DEVIATIONS 26.1-26.6) ----------------
+# The first gate that reads what a child SEES on the picture side, and the owner
+# reported its defect before any of the others: "there are no images in the
+# stories". The art is real — 33 rows, 33 files, HTTP 200 in production — so the
+# failure was never the files. It was selection.
+#
+# §12's rule is "most tag overlap, deterministic tiebreak by asset id". The
+# tiebreak is the half that broke: lowest-id-always-wins is not a tiebreak
+# between two pictures, it is a standing preference for one of them, and it
+# repeats for every screen of the story. Measured on the live pool the day this
+# was written: **4 servable stories showed ONE picture on all seven pages and 40
+# more showed two**; asset 24 alone was on 160 segments across 32 stories.
+#
+# Nothing could see it, because every existing count is per-SEGMENT. A story
+# whose seven pages all carry asset 24 records `segments_with_art: 7` — full
+# marks — and the repeat only exists at the STORY level. That is the general
+# lesson and the reason this gate's unit is the story.
+
+#: Every servable story's screens in reading order, with the tags they were
+#: given. Same `SERVABLE_STATUSES` + `ANSWERABLE_SQL` predicate as every other
+#: gate, imported and never re-spelled: a picture on a story the serving path
+#: refuses is not a picture any child is shown.
+_ART_SQL = text(
+    f"""
+    SELECT s.id AS story_id, s.stage_id, s.theme_id, t.slug AS theme_slug,
+           g.idx, g.scene_tags, g.asset_id
+    FROM stories s
+    JOIN themes t ON t.id = s.theme_id
+    JOIN story_segments g ON g.story_id = s.id
+    WHERE s.status = ANY(:statuses)
+      AND {ANSWERABLE_SQL.format(story="s")}
+    ORDER BY s.id, g.idx
+    """
+)
+
+
+@dataclass
+class StoryArt:
+    """What one servable story renders, and what today's pool says it should."""
+
+    story_id: int
+    stage_id: int
+    theme_slug: str
+    #: (idx, tags, stored asset id, asset id today's selector picks)
+    screens: tuple[tuple[int, tuple[str, ...], int | None, int | None], ...]
+
+    @property
+    def stored_distinct(self) -> int:
+        return len({a for _, _, a, _ in self.screens if a is not None})
+
+    @property
+    def chosen_distinct(self) -> int:
+        return len({a for _, _, _, a in self.screens if a is not None})
+
+    @property
+    def tagged_screens(self) -> int:
+        return sum(1 for _, tags, _, _ in self.screens if tags)
+
+    @property
+    def untagged(self) -> tuple[int, ...]:
+        """Screens SCENE_TAGGING returned nothing for. The prompt invites this."""
+        return tuple(idx for idx, tags, _, _ in self.screens if not tags)
+
+    @property
+    def unmatched(self) -> tuple[tuple[int, tuple[str, ...]], ...]:
+        """Screens that HAVE tags and that no asset in the theme carries. A hole
+        in the library, and the tags are the shopping list."""
+        return tuple(
+            (idx, tags) for idx, tags, _, chosen in self.screens if tags and chosen is None
+        )
+
+    @property
+    def stale(self) -> tuple[int, ...]:
+        """Screens whose stored picture is not the one today's pool would pick."""
+        return tuple(idx for idx, _, stored, chosen in self.screens if stored != chosen)
+
+
+#: A story that renders ONE picture on every page is the defect the owner saw.
+#: Two is not a rich book; it is the floor below which the illustration is
+#: telling the child nothing, and it is the floor the CURRENT library can
+#: actually meet (measured: after re-selection the worst servable story renders
+#: 2 distinct pictures, and only one story is that low). Raising it is a
+#: CURATION decision, not a selector decision — see DEVIATIONS 26.5.
+MIN_DISTINCT_PICTURES = 2
+
+
+async def art_census(session) -> list[StoryArt]:
+    """Every servable story's pictures: what is stored, and what §12 picks now.
+
+    Re-selection uses the STORED `scene_tags`, so it costs nothing — no model
+    call, no tagging pass. That is what makes the repair free: the expensive
+    half (asking a model what is in the picture) already happened and is on the
+    row.
+    """
+    rows = (await session.execute(_ART_SQL, {"statuses": list(SERVABLE_STATUSES)})).all()
+    assets = (await session.execute(select(Asset))).scalars().all()
+    pool: dict[int, list[Asset]] = {}
+    for asset in assets:
+        pool.setdefault(asset.theme_id, []).append(asset)
+
+    grouped: dict[int, list] = {}
+    for row in rows:
+        grouped.setdefault(row.story_id, []).append(row)
+
+    out: list[StoryArt] = []
+    for story_id, screens in grouped.items():
+        first = screens[0]
+        tag_lists = [list(s.scene_tags or []) for s in screens]
+        picks = select_story_assets(tag_lists, pool.get(first.theme_id, []))
+        out.append(
+            StoryArt(
+                story_id=story_id,
+                stage_id=first.stage_id,
+                theme_slug=first.theme_slug,
+                screens=tuple(
+                    (s.idx, tuple(tags), s.asset_id, p.id if p else None)
+                    for s, tags, p in zip(screens, tag_lists, picks, strict=True)
+                ),
+            )
+        )
+    return out
+
+
+def render_art(census: Sequence[StoryArt], limit: int = 12) -> list[str]:
+    """The art report: repeats first, then the two kinds of missing picture."""
+    lines = [f"\nILLUSTRATION (§12) — {len(census)} servable story/stories"]
+    if not census:
+        return lines
+
+    hist: dict[int, int] = {}
+    for art in census:
+        hist[art.stored_distinct] = hist.get(art.stored_distinct, 0) + 1
+    lines.append(
+        "  distinct pictures per story (as STORED): "
+        + ", ".join(f"{n}x{hist[n]}" for n in sorted(hist))
+    )
+
+    thin = sorted(
+        (a for a in census if a.stored_distinct < MIN_DISTINCT_PICTURES and a.tagged_screens > 1),
+        key=lambda a: (a.stored_distinct, a.story_id),
+    )
+    lines.append(
+        f"  {len(thin)} story/stories render fewer than {MIN_DISTINCT_PICTURES} distinct "
+        f"pictures across more than one tagged screen"
+    )
+    for art in thin[:limit]:
+        shown = sorted({a for _, _, a, _ in art.screens if a is not None})
+        lines.append(
+            f"    story {art.story_id} stage {art.stage_id} {art.theme_slug}: "
+            f"{len(art.screens)} screens, picture(s) {shown or 'none'}"
+        )
+    if len(thin) > limit:
+        lines.append(f"    ... and {len(thin) - limit} more")
+
+    untagged = sum(len(a.untagged) for a in census)
+    unmatched = [(a, idx, tags) for a in census for idx, tags in a.unmatched]
+    screens = sum(len(a.screens) for a in census)
+    lines.append(
+        f"  {untagged + len(unmatched)} of {screens} screen(s) render §06's placeholder: "
+        f"{untagged} the model returned NO tags for, {len(unmatched)} tagged and matching "
+        "no asset in their theme"
+    )
+    holes: dict[tuple[str, tuple[str, ...]], int] = {}
+    for art, _idx, tags in unmatched:
+        holes[(art.theme_slug, tags)] = holes.get((art.theme_slug, tags), 0) + 1
+    for (theme, tags), n in sorted(holes.items(), key=lambda kv: -kv[1])[:limit]:
+        lines.append(f"    LIBRARY HOLE {theme}: {list(tags)} on {n} screen(s), no asset")
+
+    stale = [a for a in census if a.stale]
+    if stale:
+        lines.append(
+            f"  {len(stale)} story/stories carry a picture today's selector would not "
+            f"pick ({sum(len(a.stale) for a in stale)} screen(s)) — free repair: "
+            "`--reselect-art`"
+        )
+    return lines
+
+
+async def run_art_check() -> None:
+    """`--check-art`: §12's pictures as an exit code. Free.
+
+    The EIGHTH gate. It asks the one question no per-segment count can ask —
+    does this STORY show the child more than one picture — and it reports the
+    placeholder census with its two causes separated, because they have
+    different remedies and only one of them is a bug.
+
+    No API client is constructed; nothing is spent and nothing is written.
+    """
+    async with SessionLocal() as session:
+        census = await art_census(session)
+
+    if not census:
+        # 8.44's vacuity rule: a clean art report over an empty pool is not a
+        # pass, and a fresh deploy is exactly when it would be believed.
+        raise SystemExit(
+            "refusing to report clean illustration over an EMPTY pool: no story is "
+            "servable (`SERVABLE_STATUSES` + `ANSWERABLE_SQL`). Run `python -m "
+            "storyforge.warm`, then `--check-coverage`, then this."
+        )
+
+    for line in render_art(census):
+        print(line, flush=True)
+
+    thin = [
+        a
+        for a in census
+        if a.stored_distinct < MIN_DISTINCT_PICTURES and a.tagged_screens > 1
+    ]
+    if thin:
+        raise SystemExit(
+            f"\n{len(thin)} of {len(census)} servable story/stories render fewer than "
+            f"{MIN_DISTINCT_PICTURES} distinct pictures over more than one tagged "
+            "screen.\nA story whose pages carry one repeated picture is what "
+            '"there are no images in the stories" looks like from the couch.\n'
+            "  Free repair, no API call: `python -m storyforge.warm --reselect-art`."
+        )
+    print(
+        f"\nOK — every one of the {len(census)} servable story/stories renders at least "
+        f"{MIN_DISTINCT_PICTURES} distinct pictures."
+    )
+
+
+async def reselect_art(session, only: Sequence[int] | None = None) -> list[StoryArt]:
+    """Re-run §12's selection over the STORED tags and write what changed. Free.
+
+    The pool already holds the expensive half: every one of these screens has
+    been through SCENE_TAGGING and carries its tags. Re-selecting needs no model
+    and no tagging pass, which is what makes fixing the backlog cost $0.00.
+
+    Refuses to touch anything else. It never writes `scene_tags` — those are the
+    model's answer and re-deriving them is `--backfill`'s job at a Haiku call per
+    story — never reads or writes a `questions` row, and never edits story text.
+    Idempotent by construction: it writes the output of a pure function of rows
+    it does not change, so a second run finds nothing to do.
+    """
+    census = await art_census(session)
+    wanted = set(only or [])
+    changed: list[StoryArt] = []
+    for art in census:
+        if wanted and art.story_id not in wanted:
+            continue
+        if not art.stale:
+            continue
+        for idx, _tags, _stored, chosen in art.screens:
+            if _stored == chosen:
+                continue
+            await session.execute(
+                text(
+                    "UPDATE story_segments SET asset_id = :asset "
+                    "WHERE story_id = :story AND idx = :idx"
+                ),
+                {"asset": chosen, "story": art.story_id, "idx": idx},
+            )
+        changed.append(art)
+    return changed
+
+
+async def run_art_repair(only: Sequence[int] | None = None) -> None:
+    """`--reselect-art`: give the backlog its pictures back. Free.
+
+    Reports the residual by re-reading the pool afterwards rather than trusting
+    its own counters — 11.84's rule, after a grammar backfill printed success
+    while writing three of five verdict fields.
+    """
+    async with SessionLocal() as session:
+        before = await art_census(session)
+        changed = await reselect_art(session, only)
+        await session.commit()
+        after = await art_census(session)
+
+    def thin(census: Sequence[StoryArt]) -> int:
+        return sum(
+            1
+            for a in census
+            if a.stored_distinct < MIN_DISTINCT_PICTURES and a.tagged_screens > 1
+        )
+
+    screens = sum(len(a.stale) for a in changed)
+    print(f"\nART RE-SELECTION — {len(before)} servable story/stories")
+    print(
+        f"  {screens} screen(s) across {len(changed)} story/stories now render the "
+        "picture §12 picks today"
+    )
+    for art in changed[:10]:
+        print(
+            f"    story {art.story_id} stage {art.stage_id} {art.theme_slug}: "
+            f"{art.stored_distinct} -> {art.chosen_distinct} distinct pictures"
+        )
+    if len(changed) > 10:
+        print(f"    ... and {len(changed) - 10} more")
+    print(
+        f"  residual: {thin(after)} story/stories below {MIN_DISTINCT_PICTURES} distinct "
+        f"pictures (was {thin(before)})."
+    )
+    print("  Verify with `python -m storyforge.warm --check-art`.")
+
+
 def _report_cue_repair(repaired: int, stuck: Sequence[int], answered: Sequence[int]) -> None:
     """Print what `repair_leaky_cues` did — including what it could not do."""
     if repaired:
@@ -4233,6 +4595,30 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--check-art",
+        action="store_true",
+        help=(
+            "report §12's illustration per SERVABLE STORY — distinct pictures, and "
+            "the screens rendering §06's placeholder split by cause — and exit "
+            f"NON-ZERO while any story shows fewer than {MIN_DISTINCT_PICTURES} "
+            "distinct pictures over more than one tagged screen, then exit. No API "
+            "calls, nothing spent. The unit is the STORY because the repeat does not "
+            "exist at the segment (a story with one picture on seven pages records "
+            "seven segments with art). The repair is `--reselect-art` and is free "
+            "(DEVIATIONS 26.1)"
+        ),
+    )
+    p.add_argument(
+        "--reselect-art",
+        action="store_true",
+        help=(
+            "re-run §12's asset selection over the tags ALREADY on the rows and "
+            "write the result, then exit. Free, no API call: the tagging pass has "
+            "already happened and is on the segment. Never writes `scene_tags`, "
+            "never reads a questions row, never edits story text (DEVIATIONS 26.4)"
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -4313,6 +4699,10 @@ def main() -> None:
             asyncio.run(run_story_word_check())
         elif a.check_vocabulary:
             asyncio.run(run_vocabulary_check())
+        elif a.check_art:
+            asyncio.run(run_art_check())
+        elif a.reselect_art:
+            asyncio.run(run_art_repair(only=only))
         elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
         elif a.mcq2_repair:
