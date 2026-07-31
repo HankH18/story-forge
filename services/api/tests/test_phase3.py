@@ -114,8 +114,37 @@ async def test_every_warm_story_has_segments(session):
     assert not rows.all()
 
 
+# When was this row pulled from the pool? One expression, every pull path, so a
+# new path is one entry here rather than a fourth copy of the invariant. Kept as
+# SQL rather than Python because assertions 1 and 2 must ask the DATABASE — a
+# Python-side coalesce would only see rows a query had already selected.
+_PULLED_AT = (
+    "coalesce(gen_meta->'moderation'->>'pulled_at',"
+    "         gen_meta->'vocabulary_quarantine'->>'at')"
+)
+
+
 async def test_rejected_stories_are_kept_but_never_warm(session):
     """Rejects are eval evidence for why a pair is hard — kept, never served.
+
+    `justify-test-edit`, run 2026-07-30 (SECOND time, third pull path). VERDICT:
+    THE TEST IS AMBIGUOUS AGAIN, for the same structural reason and not a new
+    one. `--check-vocabulary`'s quarantine (DEVIATIONS 22.x) pulls stories whose
+    words left `allowed_words` after they were generated, and records
+    `gen_meta.vocabulary_quarantine.at`. Thirteen rows were legitimately served
+    while warm and then pulled — indistinguishable, under the old assertion,
+    from `_SERVE_SQL` leaking a rejected story to a child.
+
+    Checked before editing, because the alternative reading was a live safety
+    failure: 0 rejected+served rows lack a pull time under ANY path, and 0 were
+    served AFTER their pull time. So this is the ambiguity, not the leak.
+
+    The 2026-07-29 note below fixed this once by making the sweep record
+    `pulled_at`. That fix does not generalise, because it named ONE producer;
+    the third producer reintroduced the ambiguity by writing a different key.
+    So the shape of the fix changes: the invariant now asks "did SOMETHING
+    record pulling this row", via `_PULLED_AT`, which is what it always meant.
+    Assertion 4 is the price of that generalisation and is strictly new.
 
     `justify-test-edit`, run 2026-07-29. VERDICT: CODE IS WRONG (the sweep was
     not recording *when* it pulled a story); the assertion below is then narrowed
@@ -147,13 +176,14 @@ async def test_rejected_stories_are_kept_but_never_warm(session):
     )
     assert rows.scalar_one() >= 0  # presence is fine; the invariant is below
 
-    # 1. Rejected at GENERATION — never in the pool, so a serve stamp on one
-    #    still means `_SERVE_SQL` leaked a rejected row. Verbatim the original
-    #    assertion, over exactly the rows it was written about.
+    # 1. Rejected at GENERATION — never in the pool, so a serve stamp with NO
+    #    pull record under any path still means `_SERVE_SQL` leaked a rejected
+    #    row. Same question as the original; it just no longer assumes that
+    #    moderation is the only thing that can pull.
     bad = await session.execute(
         text(
-            "SELECT id FROM stories WHERE status='rejected' AND last_served_at IS NOT NULL "
-            "AND gen_meta->'moderation'->'pulled_at' IS NULL"
+            "SELECT id FROM stories WHERE status='rejected' "
+            f"AND last_served_at IS NOT NULL AND {_PULLED_AT} IS NULL"
         )
     )
     assert not bad.all()
@@ -163,11 +193,27 @@ async def test_rejected_stories_are_kept_but_never_warm(session):
     served_after = await session.execute(
         text(
             "SELECT id FROM stories WHERE status='rejected' "
-            "AND gen_meta->'moderation'->'pulled_at' IS NOT NULL "
-            "AND last_served_at > (gen_meta->'moderation'->>'pulled_at')::timestamptz"
+            f"AND {_PULLED_AT} IS NOT NULL "
+            f"AND last_served_at > ({_PULLED_AT})::timestamptz"
         )
     )
     assert not served_after.all()
+
+    # 4. STRICTLY NEW, and the reason generalising 1 and 2 is not a relaxation.
+    #    `_PULLED_AT` coalesces, so a FOURTH pull path that records a reason but
+    #    no timestamp reads as NULL — and on an unserved row that NULL is
+    #    invisible to both assertions above. This sees it: any recognised pull
+    #    record must carry its own time, served or not.
+    undated = await session.execute(
+        text(
+            "SELECT id FROM stories WHERE status='rejected' AND ("
+            "  (gen_meta ? 'vocabulary_quarantine'"
+            "   AND gen_meta->'vocabulary_quarantine'->>'at' IS NULL)"
+            "  OR (gen_meta->'moderation' ? 'pulled_at'"
+            "      AND gen_meta->'moderation'->>'pulled_at' IS NULL))"
+        )
+    )
+    assert not undated.all()
 
     # 3. Every pulled row names why, so a story is never out of rotation for a
     #    reason nobody recorded.
