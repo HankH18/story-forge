@@ -11,8 +11,8 @@ WEB := apps/web
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
         migrate seed precompute warm warm-check promote-check prompt-check \
-        mcq2-check fit-check story-word-check vocab-check warm-plan eval eval-smoke \
-        codegen clean
+        mcq2-check fit-check story-word-check vocab-check art-check art-repair \
+        warm-plan eval eval-smoke codegen clean
 
 # `[0-9]` is load-bearing: `mcq2-check` was invisible to `make help` without it,
 # which is a target that exists and cannot be discovered — the same class as a
@@ -179,6 +179,29 @@ story-word-check: ## Refuse a pool whose picture chips sit on words the reader c
 # free repair — a word sits inside a sentence (DEVIATIONS 22.1-22.9).
 vocab-check: ## Refuse a pool whose stories use words the current allowlist no longer permits
 	cd $(API) && uv run python -m storyforge.warm --check-vocabulary
+
+# The EIGHTH gate, and the first whose unit is the STORY rather than the segment,
+# the question or the word. The owner's first complaint about this app was "there
+# are no images in the stories"; the art is real (33 rows, 33 files, HTTP 200 in
+# production) and the defect was in SELECTION. §12's "deterministic tiebreak by
+# asset id" degraded to lowest-id-always-wins — a standing preference for one
+# picture, re-applied on every page — and 4 servable stories rendered ONE picture
+# on all seven pages while 40 more rendered two. **No per-segment count could see
+# it**: a story whose seven pages all carry asset 24 records `segments_with_art:
+# 7`, full marks, because the repeat does not exist at the segment. Also reports
+# the screens rendering §06's placeholder with their two causes separated — the
+# model had nothing to draw, or the library owns no picture for these tags — which
+# is a curation shopping list and not a bug. Free: two SQL queries, no API client.
+# The repair is `make art-repair` and is also free (DEVIATIONS 26.1-26.8).
+art-check: ## Refuse a pool whose stories render one repeated picture on every page
+	cd $(API) && uv run python -m storyforge.warm --check-art
+
+# Re-runs §12's selection over the tags ALREADY on the rows: the tagging pass has
+# been paid for and is stored, so this costs $0.00 and makes no API call. It never
+# writes `scene_tags`, never reads a questions row and never edits story text.
+# Idempotent. 226 screens across 108 of 110 servable stories on its first run.
+art-repair: ## Re-pick every servable story's pictures under the current rule. Free, no API call
+	cd $(API) && uv run python -m storyforge.warm --reselect-art
 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run

@@ -12642,3 +12642,425 @@ method is.
   filter does not reach them by design, and extending this gate to them would be
   asserting a rule that was never made. Stated in the help text rather than silently
   omitted.
+
+## Phase 8 — the guard that says no route ships open has inspected zero routes (26.1-26.9)
+
+Round-3 audit, area: authentication, authorisation and child-data ownership. The
+brief for it was one sentence — *can any request reach a `kid`, `reading`,
+`answer` or `gpc_stats` row belonging to a different parent?* — and the honest
+answer needs two different measurements, because they can disagree: **is the
+boundary enforced today**, and **would the suite notice if it stopped being**.
+Everything below was driven through the real ASGI app with two real RS256
+sessions from the local JWKS server, never with a dependency override.
+
+### 26.1 — `test_health_is_the_only_unauthenticated_route` iterates a list that no longer contains routes
+
+`tests/test_kids.py` closes with the one check in the codebase that is supposed
+to be **structural** rather than enumerated: every other auth test names the
+route it probes, so a route added without a dependency is caught only if someone
+remembers to add a line. That test reads the boundary off the app instead —
+
+```python
+for route in app.routes:
+    dependants = getattr(route, "dependant", None)
+    if dependants is None:
+        continue
+    ...
+assert open_routes <= {"/api/health", "/openapi.json", "/docs", ...}
+```
+
+— and its docstring says so: *"A new router registered without a dependency shows
+up here as a failure naming the path, instead of quietly shipping open."*
+
+**It inspects zero routes, and has since FastAPI began wrapping `include_router`
+in `_IncludedRouter`.** Measured at HEAD `47d3f7b`:
+
+```
+routes the guard inspects: 0
+open_routes: []
+assertion passes vacuously: True
+app.routes: ['Route', 'Route', 'Route', 'Route',
+             '_IncludedRouter' x 7]
+```
+
+`app.routes` holds four Starlette `Route`s for FastAPI's own `/docs`,
+`/redoc`, `/openapi.json` and `/docs/oauth2-redirect` — none of which carries a
+`.dependant` — and seven `_IncludedRouter` objects, one per `include_router`
+call, which carry the real `APIRoute`s underneath `.original_router.routes` and
+have no `.dependant` of their own. Every one of them takes the `continue`. So
+`open_routes` is `set()` on every run, `set() <= anything` is True, and the
+assertion is incapable of failing.
+
+**The proof that it should have been red is already in the repository.** The app
+has had two deliberately unauthenticated routes since the catalog router landed
+(DEVIATIONS 8.60): `GET /api/themes` and `GET /api/stages`, both `(public,
+cached)` in §9. Neither is in the guard's allowlist. A working version of this
+test would have gone red the moment `catalog.router` was mounted — which is
+exactly the event it exists to notice — and instead it stayed green through that
+commit and every commit since.
+
+This is the same failure class as AUDIT-PHASE7-FIXES F2 and STATE's note about
+`test_syllable_cap_is_honoured`: a check that agrees with itself. It is worse
+than the absence of the test, because the docstring is load-bearing in review —
+"a route added without a dependency is caught" is a claim two audits have been
+entitled to rely on.
+
+Fixed by walking `.original_router.routes` recursively, and — because a
+recursion that silently finds nothing is the *same defect in a new place* — by
+asserting a floor on how many routes were inspected and pinning the public set
+to §9's own list rather than to whatever the app happens to expose.
+
+### 26.2 — what the ownership boundary actually costs to break: a sabotage sweep
+
+The boundary is **enforced today**. That is the first measurement, and it is the
+one that matters most, so it was taken adversarially rather than by reading
+decorators: each ownership check was removed one at a time in a sandboxed copy of
+the tree (`/tmp/sfrepo`, a private `sfauth` database, PYTHONPATH-shadowed so the
+live worktree was never edited) and the whole suite re-run against a recorded
+control failure set.
+
+| # | what was removed | caught? | by |
+|---|---|---|---|
+| S1 | `_OWNED_KID_SQL`'s `AND parent_id = :parent_id` | yes | 7 tests, incl. `test_kids.py::test_progress_another_parents_kid_is_404` |
+| S2 | `_OWNED_READING_SQL`'s `AND k.parent_id = :parent_id` | yes | 4 tests |
+| S3 | `owned_kid` in `kid_progress` | yes | 5 tests |
+| S4 | `owned_kid` in `start_reading` | yes | `test_start_a_reading_for_another_parents_kid_is_404` |
+| S5 | `owned_reading` in `record_choice` | yes | `test_kids.py:238`, `:390` |
+| S6 | `owned_reading` in `record_answer` | yes | `test_kids.py:254`, `:390` |
+| S7 | `owned_reading` in `complete_reading` | **barely** | one assertion, and **not** the dedicated test — see 26.3 |
+| S8 | `owned_kid` in `stories._resolve_anchor` | yes | `test_story_stage_binding.py:303` |
+
+### 26.3 — the completion endpoint's own test cannot see its own check disappear
+
+S7 is the interesting row. `POST /api/readings/{id}/complete` is the highest-harm
+write in the API — it moves `gpc_stats`, flips `stories.status` and can promote a
+child a stage — and it has a test written for precisely this, whose docstring
+reads *"Ownership is checked BEFORE the completion latch, not after. A check that
+ran after the latch would return 404 to the attacker with all of that already
+done."*
+
+With `owned_reading` removed from that handler,
+`test_complete_another_parents_reading_is_404_and_changes_nothing` **still
+passes**, and so does the `complete` row of `test_a_kid_id_is_not_a_credential`.
+Both observe a 404 and an unchanged database, and both are right to: the handler
+reaches `owned_kid(session, principal, latched.kid_id)` further down, that raises
+404, the request never commits, and SQLAlchemy rolls the whole transaction back
+on session close. The property those tests assert is genuinely still held — by a
+*different* mechanism than the one they were written about.
+
+The only thing in the suite that notices is
+`test_a_wrong_owner_is_indistinguishable_from_a_nonexistent_id`, at
+`tests/test_kids.py:313`, and it notices for an oblique reason: the surviving
+refusal names a **kid** id where the reading-shaped one named a **reading** id,
+so the two 404 bodies stop matching:
+
+```
+assert 'kid 24059 not found' == 'reading N not found'
+```
+
+So the 404-indistinguishability rule — written for enumeration, not for this —
+is what holds the line. That is a thin thread for the endpoint that writes §8's
+evidence, and it is thin in a way nobody could have seen without removing the
+check: the defence-in-depth that makes the behaviour correct is exactly what
+makes the test blind.
+
+Not "fixed" by weakening the second check — it is doing its job. Closed instead
+by asserting the thing that actually distinguishes the two mechanisms.
+
+
+## Phase 8 — the pictures were never missing; they were SELECTED (26.1-26.8)
+
+The owner's first reported complaint about this app was *"there are no images in
+the stories"*, and it was the oldest open one. The art is real and always was:
+**33 asset rows, 33 files on disk, HTTP 200 in production, verified today.** So
+the defect was never the files, and every hunt through `/assets/art/v1/` was
+looking in the wrong place. It was in `select_asset`, and it had two halves —
+one that put the SAME picture on every page of a story, and one that put no
+picture on a page and left no record that it had.
+
+### 26.1 — the confirmation, and the two places the handed-down numbers were wrong
+
+The finding arrived second-hand: *"asset 24 is on all seven segments of three
+stories"* and *"29 of 832 segments still have no asset (5 of them on page 1)"*.
+Four findings in this project have been withdrawn as measurement artefacts, so it
+was re-measured from scratch against a private copy (`pg_dump storyforge | psql
+sfart`, port **5433**) before a line was changed.
+
+**The defect is real and the mechanism is exactly as described.** Confirmed:
+
+* Over the whole `story_segments` table, **stories 7291, 7301 and 9022 carry
+  asset 24 on all seven of their segments** — three stories, seven pages, one
+  picture, precisely the claim.
+* On the population that matters — `SERVABLE_STATUSES` + `ANSWERABLE_SQL`, the
+  predicate every other gate uses — it is **110 stories and 763 segments**, and
+  **4 of those stories rendered ONE picture on every page**: 7291 and 7301
+  (asset 24), story 18 (asset 1, dragons) and story 29681 (asset 19, space).
+  Story 9022 is `rejected` and no child can be served it. **40 more stories
+  rendered exactly two.**
+* Asset 24 alone was on **160 of the 763 servable segments across 32 stories**;
+  asset 1 on 127 across 38. **Five of the thirty segment illustrations had never
+  been shown to a single child** (dragons `sky-02`, space `planet-01`, space
+  `sleep-01`, animals `nest-01`, animals `snow-01`).
+
+Two corrections, neither of which changes the conclusion:
+
+1. **The assetless count is 24 of 763, not 29 of 832 — and the difference is
+   POPULATION, not arithmetic.** 832 was the servable segment count before
+   DEVIATIONS 22.6 quarantined 13 stories; the pool is 763 segments now. Same
+   defect, smaller pool. (`--check-art` also reports **25** as an SQL count of
+   `asset_id IS NULL`: one extra segment, story 6 page 1, is stored NULL while
+   today's asset table matches it at overlap 3 — a stale selection from before
+   the assets were seeded, and 22.1's principle showing up on the art table.)
+2. **Three of the assetless are on page 1, not five.** Same reason.
+
+The mechanism, stated exactly: `select_asset` ranked on `overlap > best_overlap`
+over a pool sorted by ascending id, so **an equal overlap never displaced the
+incumbent and the incumbent was always the lowest id**. The animals theme holds
+exactly two rabbit pictures (`forest-02` = 24, `burrow-01` = 25). A screen tagged
+`rabbit` and nothing else that matched scored 1 on both, 24 won, and it won again
+on the next screen, and the next. §12 calls this a "deterministic tiebreak by
+asset id". It is deterministic. It is not a tiebreak — it is a standing
+preference for one picture, re-applied on every page.
+
+### 26.2 — why no gate could see it: the metric was denominated in the wrong unit
+
+`_apply_tags` has always written `enrichment.segments_with_art` to `gen_meta`.
+For story 7291 it says **7 of 7**. Full marks. Every screen has a picture and
+every one of them is the same picture.
+
+**The repeat does not exist at the segment.** It is a property of the STORY, and
+nothing in the pipeline — not `_UNENRICHED_SQL`, not any of the seven gates, not
+the DTO — had ever looked at a story's pictures as a set. That is the general
+lesson and it is worth more than the fix: *a metric denominated in the wrong unit
+is not a weak signal, it is a green light.* It is the same shape as 8.50 (a story
+with zero questions whose `status` was still `warm`) and 14.20 (a chip counted as
+present without asking what it was spent on).
+
+So `--check-art`'s unit is the story, and `StoryArt.stored_distinct` is the
+number the old metric could not express.
+
+### 26.3 — the rule chosen: novelty is a TIEBREAK, never a penalty
+
+`select_asset` grows one keyword-only argument, `avoid` — the ids already spent
+on this story — and ranks on the tuple:
+
+    (overlap, asset.id not in avoid)   maximised, then lowest id
+
+**Overlap still comes first and is never traded away.** The rejected alternative
+was to subtract a point of overlap for a repeat, which diversifies harder and is
+wrong: it puts a *worse-matching* picture on the page — a cat in a story about a
+dragon — and §12's promise is that the segment renders the best-matching asset.
+Novelty only decides between assets that match the segment **equally well**,
+which is precisely where §12 was choosing arbitrarily anyway. Nothing that was
+determined before is determined differently now; only the arbitrary half moved.
+
+Two consequences worth stating because they were chosen, not inherited:
+
+* **When every equally-good match is spent, the lowest id comes back.** A story
+  with more screens than pictures repeats rather than falling back to §06's
+  placeholder. A repeat is worse than a fresh picture and much better than no
+  picture.
+* **`kind` still outranks novelty.** Running out of segment art is not a licence
+  to drop a 1:1 cover into the 4:3 frame (§06). Tested.
+
+The per-story loop is `select_story_assets(story_tags, assets)`, a named pure
+function beside `select_asset`, because the story is the unit the repeat lives in
+and a per-segment selector structurally cannot see it. It takes segments in
+READING order — page 1 gets first claim on the best match, later pages take the
+best of what is left — and `_apply_tags`'s caller already selects
+`ORDER BY StorySegment.idx`. Determinism is unchanged and is now stated as: same
+tags + same pool + same order => same book, always.
+
+Measured effect on the live pool, distinct pictures per servable story:
+
+    before   1x4    2x40   3x34   4x20   5x12
+    after           2x1    3x11   4x32   5x30   6x26   7x10
+
+No story renders one picture any more, the busiest asset drops from 160 screens
+to 99, and the five illustrations no child had ever seen are all now reachable.
+
+### 26.4 — the free repair, and it RAN AGAINST THE LIVE POOL
+
+Fixing the selector fixes nothing a child can see. That trap has now been fallen
+into three times in this project — 11.60's prompt frames, 11.64's mcq2s, 14.20's
+chips — always the same way: *the rule moved forward and the pool stayed where it
+was.* Every story in the pool had its pictures chosen by the old rule.
+
+`--reselect-art` re-runs §12's selection over the tags **already on the rows**.
+The expensive half — asking a model what is in the picture — has already been
+paid for and is stored in `story_segments.scene_tags`, so this costs **$0.00 and
+makes no API call**. It refuses everything else: it never writes `scene_tags`
+(those are the model's answer; re-deriving them is `--backfill`'s job at a Haiku
+call per story), never reads or writes a `questions` row, and never edits story
+text. Idempotent by construction — it writes the output of a pure function of
+rows it does not change — verified by a second run selecting nothing.
+
+**Run against `localhost:5433/storyforge`, the real local pool, after being
+rehearsed on the private copy: 226 screens across 108 of the 110 servable
+stories.** `--check-art` was RED (4 stories) before and is GREEN after.
+
+That it touched nothing else is not a claim, it is a diff: md5 digests of
+`story_segments(body, scene_tags)`, `questions(prompt)` and
+`stories(title, status, story_words)` are byte-identical between the repaired
+copy and a fresh dump of live, except for two stories another agent moved
+`warm -> complete` in the same window.
+
+**Operationally, and this needs an operator decision:** the code is in the
+deployed image, but **the 226-screen data fix exists only in the local pool**.
+Production was re-seeded from local BEFORE the repair ran, so production still
+serves the old assignments. The remedy is one free command against the production
+database or another re-seed. Not done here — DigitalOcean is not this pass's to
+modify.
+
+### 26.5 — the library, which is the honest answer: it is too small, and it MEETS the spec
+
+Asked plainly: do the tag vocabulary and the asset library meet? **No, and no
+selector can fix it.** 33 rows = 3 theme covers + **30 segment illustrations, 10
+per theme**, against a **42-tag closed vocabulary** and 7-screen stories.
+
+Coverage, measured (assets carrying the tag / live servable screens tagged with
+it):
+
+| tag | animals | dragons | space | | tag | animals | dragons | space |
+|---|---|---|---|---|---|---|---|---|
+| astronaut | 0/0 | 0/0 | **5/123** | | knight | 0/0 | 3/22 | 0/0 |
+| bird | 2/25 | 0/0 | 0/0 | | lost | **0/4** | 1/2 | 0/0 |
+| castle | 0/0 | 2/0 | 0/0 | | meadow | 2/2 | 1/1 | 0/0 |
+| cat | 2/15 | 0/0 | 0/0 | | moon | 0/0 | 1/0 | 2/68 |
+| cave | **0/41** | 2/106 | 0/0 | | mountain | **0/9** | 1/7 | 0/0 |
+| celebrating | **0/16** | **0/20** | 1/29 | | night | 1/6 | 2/10 | 2/18 |
+| climbing | **0/2** | **0/1** | 0/0 | | path | 1/3 | 1/6 | 0/0 |
+| day | 2/24 | 2/15 | 1/2 | | planet | 0/0 | 0/0 | 3/8 |
+| digging | 1/13 | 0/0 | 0/0 | | rabbit | 2/187 | 0/0 | 0/0 |
+| dog | 2/13 | **0/2** | 0/0 | | running | 1/49 | **0/26** | **0/3** |
+| dragon | 0/0 | 8/212 | 0/0 | | sky | 1/0 | 1/28 | 3/7 |
+| eating | **0/6** | **0/2** | 0/0 | | sleeping | 2/24 | 1/13 | 1/2 |
+| fire | 0/0 | 1/32 | 0/0 | | snow | 1/0 | 0/0 | 0/0 |
+| fish | 1/0 | 0/0 | 0/0 | | space | 0/0 | 0/0 | 4/74 |
+| flying | 1/0 | 2/62 | 2/32 | | spaceship | 0/0 | 0/0 | 4/137 |
+| forest | 3/98 | 2/0 | 0/0 | | stars | 0/0 | 1/2 | 3/68 |
+| found | 1/7 | 0/0 | 1/1 | | storm | **0/2** | 0/0 | 0/0 |
+| fox | 2/2 | 0/0 | 0/0 | | swimming | 1/0 | 0/0 | 0/0 |
+| friendly_creature | **0/6** | **0/9** | 1/0 | | treasure | 0/0 | 1/3 | 0/0 |
+| helping | 1/7 | 1/11 | 0/0 | | village | 0/0 | **0/6** | 1/0 |
+| hiding | 1/10 | 1/2 | 0/0 | | water | 1/8 | **0/9** | 0/0 |
+
+Bold = a tag the tagger USES in that theme and the theme owns no picture for.
+
+    animals  10 assets, 22/42 tags covered, 8 tags in live demand with no asset
+    dragons  10 assets, 20/42 tags covered, 8 tags in live demand with no asset
+    space    10 assets, 15/42 tags covered, 1 tag  in live demand with no asset
+    3 tags (climbing, eating, storm) have NO asset in ANY theme
+
+Three things follow, and only the third is a code question:
+
+1. **A tag vocabulary can only discriminate as finely as the library it indexes.**
+   Ten pictures can express at most ten distinct scenes, so a theme covering 15-22
+   of 42 tags means **half the vocabulary is decoration in every theme**. The
+   tagger is handed all 42 tags for every theme (`build_tagging_request` sends the
+   whole set), so cross-theme demand is not a mistake — it is guaranteed. `cave`
+   is used on **41 animals screens** and there is no animals cave.
+2. **The library is at spec and the SPEC under-provisions.** §12 asks for
+   "~8-12 images per theme"; there are 11 (10 + cover). Nobody skimped. The
+   number was chosen before the vocabulary was 42 tags wide and before stories
+   were 7 screens long, and 3 themes x 11 stages x >=3 stories is ~99 stories
+   drawing on 10 pictures each. This is a **curation** answer, and naming it is
+   worth more than a cleverer selector: **the cheapest real fix is roughly 6-10
+   more drawings, not more code.** The six with the most live demand behind them:
+   dragons `running` (26 screens), dragons `celebrating` (20), animals `cave`
+   (41), animals `celebrating` (16), animals `mountain` (9), and anything for
+   `eating` (8 across two themes). Those alone would close all 5 unmatched
+   screens and add discrimination exactly where the tagger is asking for it.
+3. **`MIN_DISTINCT_PICTURES` is 2 because 2 is what this library can supply.**
+   The gate could demand a fresh picture per page; it would then be permanently
+   red for a reason no operator can act on. 2 is the floor below which the
+   illustration is telling the child nothing, it is the number the repair
+   actually reaches on every servable story, and raising it is a decision to make
+   *after* the drawings exist, not before.
+
+### 26.6 — the silence, and whether empty tags should be a generation-time refusal
+
+A screen SCENE_TAGGING returned no tags for was demoted to §06's placeholder with
+no record of which screen or why. Not total silence — `segments_with_art: 5` of 6
+was written — but a count that says how many and never which, and that **cannot
+distinguish the two causes**, which need opposite remedies:
+
+* **untagged (19 of 763)** — the model returned an empty list. Its own prompt
+  invites this: rule 4 of `SCENE_TAG_SYSTEM` says *"If a screen is just dialogue
+  or feeling with nothing to draw, return an empty list."*
+* **unmatched (5 of 763)** — the screen HAS tags and no asset in the theme
+  carries any of them. A hole in the library, and **the tags are the shopping
+  list**: every one is a dragons screen tagged `celebrating` (3) or `running`
+  (2), and the dragons theme owns neither.
+
+`art_shortfall(tag_lists, picks)` returns exactly that split; `_apply_tags`
+writes it to `gen_meta.enrichment` as `art_untagged_idx` (the indices),
+`art_unmatched` (index + tags) and `art_distinct`, and logs one WARNING naming
+the story and the screens. `--check-art` reports the census with the causes
+separated and the library holes named.
+
+**Should empty tags be a generation-time refusal? No — and it is a decision, not
+an omission.** Three reasons:
+
+1. It would punish the model for **obeying its own prompt**. Refusing the output
+   rule 4 asks for is a prompt bug dressed as a validation rule.
+2. **Illustration is decorative by design.** `select_asset` returning None is a
+   documented normal outcome, §06 defines the fallback, and STATE invariant 11
+   says an enrichment node degrades and never raises — a story that has already
+   passed §1's decodability gate and §13's moderation has been paid for twice,
+   and throwing it away over a picture spends money to shrink the pool.
+3. §7's ladder answers a thin (stage, theme) pair by **silently serving a lower
+   stage**, so refusing stories over art would shrink the pool *invisibly* —
+   the exact failure 8.40-8.48 exists to prevent.
+
+So: observable, never fatal. If 2.5% of screens with nothing to draw is judged
+too many, the remedy is prompt rule 4 — a prompt change, which invalidates every
+cached prefix (STATE invariant 10) and must be measured against the live model.
+Deliberately not done here.
+
+**The 24 assetless screens are still 24.** The tiebreak fix cannot touch them and
+was never going to: 19 have no tags to match with and 5 have tags nothing owns.
+The web layer draws §06's tinted theme cover over them, which is a fallback and
+not a fix, and the fix is 26.5's drawings.
+
+### 26.7 — sabotage
+
+Every test was broken at its source and confirmed to redden **at its own
+assertion line**, not at an earlier one:
+
+| # | sabotage | test lines that went RED |
+|---|---|---|
+| 1 | `select_asset` key -> `(overlap, 1)` (novelty ignored) | `test_scene_tags.py:164` (the `avoid={4}` assertion, not the plain-tie one above it), `:196`, `:204`; `test_story_art.py:129` (`chosen_distinct > 1`, after the three stored-state assertions passed), `:173`, `:215`, `:246`, `:272`, `:329` — 9 tests |
+| 2 | `select_story_assets` stops threading `used` | `test_scene_tags.py:196`, `:204`; `test_story_art.py:129`, `:173`, `:215`, `:246`, `:272`, `:329` — 8 tests |
+| 3 | `art_shortfall` reports every miss as untagged | `test_story_art.py:140` (`unmatched`, after the `untagged` assertion on 139 passed), `:303` |
+| 4 | `_apply_tags` stops writing the shortfall to `meta` | `test_story_art.py:302` (`KeyError: 'art_untagged_idx'`) |
+| 5 | the WARNING log suppressed | `test_story_art.py:306` |
+| 6 | repair's `if not art.stale` inverted (selects nothing) | `test_story_art.py:215`, `:246`, `:272` |
+| 7 | repair's UPDATE made a no-op (`SET asset_id = asset_id`) | `test_story_art.py:225` ("still one picture on every page" — the write-path assertion, reached only because the return value stayed honest), `:246`, `:272` |
+| 8 | gate's `if thin:` -> `if False:` | `test_story_art.py:154` DID NOT RAISE |
+| 9 | gate's empty-pool vacuity refusal removed | `test_story_art.py:184` DID NOT RAISE |
+
+Sabotages 6 and 7 are deliberately a pair. 6 alone reddens the repair tests at
+their FIRST assertion (the repair returned nothing), which proves only that it
+ran — 7 leaves the return value honest and breaks the write, so `:225` is
+reached and the postcondition is what fails. One sabotage today proved nothing
+because an earlier assertion fired first; this is that lesson applied.
+
+### 26.8 — not fixed here, and why
+
+- **The 24 placeholder screens.** 19 need a prompt change (26.6), 5 need
+  drawings (26.5). Neither is a selector defect and both cost something this
+  pass was not authorised to spend.
+- **The drawings themselves.** Named, prioritised by live demand, not produced —
+  they are Hank's offline job per §12, and guessing at six SVGs would be worse
+  than the shortlist.
+- **Production's asset ids.** The image carries this code; the local pool
+  carries the repaired data; production carries neither the repair nor a re-seed
+  since. One free command fixes it and it is the operator's to run (26.4).
+- **`scene_tags` staleness in general.** Story 6 page 1 is one segment whose
+  stored selection predates its own asset row. `--reselect-art` fixes the
+  SELECTION side of 22.1's principle for free; the TAGGING side (a segment
+  tagged before the vocabulary changed) still needs `--backfill` and a Haiku
+  call, and no gate asks that question yet.
+- **The `stage` dimension.** Art is chosen per theme and per tag; nothing
+  varies it by stage, and nothing here changed that. §12 does not ask for it.

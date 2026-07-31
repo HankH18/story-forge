@@ -52,7 +52,8 @@ Lint: `cd services/api && uv run ruff check storyforge tests`.
 ```
 make dev | test | seed | precompute | warm | warm-plan
 make warm-check | promote-check | prompt-check | mcq2-check | fit-check \
-     story-word-check                                          # the six gates
+     story-word-check | vocab-check | art-check                # the eight gates
+make art-repair                        # free, no API call (DEVIATIONS 26.4)
 make eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
@@ -143,7 +144,41 @@ with no way in), and so is a decodable word the stage's vocabulary does not perm
 (`dragon`, `planet` are in NO stage's `allowed_words` — de-chipping one would trade
 a wasted chip for a §5.4 vocabulary violation). Free: one SQL query and the decoder
 (DEVIATIONS 14.20-14.21, 14.40-14.42).
-All six are free, and none implies the others.
+**`make vocab-check` (`--check-vocabulary`) is the SEVENTH gate and the first
+that reads the pool against something OUTSIDE it** — every servable title and
+body re-validated against the CURRENT `allowed_words`, because a precomputed
+input changing must invalidate the artefacts built from it (DEVIATIONS 22.1-22.9).
+**`make art-check` (`--check-art`) is the EIGHTH gate and the first whose unit is
+the STORY** — §12's illustration. The owner's first complaint about this app was
+"there are no images in the stories", and the art was never missing: **33 asset
+rows, 33 files, HTTP 200 in production.** The defect was SELECTION. §12's
+"deterministic tiebreak by asset id" degraded to lowest-id-always-wins, which is
+not a tiebreak between two pictures but a standing preference for one of them,
+re-applied on every page — so **4 servable stories rendered ONE picture on all
+seven pages and 40 more rendered two**, with asset 24 alone on 160 of 763
+segments. **No per-segment metric could see it: those stories record
+`segments_with_art: 7` of 7, full marks, because the repeat does not exist at the
+segment** — a metric denominated in the wrong unit is not a weak signal, it is a
+green light. The rule is now (overlap, then an asset this story has NOT used,
+then lowest id): novelty is a TIEBREAK and never a penalty, because demoting a
+better match would put a *wrong* picture on the page. **GREEN today**, after
+`make art-repair` (`--reselect-art`) — FREE, no API call, because it re-selects
+over the `scene_tags` already stored: **226 screens across 108 of 110 servable
+stories, run against the live pool, $0.00**, idempotent, never writing
+`scene_tags`, never reading a questions row, never editing story text. Distinct
+pictures per story went 1x4/2x40/3x34/4x20/5x12 -> 2x1/3x11/4x32/5x30/6x26/7x10,
+and **5 of the 30 segment illustrations had never been shown to any child**.
+**The remaining hole is the LIBRARY, not the selector, and that is the honest
+half**: 30 segment images (10 per theme) against a 42-tag vocabulary covers
+22/20/15 of 42 tags per theme, 3 tags (`climbing`, `eating`, `storm`) have no
+asset anywhere, and 24 of 763 screens still draw §06's placeholder — 19 because
+the model returned no tags (its prompt invites that, so it is NOT a
+generation-time refusal: illustration is decorative and invariant 11 says an
+enrichment node degrades) and 5 because the theme owns no picture for their tags
+(dragons `celebrating`, dragons `running`). The library is AT §12's spec
+("~8-12 images per theme") and the spec under-provisions; **the fix is roughly
+6-10 more drawings, not more code** (DEVIATIONS 26.1-26.8).
+All eight are free, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
 `reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest
