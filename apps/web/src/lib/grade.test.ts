@@ -17,7 +17,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import type { Question } from './api'
-import { localGrade, storySupports } from './grade'
+import { cueAnswer, localGrade, storySupports } from './grade'
 
 const STORY = 'Sam sat on the cat. The cat ran to the van.'
 
@@ -89,5 +89,73 @@ describe('localGrade', () => {
     expect(localGrade(question({ qtype: 'tap_word', payload: { target_grapheme: 'sh' } }), '', STORY)).toBe(
       null,
     )
+  })
+
+  /**
+   * The payload a LIVE server sends. `_public_payload` redacts `target_grapheme`
+   * and keeps `cue_word`, so every fixture above with a grapheme in it describes
+   * a response no child has ever received — which is why the branch they cover
+   * could be dead in production under a green suite (DEVIATIONS 25.1).
+   */
+  test('the live payload — no grapheme, a cue — grades, and grades correctly', () => {
+    // Exactly the row driven in the browser: cue `get`, options `up`/`got`/`sat`.
+    const q = question({
+      qtype: 'tap_word',
+      payload: { cue_word: 'get' },
+      options: ['up', 'got', 'sat'],
+    })
+    expect(localGrade(q, 'got', STORY)).toBe(true)
+    expect(localGrade(q, 'up', STORY)).toBe(false)
+    expect(localGrade(q, 'sat', STORY)).toBe(false)
+  })
+
+  test('a digraph cue beats a distractor that shares only its first letter', () => {
+    // `check_tap_word` refuses a distractor containing the target grapheme, so
+    // `sat` may share `s` with `shed` and can never share `sh`.
+    const q = question({
+      qtype: 'tap_word',
+      payload: { cue_word: 'shed' },
+      options: ['sat', 'ship', 'run'],
+    })
+    expect(localGrade(q, 'ship', STORY)).toBe(true)
+    expect(localGrade(q, 'sat', STORY)).toBe(false)
+  })
+
+  test('the served grapheme still wins when a server does send one', () => {
+    const q = question({
+      qtype: 'tap_word',
+      payload: { target_grapheme: 'sh', cue_word: 'get' },
+      options: ['ship', 'got'],
+    })
+    expect(localGrade(q, 'ship', STORY)).toBe(true)
+  })
+
+  test('a response outside the offered options is not a wrong answer', () => {
+    const q = question({ qtype: 'tap_word', payload: { cue_word: 'get' }, options: ['up', 'got'] })
+    expect(localGrade(q, 'giraffe', STORY)).toBe(null)
+  })
+})
+
+describe('cueAnswer', () => {
+  test('the unique longest shared prefix is the answer', () => {
+    expect(cueAnswer('get', ['up', 'got', 'sat'])).toBe('got')
+    expect(cueAnswer('shed', ['sat', 'ship', 'run'])).toBe('ship')
+  })
+
+  test('case and surrounding space are not the question', () => {
+    expect(cueAnswer('  Get ', ['UP', ' Got', 'sat'])).toBe('got')
+  })
+
+  test('undecidable is null, never a guess', () => {
+    // A tie: two options share `g` with the cue, which `check_tap_word` forbids
+    // (a distractor may not contain the target grapheme) — so this offer set is
+    // malformed and the honest verdict is "no verdict".
+    expect(cueAnswer('get', ['got', 'gum', 'sat'])).toBe(null)
+    // Nothing shares an onset with the cue at all.
+    expect(cueAnswer('get', ['up', 'sat'])).toBe(null)
+    // No cue, and fewer than two options.
+    expect(cueAnswer('', ['got', 'sat'])).toBe(null)
+    expect(cueAnswer('   ', ['got', 'sat'])).toBe(null)
+    expect(cueAnswer('get', ['got'])).toBe(null)
   })
 })

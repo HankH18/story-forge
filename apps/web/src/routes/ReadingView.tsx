@@ -55,6 +55,47 @@ export const READING_MAIN_CLASS =
   'sf-page-in mx-auto flex w-full min-h-0 max-w-[1024px] flex-1 flex-col gap-8 overflow-y-auto py-4 pb-8 [scrollbar-gutter:stable] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-ink-300 [&::-webkit-scrollbar]:w-3 lg:grid lg:grid-cols-2 lg:content-start lg:items-start'
 
 /**
+ * The §06 frame's own box inside that grid — the PORTRAIT half of §10, and the
+ * one number in this file that was chosen by measurement (DEVIATIONS 25.2).
+ *
+ * At 768x1024 the reading box is 839px tall; 16px of top padding and 32px of
+ * bottom padding leave 791, the flex gap takes 32, and a full-card-width 4:3
+ * illustration takes 531 of what is left. That is 228px of text — **three lines
+ * at §11's 40px reading size**, which is why the measured portrait-at-40px
+ * budget is ~80 characters against ~131 at §10's landscape reference. No
+ * generation budget fixes that: the story SPINE is 20-31 characters a page, so a
+ * budget tight enough to hold portrait-at-40px would be set by the one
+ * configuration in four that is tightest, for every page in the pool.
+ *
+ * So the art gives way, and it gives way in the narrowest form available:
+ *
+ * - It is a flex item that may SHRINK (it was `shrink-0`). Flex shrinks an item
+ *   only by the overflow it has to absorb, so a page that already fits is
+ *   pixel-identical to before — §06's 4:3 at full card width, untouched, which
+ *   is the overwhelming majority of the pool.
+ * - `min-h-[40%]` floors it at 40% of the reading box (316px at the reference
+ *   portrait viewport). That is the number at which portrait-at-40px holds at
+ *   least as many characters as §10's landscape reference does at 40px: five
+ *   708px lines against seven 466px ones. Below it the frame stops being a
+ *   picture, and §06's "never an empty box" is the reason there is a floor at
+ *   all rather than an unbounded shrink.
+ * - `lg:min-h-0` — landscape is the two-column grid, where art and text do not
+ *   compete for height at all, so the floor has nothing to say there and must
+ *   not resolve against a grid row's indefinite height.
+ *
+ * **What this trades is §06's "4:3", on those pages only.** The `<img>` is
+ * already `object-cover`, so the picture crops symmetrically rather than
+ * distorting; "full card width" and "never behind text" both still hold, as do
+ * §03's 28px type floor and §11's 48px target floor — which are the two things
+ * §10 explicitly forbids trading and the reason a smaller font was never on the
+ * table. `make fit-check` measures the result over the whole pool.
+ *
+ * A literal, like `READING_MAIN_CLASS`: a composed class name is a purged class
+ * name (STATE invariant 7).
+ */
+export const READING_ART_CLASS = 'w-full min-h-[40%] lg:min-h-0'
+
+/**
  * The clip-edge lip, painted only while there is more of the page below.
  *
  * An INSET shadow, and that is the whole reason it is allowed to exist: an inset
@@ -287,12 +328,15 @@ export default function ReadingView({
         onScroll={measure}
         className={`${READING_MAIN_CLASS} ${EDGE_CLASS[atEnd ? 'end' : 'more']}`}
       >
-        {/* `shrink-0`: the 4:3 frame is §06's contract and must not be squashed
-            to make a long segment fit — that is what the scroll is for. */}
+        {/* It WAS `shrink-0`, on the reading that §06's 4:3 must never be
+            squashed to make a long segment fit. In portrait that reading costs
+            the words: the 4:3 frame takes 531 of 791 usable pixels and leaves
+            three lines at §11's 40px. See `READING_ART_CLASS` for the
+            measurement and for exactly what is traded. */}
         <SegmentArt
           asset={segment.asset}
           themeSlug={story.theme_slug}
-          className="w-full shrink-0"
+          className={READING_ART_CLASS}
         />
         {/* `assetFor` was never passed, which is why every story-word chip in
             the live app showed a grey striped square instead of a picture —
