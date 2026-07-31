@@ -225,11 +225,17 @@ async def run(dry_run: bool, only: Sequence[int] | None = None) -> None:
         f"(was {len(before)} of {total})."
     )
 
-    below = [p for p in coverage if p.depth < TARGET_PER_PAIR]
+    # `PairDepth.servable`, NOT `.depth`. This read `.depth` and raised
+    # AttributeError on the one path that matters: the coverage warning fires only
+    # when `below` is non-empty, so every green run exercised the `else` branch and
+    # the bug was invisible until a real quarantine emptied a pair in production.
+    # The quarantine had already committed by then, so the operator lost the refill
+    # instruction for a pool that was, at that moment, actually short.
+    below = [p for p in coverage if p.servable < TARGET_PER_PAIR]
     if below:
         print(f"\n  COVERAGE: {len(below)} (stage, theme) pair(s) now below {TARGET_PER_PAIR}:")
         for pair in below:
-            print(f"    stage {pair.stage_id} / {pair.theme_slug}: {pair.depth}")
+            print(f"    stage {pair.stage_id} / {pair.theme_slug}: {pair.servable}")
         stages = ",".join(str(s) for s in sorted({p.stage_id for p in below}))
         themes = ",".join(sorted({p.theme_slug for p in below}))
         print(

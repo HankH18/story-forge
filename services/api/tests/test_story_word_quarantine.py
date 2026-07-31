@@ -217,3 +217,64 @@ async def test_it_is_idempotent(pair, session):
     second = await q.quarantine(session, await q.far_chip_stories(session, only=[far]))
     await session.commit()
     assert second == []
+
+
+async def test_the_coverage_warning_can_actually_print(pair, session, capsys):
+    """DEVIATIONS 33.1. `run_quarantine`'s coverage block read `PairDepth.depth`.
+    There is no such attribute — it is `.servable` — so the block raised
+    AttributeError every time it ran.
+
+    It survived because of WHICH branch it lives in. The warning fires only when
+    some pair is BELOW target; on a healthy pool the `else` runs and prints "every
+    pair still holds >= N". Every green run took the `else`. The first time the
+    `if` was reached was a real production quarantine that had ALREADY COMMITTED,
+    so the operator lost the refill command for a pool that was, at that instant,
+    genuinely short — and §7's ladder answers a short pair silently, so nothing at
+    runtime would have said so either.
+
+    This is the project's signature defect wearing an unusual hat: not a check
+    that asks the wrong question, but a WARNING that cannot be emitted. Same
+    consequence — the thing that would have told you was structurally incapable
+    of telling you.
+
+    So this test forces the `if`, which is the only branch worth defending. It
+    asserts the refill command is printed and NAMES the short pair, because a
+    warning that fires without saying what to run is barely better than none.
+    """
+    far, _wasted = pair
+
+    # Empty a pair for real rather than stubbing `pool_coverage` — a stub would
+    # have happily returned objects carrying whatever attribute the code asked
+    # for, and reproduced nothing.
+    theme_id = (
+        await session.execute(text("SELECT id FROM themes WHERE slug = 'space'"))
+    ).scalar_one()
+    hidden = (
+        await session.execute(
+            text(
+                "UPDATE stories SET status = 'rejected' WHERE stage_id = 1 "
+                "AND theme_id = :t AND status IN ('warm','complete') RETURNING id"
+            ),
+            {"t": theme_id},
+        )
+    ).scalars().all()
+    await session.commit()
+    try:
+        await q.run(dry_run=False, only=[far])
+        out = capsys.readouterr().out
+        assert "COVERAGE:" in out, out[-2000:]
+        # The COUNT, not just the pair. A first pass asserted only "stage 1 / space"
+        # and stayed GREEN when the printed depth was swapped for the stage id —
+        # so it would have accepted "stage 1 / space: 1" for a pair holding 0.
+        # An operator reads this number to decide how much to refill.
+        assert "stage 1 / space: 0" in out, (
+            "the warning fired but did not report the pair's real depth: " + out[-800:]
+        )
+        assert "storyforge.warm --stages" in out, "no refill command was printed"
+        assert "--dry-run" in out, "the refill was suggested without pricing it first"
+    finally:
+        if hidden:
+            await session.execute(
+                text("UPDATE stories SET status = 'warm' WHERE id = ANY(:i)"), {"i": hidden}
+            )
+            await session.commit()
