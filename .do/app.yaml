@@ -226,7 +226,19 @@ jobs:
     instance_size_slug: apps-s-1vcpu-1gb
     # `cd` because alembic.ini's prepend_sys_path is relative to the working
     # directory. Idempotent: at head it is a no-op, verified locally.
-    run_command: cd /app/services/api && alembic upgrade head
+    #
+    # `sh -c` is LOAD-BEARING, not style. App Platform starts a run_command in
+    # EXEC form — no shell — so the bare form looked for an executable named
+    # `cd` and the job died with exit 128 before alembic ever ran:
+    #   error finding executable "cd" in PATH: no such file or directory
+    # A PRE_DEPLOY failure aborts the deploy and App Platform then performs an
+    # AUTOMATED ROLLBACK to the previous image, which surfaces as a NEW
+    # deployment in phase ACTIVE. `doctl apps list-deployments` therefore shows
+    # green while the old code keeps serving. Two deploys were lost to this
+    # before anyone read the `cause` field, which says so in plain words:
+    #   cause: automated rollback after failed deployment of "<id>"
+    # Verify a deploy by what the origin SERVES, never by phase alone.
+    run_command: sh -c "cd /app/services/api && alembic upgrade head"
     envs:
       - key: DATABASE_URL
         scope: RUN_TIME

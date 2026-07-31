@@ -124,3 +124,69 @@ def test_every_server_side_component_declares_itself_deployed():
             "`auth.deployment_signals` does NOT read as a deployed environment — "
             "so DEMO_BYPASS_AUTH=true would not be refused by this signal."
         )
+
+
+# Shell metacharacters that only mean anything to a shell. App Platform starts a
+# `run_command` in EXEC form, so a command containing any of these without an
+# explicit interpreter is not "a command that does two things" — it is one
+# argv whose [0] is a filename that does not exist.
+_SHELL_ONLY = ("&&", "||", " | ", ";", ">", "<", "$(", "`")
+_INTERPRETERS = ("sh ", "bash ", "/bin/sh", "/bin/bash", "python ", "python3 ")
+
+
+def test_every_run_command_using_shell_syntax_actually_asks_for_a_shell():
+    """DEVIATIONS 23.1. The migrate job read:
+
+        run_command: cd /app/services/api && alembic upgrade head
+
+    and had NEVER run. App Platform exec-forms a run_command, so it searched
+    PATH for an executable named `cd` and exited 128 before alembic loaded:
+
+        error finding executable "cd" in PATH: no such file or directory
+
+    The comment beside it said "Idempotent: at head it is a no-op, verified
+    locally" — and that was true. It was verified in a shell, and deployed
+    without one. Local verification cannot see this class of defect at all,
+    which is exactly why it belongs in the suite instead.
+
+    What made it expensive rather than merely wrong: a PRE_DEPLOY failure
+    aborts the deploy, and App Platform then performs an AUTOMATED ROLLBACK
+    to the previous image. The rollback is itself a new deployment, and it
+    reaches phase ACTIVE. So `doctl apps list-deployments` reports ACTIVE, the
+    health endpoint answers 200, and the OLD code is serving. Two deploys were
+    consumed this way before anyone read `cause`, which states it outright:
+    "automated rollback after failed deployment of <id>". Green meant rolled
+    back, and the deployed tag in the spec was the tag that had FAILED to
+    deploy — the most misleading possible combination.
+
+    This is the project's signature defect in its deployment config: a check
+    (the ACTIVE phase) that passes because it asks the wrong question.
+    """
+    offenders = []
+    for label, component in _components():
+        cmd = (component.get("run_command") or "").strip()
+        if not cmd:
+            continue
+        uses_shell_syntax = any(tok in cmd for tok in _SHELL_ONLY)
+        asks_for_shell = cmd.startswith(_INTERPRETERS)
+        if uses_shell_syntax and not asks_for_shell:
+            offenders.append((label, cmd))
+    assert not offenders, (
+        "run_command uses shell syntax but App Platform will exec it without a "
+        f"shell, so argv[0] is not an executable: {offenders}. "
+        'Wrap it: sh -c "..."'
+    )
+
+
+def test_the_migrate_job_still_runs_alembic_at_all():
+    """The control for the test above, which would be satisfied by a spec that
+    simply had no migrate command. Deleting the migration step is a louder
+    failure than mis-quoting it, and nothing else here would notice."""
+    jobs = {label: c for label, c in _components() if label == "jobs/migrate"}
+    assert jobs, "the migrate job vanished from the spec"
+    cmd = (jobs["jobs/migrate"].get("run_command") or "").strip()
+    assert "alembic upgrade head" in cmd, f"migrate job no longer migrates: {cmd!r}"
+    assert "/app/services/api" in cmd, (
+        "alembic.ini's prepend_sys_path is relative to the working directory, so "
+        f"the job must still cd there: {cmd!r}"
+    )
