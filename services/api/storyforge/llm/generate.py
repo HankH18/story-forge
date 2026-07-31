@@ -58,6 +58,12 @@ from storyforge.decoder import (
     mastered_ids,
     validate_word,
 )
+from storyforge.layout import (
+    LAYOUT_CHARS_PER_WORD,
+    MAX_SEGMENTS,
+    SEGMENT_CHAR_BUDGET,
+    STORY_CHAR_BUDGET,
+)
 from storyforge.llm.client import generation_model, generation_timeout, get_client
 from storyforge.llm.pricing import Usage, usage_from_response
 
@@ -73,7 +79,15 @@ from storyforge.mastery import word_gpc_ids
 from storyforge.precompute import load_blocklist
 
 # Frozen. Any edit invalidates every cached prefix, so keep per-request detail out.
-SYSTEM_RULES = """You write decodable stories for children learning to read.
+#
+# An f-string, and the only three interpolations are §10's measured screen
+# dimensions from `storyforge.layout` (rule 9, DEVIATIONS 19.1). They are
+# CONSTANTS, not per-request or per-stage material, so invariant 10 is untouched:
+# the cache key moves when the box moves and at no other time. Typing 125 here
+# instead would be the second copy that module exists to prevent — `make
+# fit-check` measures the same box, and a prompt promising a screen size the app
+# no longer has is worse than no promise at all.
+SYSTEM_RULES = f"""You write decodable stories for children learning to read.
 
 A decodable story uses ONLY words the child has been taught to sound out. This is
 not a style preference — a word outside the permitted list is unreadable for this
@@ -112,12 +126,29 @@ Rules, in priority order:
    something else: go back and give them more trouble with the SAME problem — a
    second try, a setback, someone who helps — so the extra words are still the
    story you started. Count the words you have written before you answer.
+9. The story is read on SCREENS, and there are at most {MAX_SEGMENTS} of them.
+   One screen holds about {SEGMENT_CHAR_BUDGET} characters — roughly
+   {SEGMENT_CHAR_BUDGET // int(LAYOUT_CHARS_PER_WORD)} words, or two to three
+   short sentences — and there is no scrolling, so a word past that is a word the
+   child never sees. {MAX_SEGMENTS} screens is {STORY_CHAR_BUDGET} characters for
+   the whole story, and that is a hard ceiling. Divide the story evenly across
+   them: every screen carries a piece of it, and the LAST screen is one piece —
+   not the rest of the story. Plan all {MAX_SEGMENTS} before you write the first,
+   so the ending has a screen of its own instead of whatever is left over.
 
 Read every sentence back before you finish. Write the story and nothing else."""
 
 
 class StorySegment(BaseModel):
-    text: str = Field(description="One screen of story text. Plain prose, no markdown.")
+    text: str = Field(
+        description=(
+            f"One screen of story text. Plain prose, no markdown. At most "
+            f"{SEGMENT_CHAR_BUDGET} characters — about "
+            f"{SEGMENT_CHAR_BUDGET // int(LAYOUT_CHARS_PER_WORD)} words, two or "
+            f"three short sentences. There is no scrolling: text past that is "
+            f"text the child never sees."
+        )
+    )
 
 
 class StoryDraft(BaseModel):
@@ -128,10 +159,41 @@ class StoryDraft(BaseModel):
     constrains the response directly instead of routing through a tool call —
     strictly better here (no tool-call parsing, no risk of a text response when a
     tool call was expected). Logged as docs/DEVIATIONS.md 3.1.
+
+    **FIELD ORDER IS LOAD-BEARING, and it was wrong** (DEVIATIONS 19.2). A
+    constrained decoder emits properties in schema order, so the order is the
+    order the model *thinks* in. `title, segments, story_words_used` sent it
+    straight into `segments[0].text` with no prior commitment to how many screens
+    there would be or what went on the last one — it wrote the opening before it
+    had budgeted for the ending, and then had to fit the ending into whatever was
+    left. That is the same shape as `well_formed` before `grammar_note`
+    (DEVIATIONS 8.70-8.82): a field whose value depends on reasoning the schema
+    lets the model skip, because the reasoning came after the commitment.
+    `page_plan` is that reasoning, moved in front of it.
+
+    `story_words_used` stays LAST and that is also deliberate: it is a report
+    about text that now exists, so it must come after the text. STATE invariant 2
+    distrusts the claim regardless — `validate_draft` intersects it with the bank
+    — but a claim made before the writing would be a guess as well as untrusted.
     """
 
     title: str = Field(description="Three to six words, from the permitted vocabulary.")
-    segments: list[StorySegment] = Field(description="Story screens in reading order.")
+    page_plan: list[str] = Field(
+        description=(
+            f"Before writing any story text: one short line per screen, in reading "
+            f"order, saying what happens on that screen. At most {MAX_SEGMENTS} "
+            f"lines, and the LAST line is how the story ends. Decide the whole "
+            f"shape here — including which screen the ending gets — so no screen "
+            f"has to carry what is left over. Plan notes, not story text."
+        )
+    )
+    segments: list[StorySegment] = Field(
+        description=(
+            f"Story screens in reading order, one per line of the plan above. At "
+            f"most {MAX_SEGMENTS}, and at most {STORY_CHAR_BUDGET} characters "
+            f"across all of them."
+        )
+    )
     story_words_used: list[str] = Field(
         description="Which of the offered story words actually appear in the text."
     )
@@ -663,6 +725,23 @@ def build_request_block(
     of its own; and the LAST thing in the block is what the model weights most, so
     the length bounds go last and name both ends symmetrically. Over-length is a
     miss exactly as under-length is, and only the second version made that visible.
+
+    **The SCREENS section is new and sits BEFORE the length bounds** (DEVIATIONS
+    19.1). §10 caps a story at 7 screens and a screen at ~125 rendered characters,
+    and until now the prompt said neither — so the model was told a word count
+    with no idea what shape it had to take, and `warm._split_segments` dumped
+    every sentence past the sixth onto one page. Two things follow from the
+    ordering, both of them 8.22's lessons applied again rather than re-learned:
+
+    * it goes before LENGTH, because LENGTH-last is the fix that stopped the
+      model treating the word band as advisory, and that fix is not being undone
+      to make room for this one;
+    * it can go before LENGTH *without contradicting it*, because
+      `load_vocabulary` now clamps `target_max` to `layout_word_ceiling()`. The
+      two sections state the same ceiling in two units. The version of this
+      change that left §6's 120-200 alone would have handed a stage-9 story a
+      word band whose top the box cannot hold, which is a prompt that asks for
+      something and a validator that refuses it — the shape §0 forbids.
     """
     offered = (
         "\n".join(f"- {w}: {gloss}" for w, gloss in sorted(story_words.items()))
@@ -677,6 +756,18 @@ def build_request_block(
         "often each appears. Needing more words is never a reason to reach for a "
         "fourth.\n\n"
         "Every other word must come from the permitted or sight lists above.\n\n"
+        f"SCREENS — this story is read {MAX_SEGMENTS} screens at a time:\n"
+        f"- Write at most {MAX_SEGMENTS} screens, and put a piece of the story on "
+        f"every one of them.\n"
+        f"- One screen holds about {SEGMENT_CHAR_BUDGET} characters — roughly "
+        f"{SEGMENT_CHAR_BUDGET // int(LAYOUT_CHARS_PER_WORD)} words, two or three "
+        f"short sentences. Nothing scrolls, so a word past that is a word the "
+        f"child never gets to read.\n"
+        f"- The LAST screen is one piece of the story, the same size as the "
+        f"others. It is not where the rest of the story goes.\n"
+        f"- {MAX_SEGMENTS} screens is {STORY_CHAR_BUDGET} characters for the whole "
+        f"story. That is a ceiling, and it is the reason the word count below "
+        f"stops where it does.\n\n"
         f"LENGTH — {target_min}-{target_max} words. Both ends are real:\n"
         f"- Under {target_min} does not count. {target_min} is the FLOOR, not the goal.\n"
         f"- Over {target_max} does not count either. Do not run past {target_max}.\n"

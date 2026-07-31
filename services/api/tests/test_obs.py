@@ -125,6 +125,7 @@ class HalfHostileClient:
 def _draft(body: str) -> StoryDraft:
     return StoryDraft(
         title="Sam And The Cat",
+        page_plan=["sam sits", "the cat sits"],
         segments=[
             StorySegment(text=part.strip() + ".") for part in body.split(".") if part.strip()
         ],

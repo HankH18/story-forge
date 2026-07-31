@@ -111,6 +111,11 @@ from storyforge.api.stories import ANSWERABLE_SQL, SERVABLE_STATUSES
 from storyforge.db import SessionLocal
 from storyforge.decoder import MAX_STAGE, MIN_STAGE, mastered_ids, validate_text
 from storyforge.decoder.tokenizer import tokenize
+from storyforge.layout import (
+    MAX_SEGMENTS,
+    SEGMENT_CHAR_BUDGET,
+    paginate,
+)
 from storyforge.llm.client import fast_model
 from storyforge.llm.moderate import (
     UNGRAMMATICAL_PREFIX,
@@ -1600,20 +1605,242 @@ def enrichment_problems(meta: dict) -> list[str]:
     return problems
 
 
-def _split_segments(body: str, max_segments: int = 7) -> list[str]:
+def _split_segments(body: str, max_segments: int = MAX_SEGMENTS) -> list[str]:
     """One screen per sentence-ish chunk, capped at §10's 7 segments.
 
     Sentences are the natural page break for a decodable reader — the reading
     view shows one segment per screen and must not scroll (style guide §10).
+
+    **This function WAS the bug** (DEVIATIONS 19.1). It used to read:
+
+        head, tail = parts[: max_segments - 1], parts[max_segments - 1 :]
+        return head + [" ".join(tail)]
+
+    — the first six sentences on the first six screens and every remaining
+    sentence on the seventh. Its comment was right that dropping text would
+    silently lose story and wrong about where the rest of it goes. At stages 8-11
+    a story is 15-35 sentences, so the spine averaged 20-31 characters a screen
+    and the last screen averaged 509-586: **68 servable segments overflowed the
+    §10 box and every one of them was `idx = 6`**, the screen with the ending on
+    it. Because the clip landed between lines nothing looked sliced, so a child
+    pressed `Finish` on up to 276 words they had never seen.
+
+    The body is now `layout.paginate`, which keeps both of the old promises — one
+    sentence per screen where that fits, no text ever dropped — and adds the one
+    that was missing: the fullest screen is as empty as it can be. The name and
+    signature are unchanged because `eval.persist_story` and
+    `test_grammar.py::test_stored_segments_match_the_splitter` both call it, and
+    that last test is the coupling that matters: it asserts the STORED segments
+    equal what this function produces, so the pool and the splitter cannot drift.
     """
-    marked = body.replace("! ", "|").replace("? ", "|").replace(". ", "|")
-    parts = [s.strip() for s in marked.split("|")]
-    parts = [p if p.endswith((".", "!", "?")) else p + "." for p in parts if p]
-    if len(parts) <= max_segments:
-        return parts
-    # Merge the tail rather than truncate — dropping text would silently lose story.
-    head, tail = parts[: max_segments - 1], parts[max_segments - 1 :]
-    return head + [" ".join(tail)]
+    return paginate(body, max_segments=max_segments)
+
+
+# --- §10's free repair: re-paginate a pool the old splitter tail-dumped --------
+
+
+@dataclass(frozen=True)
+class Refit:
+    """One story's before/after under `paginate`. A measurement, not a write."""
+
+    story_id: int
+    stage_id: int
+    theme_slug: str
+    segments: int
+    before_worst: int
+    after_worst: int
+    stored: tuple[str, ...]
+    bodies: tuple[str, ...]
+
+    @property
+    def moved(self) -> bool:
+        """Do the stored screens differ from the ones the splitter produces today?
+
+        **Not "is the fullest screen smaller".** That was the first version, and
+        it is too narrow by exactly the amount that matters: a story can be
+        re-partitioned into a different but equally-wide set of screens, and if
+        the repair declines to write it the DATABASE and `_split_segments`
+        disagree about the same text. `test_grammar.py::test_story_body_round_
+        trips_through_the_segment_split` asserts they never do — it is the only
+        coupling that stops the pool drifting away from the splitter — and three
+        live stories failed it under the narrow condition.
+
+        The point of the repair is to converge the pool onto the splitter, so the
+        condition is "are they the same", and idempotence follows from it rather
+        than being a separate claim.
+        """
+        return self.bodies != self.stored
+
+    @property
+    def fits(self) -> bool:
+        return self.after_worst <= SEGMENT_CHAR_BUDGET
+
+
+_REFIT_SQL = text(
+    f"""
+    SELECT s.id AS story_id, s.stage_id, t.slug AS theme_slug,
+           count(*) AS segments,
+           max(length(g.body)) AS worst,
+           array_agg(g.body ORDER BY g.idx) AS stored,
+           string_agg(g.body, ' ' ORDER BY g.idx) AS body
+    FROM story_segments g
+    JOIN stories s ON s.id = g.story_id
+    JOIN themes t ON t.id = s.theme_id
+    WHERE s.status = ANY(:statuses) AND {ANSWERABLE_SQL.format(story="s")}
+    GROUP BY s.id, s.stage_id, t.slug
+    ORDER BY s.id
+    """
+)
+
+
+async def refit_census(
+    session, only: Sequence[int] | None = None, skipped: list[int] | None = None
+) -> list[Refit]:
+    """What `paginate` would put on each servable story's screens. No writes.
+
+    The unit is the STORY and the segment COUNT is held fixed, for the reason
+    DEVIATIONS 26.2 gives about denominators: a repair that changed how many
+    `story_segments` rows a story has would have to DELETE one, and a delete is
+    not a free repair — it is a schema change to live rows with a foreign key
+    pointing at them. `questions.segment_id` is nullable and is NULL on all 204
+    live rows today, but "nobody happens to reference it" is not a licence, so
+    this keeps the count and only moves text between the rows that exist.
+    """
+    rows = (
+        await session.execute(_REFIT_SQL, {"statuses": list(SERVABLE_STATUSES)})
+    ).all()
+    out: list[Refit] = []
+    skipped = [] if skipped is None else skipped
+    for row in rows:
+        if only is not None and row.story_id not in only:
+            continue
+        pages = paginate(row.body, max_segments=row.segments)
+        if len(pages) != row.segments:
+            # Fewer sentences than screens — nothing to redistribute. Counted by
+            # the caller and printed, never silently dropped: a repair that
+            # reports "83 of 106" while the pool holds 110 is a denominator in
+            # the wrong unit, which DEVIATIONS 26.2 records as a green light
+            # rather than a weak signal.
+            skipped.append(row.story_id)
+            continue
+        out.append(
+            Refit(
+                story_id=row.story_id,
+                stage_id=row.stage_id,
+                theme_slug=row.theme_slug,
+                segments=row.segments,
+                before_worst=row.worst,
+                after_worst=max(len(p) for p in pages),
+                stored=tuple(row.stored),
+                bodies=tuple(pages),
+            )
+        )
+    return out
+
+
+async def refit_segments(session, plans: Sequence[Refit]) -> list[Refit]:
+    """Write the re-pagination. Two refusals, and both are asserted, not documented.
+
+    * **The text may not change.** Every write is preceded by comparing the
+      joined new bodies with the joined old ones; a mismatch raises rather than
+      writing. §13 approved a specific string and `stories.gen_meta.moderation` is
+      the receipt for THAT string — a repair that edited a word would invalidate
+      a verdict nothing would re-run. This moves screen boundaries and nothing
+      else.
+    * **The screen count may not change.** `paginate` fills every screen it is
+      given, so it returns exactly `row.segments` whenever the text has that many
+      sentences, and
+      `refit_census` drops the stories where it could not; this asserts it at the
+      row level anyway, because the cost of being wrong is an orphaned row.
+
+    Idempotent by construction: a second run re-derives the same partition from
+    the same text, `moved` is False for every story, and nothing is written.
+    """
+    written: list[Refit] = []
+    for plan in plans:
+        if not plan.moved:
+            continue
+        rows = (
+            (
+                await session.execute(
+                    select(StorySegment)
+                    .where(StorySegment.story_id == plan.story_id)
+                    .order_by(StorySegment.idx)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(rows) != len(plan.bodies):
+            raise RuntimeError(
+                f"story {plan.story_id}: {len(rows)} segment row(s) but "
+                f"{len(plan.bodies)} planned screen(s) — refusing to write"
+            )
+        if " ".join(r.body for r in rows) != " ".join(plan.bodies):
+            raise RuntimeError(
+                f"story {plan.story_id}: re-pagination would change the text "
+                "§13 approved — refusing to write"
+            )
+        for row, body in zip(rows, plan.bodies, strict=True):
+            row.body = body
+        written.append(plan)
+    return written
+
+
+async def run_refit_segments(only: Sequence[int] | None = None) -> None:
+    """`--refit-segments`: spend the seven screens evenly on stories already in the pool.
+
+    FREE — one query, one pure function, one UPDATE per moved row, no API call.
+    It is the whole free half of DEVIATIONS 19.5: the old splitter's tail-merge
+    is a property of where the page breaks fall, not of the words, so every story
+    whose sentences can be redistributed under `SEGMENT_CHAR_BUDGET` is repairable
+    without asking a model for anything.
+
+    Reports the residual by re-reading the pool afterwards rather than trusting
+    its own counters — 11.84's rule, after a grammar backfill printed success
+    while writing three of five verdict fields.
+    """
+    unsplittable: list[int] = []
+    async with SessionLocal() as session:
+        before = await refit_census(session, only, skipped=unsplittable)
+        written = await refit_segments(session, before)
+        await session.commit()
+        after = await refit_census(session, only)
+
+    def clipped(census: Sequence[Refit]) -> list[Refit]:
+        return [r for r in census if not r.fits]
+
+    print(
+        f"\nSEGMENT RE-PAGINATION — {len(before) + len(unsplittable)} servable "
+        f"story/stories, {len(before)} of them with more sentences than screens"
+    )
+    if unsplittable:
+        print(
+            f"  {len(unsplittable)} story/stories have fewer sentences than screens "
+            "and are already one sentence per screen — nothing to redistribute"
+        )
+    print(
+        f"  {sum(r.segments for r in written)} screen(s) across {len(written)} "
+        f"story/stories re-spread over §10's {MAX_SEGMENTS} screens"
+    )
+    for plan in sorted(written, key=lambda r: -r.before_worst)[:10]:
+        print(
+            f"    story {plan.story_id} stage {plan.stage_id} {plan.theme_slug}: "
+            f"fullest screen {plan.before_worst} -> {plan.after_worst} chars"
+        )
+    if len(written) > 10:
+        print(f"    ... and {len(written) - 10} more")
+    left = clipped(after)
+    print(
+        f"  residual: {len(left)} story/stories still over {SEGMENT_CHAR_BUDGET} "
+        f"chars on their fullest screen (was {len(clipped(before))})."
+    )
+    for plan in sorted(left, key=lambda r: -r.after_worst)[:10]:
+        print(
+            f"    story {plan.story_id} stage {plan.stage_id}: {plan.after_worst} chars "
+            "— too much STORY for seven screens; regeneration, not re-pagination"
+        )
+    print("  Verify with `make fit-check`, which renders the real box.")
 
 
 async def _record_enrichment(session, story: Story, meta: dict, base_cost: float) -> None:
@@ -4619,6 +4846,18 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--refit-segments",
+        action="store_true",
+        help=(
+            "re-spread every servable story's text evenly over the "
+            f"{MAX_SEGMENTS} screens §10 gives it, instead of the old splitter's "
+            "six short screens plus one carrying the whole ending, then exit. "
+            "Free, no API call, idempotent. Never changes the text §13 approved "
+            "and never changes how many segment rows a story has — it only moves "
+            "the page breaks (DEVIATIONS 19.5)"
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -4703,6 +4942,8 @@ def main() -> None:
             asyncio.run(run_art_check())
         elif a.reselect_art:
             asyncio.run(run_art_repair(only=only))
+        elif a.refit_segments:
+            asyncio.run(run_refit_segments(only=only))
         elif a.cue_repair:
             asyncio.run(run_cue_repair(only=only))
         elif a.mcq2_repair:

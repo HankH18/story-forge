@@ -11,7 +11,7 @@ WEB := apps/web
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
         migrate seed precompute warm warm-check promote-check prompt-check \
-        mcq2-check fit-check story-word-check vocab-check art-check kid-check art-repair \
+        mcq2-check fit-check story-word-check vocab-check art-check kid-check art-repair refit-segments \
         warm-plan eval eval-smoke codegen clean
 
 # `[0-9]` is load-bearing: `mcq2-check` was invisible to `make help` without it,
@@ -222,6 +222,20 @@ kid-check: ## Refuse a kid session a child can leave, or an adult cannot
 # Idempotent. 226 screens across 108 of 110 servable stories on its first run.
 art-repair: ## Re-pick every servable story's pictures under the current rule. Free, no API call
 	cd $(API) && uv run python -m storyforge.warm --reselect-art
+
+# The free half of `fit-check`'s remedy (DEVIATIONS 19.6). The old splitter put
+# the first six sentences on six screens and every remaining sentence on the
+# seventh, so 68 of 763 servable segments overflowed the §10 box and all 68 were
+# `idx = 6` — the screen carrying the ending. That is a property of where the
+# page breaks fall, not of the words, so it is repairable with no API call: this
+# re-spreads each story's text over the seven screens it already has. It never
+# changes the text §13 approved and never changes how many segment rows a story
+# has; both refusals are asserted before any write. Idempotent. What it CANNOT
+# fix is a story with more than 875 characters in it — that is too much story for
+# seven screens at any pagination, and the command names those stories for
+# regeneration.
+refit-segments: ## Re-spread every servable story over §10's 7 screens. Free, no API call
+	cd $(API) && uv run python -m storyforge.warm --refit-segments
 
 warm-plan: ## What `make warm` would generate and roughly what it would cost. No API calls
 	cd $(API) && uv run python -m storyforge.warm --dry-run

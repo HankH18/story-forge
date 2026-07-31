@@ -140,13 +140,50 @@ def test_system_rules_say_how_to_get_longer_not_just_that_it_must():
     assert "count the words" in low
 
 
+#: Rule 8 alone — from "Meet the length" up to where rule 9 begins.
+#:
+#: This bound used to be "everything after 'Meet the length'", and the digit ban
+#: below used to run to the end of the string. That was exact while the only
+#: number anyone would want to write down there was a WORD COUNT, which is
+#: per-stage and would invalidate every cached prefix. It stopped being exact
+#: when rule 9 arrived (DEVIATIONS 19.1) carrying §10's screen dimensions, which
+#: are CONSTANTS: 7 screens and 125 characters are the same for stage 1 and stage
+#: 11, so they move the cache key once, when the box moves, and never per stage.
+#:
+#: The digit ban is narrowed rather than deleted because the thing it protects is
+#: still real — a word count in the frozen prefix is still the defect. What
+#: replaces the coverage it gave up is
+#: `test_the_frozen_prefix_is_identical_for_every_stage_and_theme`, which asserts
+#: the PROPERTY (the cached block does not vary) instead of a proxy for it, and
+#: which the old test could only approximate.
+_LENGTH_RULE = SYSTEM_RULES.split("Meet the length", 1)[1].split("\n9. ", 1)[0]
+
+
 def test_the_length_rule_carries_no_per_request_detail():
     """STATE invariant 10 again, re-asserted at the point of risk. The whole
     reason the length rule is phrased without a single number is that any number
     would be per-stage, and per-stage material in SYSTEM_RULES invalidates every
     cached prefix on every call."""
-    length_rule = SYSTEM_RULES.split("Meet the length", 1)[1]
-    assert not any(ch.isdigit() for ch in length_rule)
+    assert not any(ch.isdigit() for ch in _LENGTH_RULE)
+
+
+def test_the_frozen_prefix_is_identical_for_every_stage_and_theme():
+    """Invariant 10's actual property, asserted directly rather than through the
+    "no digits" proxy the two tests above use.
+
+    `generation_system_blocks` builds the cached half. Its FIRST block is
+    `SYSTEM_RULES` and must be byte-identical whatever stage or theme is being
+    generated — that is what makes one cache entry per stage possible, and it is
+    what a per-request leak would break. A digit is only evidence about this; this
+    is the thing itself, and it catches leaks that carry no digit at all.
+    """
+    from storyforge.llm.generate import generation_system_blocks
+
+    low = generation_system_blocks("Letters", ["sam", "sat", "cat"], ["the"])
+    high = generation_system_blocks("Review", ["dragon", "castle", "went"], ["of"])
+    assert low[0]["text"] == high[0]["text"] == SYSTEM_RULES
+    # ...and the per-stage material really is in a LATER block, not this one.
+    assert low[1]["text"] != high[1]["text"]
 
 
 def test_request_block_handles_no_story_words():
@@ -359,7 +396,7 @@ async def test_the_pipeline_rejects_an_empty_draft_and_never_pays_to_moderate_it
         return vocab
 
     async def fake_call(*_a, **_kw):
-        return StoryDraft(title="", segments=[], story_words_used=[]), usage
+        return StoryDraft(title="", page_plan=[], segments=[], story_words_used=[]), usage
 
     async def fake_moderate(body):  # pragma: no cover - must never be reached
         moderated.append(body)
@@ -628,7 +665,12 @@ async def test_the_pipeline_hands_the_theme_to_the_rewrite_node(monkeypatch):
         seen.append(user_block)
         body = bodies[min(len(seen) - 1, len(bodies) - 1)]
         return (
-            StoryDraft(title="A Dog", segments=[StorySegment(text=body)], story_words_used=[]),
+            StoryDraft(
+                title="A Dog",
+                page_plan=["a dog"],
+                segments=[StorySegment(text=body)],
+                story_words_used=[],
+            ),
             Usage(model="claude-sonnet-5", input_tokens=1, output_tokens=1),
         )
 
@@ -1011,8 +1053,7 @@ def test_the_edited_clause_adds_no_per_request_material():
     invalidates each stage's cached prefix exactly once; a per-request leak would
     invalidate it on every call, forever. Both existing frozen-prefix assertions
     still hold, and the length rule still carries no digit."""
-    length_rule = SYSTEM_RULES.split("Meet the length", 1)[1]
-    assert not any(ch.isdigit() for ch in length_rule)
+    assert not any(ch.isdigit() for ch in _LENGTH_RULE)
     for leak in ("dragon", "Stage 3", "30-60", "{", "}"):
         assert leak not in SYSTEM_RULES
 

@@ -22,7 +22,7 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 | warm pool | **`make warm-check` is GREEN: 33 of 33 (stage,theme) pairs hold ≥3 servable stories, and 11 of 11 STAGES hold ≥5** — the pair count fell 36→33 with the stage-1 retirement, and the per-stage floor was added because the pair gate read green while 29 of 33 pairs held fewer than 5, which is §8's actual promotion requirement. Filled in three passes for **$0.35** total, because `make warm` fills only the shortfall — it is not a re-run. Two earlier versions of this row were wrong in opposite directions and both are worth remembering: the first claimed "`make warm` fills ≥3 per (stage,theme)" when the command defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories across 3 stages — and §17's demo is dragons at a low stage, so **the demo would have passed with nine stages empty**. The second recorded the pool as 13/36 with the gate red, which was honest when written and is now stale. The lesson is the gate, not the number: `make warm-check` exits non-zero and is the only claim here that cannot rot (DEVIATIONS 8.40–8.48). |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
 
-**API: 1190 passed, 3 skipped** (`cd services/api && uv run pytest`; the suite uses
+**API: 1231 passed, 3 skipped** (`cd services/api && uv run pytest`; the suite uses
 pytest-randomly and has pre-existing order-dependent failures under a random seed
 — use `-p no:randomly` for a clean baseline). Web: **279 pass** (239 + the 40 of
 DEVIATIONS 27), `tsc` clean, `bun run build` clean. This row read "775 passed, 2
@@ -64,6 +64,7 @@ make dev | test | seed | precompute | warm | warm-plan
 make warm-check | promote-check | prompt-check | mcq2-check | fit-check \
      story-word-check | vocab-check | art-check | kid-check    # the nine gates
 make art-repair                        # free, no API call (DEVIATIONS 26.4)
+make refit-segments                    # free, no API call (DEVIATIONS 19.6)
 cd services/api && uv run python -m storyforge.warm --story-word-repair     # free
 cd services/api && uv run python -m storyforge.quarantine_story_words       # free
        # ^ the two halves of --check-story-words. The first DROPS a chip the reader
@@ -124,24 +125,59 @@ SEES rather than at what the database holds** — §10: "One segment per screen,
 scrolling on tablet — if text overflows, generation length is wrong, not the
 layout." It renders every servable segment through the real `ReadingView` in the
 real production bundle at both §10 viewports and both §11 reading sizes and
-exits non-zero on any text below the clip edge. **RED today, and it has never
-been green**: 49-68 of 763 segments are clipped, **every one of them `idx = 6`,
-the last page**, which is the page carrying the ending — and because the clip
-falls between lines nothing looked sliced, so a child pressed `Finish` on a story
-they had not read the end of (DEVIATIONS 13.1-13.3). The spine is 20-31
-characters at every stage while the last page averages 45 at stage 1 and 586 at
-stage 9; the measured budget is <=131 chars at the §10 reference viewport.
-**Portrait is no longer the binding configuration** (DEVIATIONS 25.2): it used to
-hold ~81 chars at 40px against ~131 landscape, because §06's full-width 4:3 art
-took 531 of the portrait box's 791 usable pixels and left three lines — the art
-is now a flex item with a `min-h-[40%]` floor, so it yields height only on the
-pages that would otherwise hide words, and portrait clipping fell 73→49 (34px)
-and 75→57 (40px) while landscape stayed at 65/68, correctly. The remedy for what
-is left is a per-stage length budget on
-GENERATION — never a smaller font (§03 floors story text at 28px) and never a
-shorter tap target (§11 floors it at 48px). Free: one SQL query, a build, and a
-headless browser (`BROWSE_BIN=`), no API client. **It exits 2 when it cannot
-run** — no browser, no database, no build are never a pass.
+exits non-zero on any text below the clip edge. **GREEN today — 0 of 735
+segments clipped at all four configurations — and it had never been green
+before** (DEVIATIONS 19.1-19.8). It was 68 of 763 clipped, **every one of them
+`idx = 6`, the last page**, the page carrying the ending; because the clip fell
+between lines nothing looked sliced, so a child pressed `Finish` on up to 276
+words they had never seen. **§11's 34px/40px floors were not touched, the font
+was not shrunk and the threshold was not moved** — the only thing that changed is
+how much story goes on a screen.
+The framing handed down was "a generation length budget problem, not a layout
+one", and that is right about the remedy and incomplete about the cause. There
+were THREE defects: **(a)** no per-segment rule existed anywhere — not in the
+prompt, not in the schema; **(b)** nothing checked one; **(c)** `_split_segments`
+put the first six sentences on six screens and *all* the rest on the seventh, so
+the spine ran 21-31 chars a screen while screen 6 ran 539-592 at stages 8-11.
+`storyforge/layout.py` is now the only place §10's box is written down, and all
+three halves read it: **`SEGMENT_CHAR_BUDGET = 125`** (measured, not chosen — a
+465-row synthetic sweep through the real harness put the binding configuration,
+1024x768 at 40px, at 129 chars all-fit / 130 first-overflow; the pool-derived
+figure of 131 was ABOVE the adversarial measurement), `MAX_SEGMENTS = 7`, and
+`layout_word_ceiling()` = **168 words**, which is 875 chars at the pool's
+measured 5.2 chars/word. **§6's 120-200 at stages 8-11 is arithmetically
+impossible on seven screens** — 200 words is ~1040 chars — so `load_vocabulary`
+clamps `target_max`, on `Vocabulary` rather than in the prompt so the model, the
+validator and the §14 harness cannot disagree at the margin. `page_plan` was
+added to `StoryDraft` **before** `segments`, because a constrained decoder emits
+properties in schema order and the old order sent the model into the opening
+before it had budgeted for the ending — `well_formed` before `grammar_note`
+(8.70-8.82) exactly. Schema `maxLength` was deliberately NOT used: Anthropic
+structured outputs do not support it, the SDK strips it and validates
+client-side, so it would turn a repairable draft into an `api_fail`.
+`fit_refusal` is a SECOND gate beside `passes_gate`, never folded into it —
+`llm/questions.py` asks `passes_gate` about one-line question text, where a page
+budget is meaningless.
+**Repair: 61 of 68 free, 7 paid, $0.8323 total.** `make refit-segments`
+(`--refit-segments`) is FREE and re-spreads each story over the seven screens it
+already has — 581 screens across 83 stories, run against the live pool,
+idempotent, never changing the text §13 approved and never changing how many
+segment rows a story has (both refusals asserted before any write, both verified
+in SQL after). That alone took 68 clipped / 7006 words below the fold → 25 / 2.
+The residual 7 were 885-967 chars against the 875 the box holds — too much
+*story* for seven screens, not a bad split — so they were quarantined
+(`gen_meta.fit_quarantine`, the fourth registered pull path) and refilled. The
+new stories run 96-119 chars on their widest screen and 124-145 words.
+**Two honest residuals**: `SEGMENT_CHAR_BUDGET` is stricter than the box, so
+`--refit-segments` reports 6 stories over budget while `fit-check` reports 0 —
+deliberately not reconciled, because moving a measured constant to silence a
+report is how it becomes a chosen one. And 541 screens carry `scene_tags` derived
+from the old partition; `make art-check` is green and distinctness improved, but
+a picture may match its page less well. Re-tagging was refused because
+`--backfill` also re-derives questions and §8 evidence hangs off those rows.
+Free: one SQL query, a build, and a headless browser (`BROWSE_BIN=`), no API
+client. **It exits 2 when it cannot run** — no browser, no database, no build are
+never a pass.
 **`make story-word-check` (`--check-story-words`) is the SIXTH gate and the first
 that reads what a picture CHIP is spent on** — §5.5: a story word is a word the
 child is GIVEN instead of decoding, three slots per story and no more. Nothing

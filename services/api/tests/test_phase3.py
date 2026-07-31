@@ -135,7 +135,7 @@ _PULL_PATHS = (
     # DEVIATIONS 31.3 — `storyforge.quarantine_story_words`, the far-chip half of
     # §5.5 that `--story-word-repair` structurally cannot fix.
     ("gen_meta ? 'story_word_quarantine'", "gen_meta->'story_word_quarantine'->>'at'"),
-    # DEVIATIONS 27.6 — §10's fit quarantine. A body over STORY_CHAR_BUDGET
+    # DEVIATIONS 19.6 — §10's fit quarantine. A body over STORY_CHAR_BUDGET
     # cannot be shown on 7 screens at ANY pagination, so `--refit-segments`
     # structurally cannot repair it and the row is pulled for regeneration.
     ("gen_meta ? 'fit_quarantine'", "gen_meta->'fit_quarantine'->>'at'"),

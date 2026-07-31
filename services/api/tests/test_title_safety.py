@@ -65,6 +65,7 @@ GEN_USAGE = Usage(model="claude-sonnet-5", input_tokens=120, output_tokens=60)
 def _draft(title: str, body: str = GOOD) -> StoryDraft:
     return StoryDraft(
         title=title,
+        page_plan=["sam sits", "the cat sits"],
         segments=[
             StorySegment(text=part.strip() + ".") for part in body.split(".") if part.strip()
         ],

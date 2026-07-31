@@ -14204,3 +14204,248 @@ defect — is now **EMPTY**. It still exits 1, and no amount of money closes it:
   They are not servable, so no gate reads them and no child sees them — but it
   means the eval harness's vocabulary path does not agree with the warm path.
   Noticed, out of scope, named here so it is not re-discovered as new.
+
+## Phase 8 — six short screens and then the whole ending on the seventh (19.1-19.8)
+
+`make fit-check` had never been green. 68 of 763 servable segments were clipped
+by the §10 box, and **every one of them was `idx = 6`** — the screen carrying the
+ending. Because the clip fell between lines nothing looked sliced: a child
+pressed `Finish` on a story whose last 276 words they had never seen.
+
+The handed-down framing was "a GENERATION length budget problem, not a layout
+one". That is right about the remedy and incomplete about the cause. There were
+**three** defects, and only the third is about length:
+
+1. no per-segment rule existed anywhere — not in the prompt, not in the schema;
+2. nothing checked one;
+3. the splitter put the first six sentences on six screens and *all* the rest on
+   the seventh.
+
+(3) is what made the shape so extreme, and it is free to fix. (1) and (2) are why
+it could never have been prevented. All three are fixed here.
+
+### 19.1 — `_split_segments` was the mechanism, and its own comment says why
+
+```python
+head, tail = parts[: max_segments - 1], parts[max_segments - 1 :]
+return head + [" ".join(tail)]          # "Merge the tail rather than truncate"
+```
+
+That comment is right that dropping text would silently lose story and wrong
+about where the rest of it goes. Measured over the live pool, per screen index:
+
+| idx | segments | mean chars | max |
+|---|---|---|---|
+| 0-5 | 110 each | 23-27 | 8-79 |
+| 6 | 103 | **287** | **809** |
+
+and per stage the spine ran 21-31 chars a screen while screen 6 ran 43 at stage 1
+and **539-592 at stages 8-11**. A stage-9 story is 15-35 sentences; six of them
+went on the spine and nine to twenty-nine went on the last screen.
+
+`layout.paginate` replaces it: binary search on the page cap with a greedy
+feasibility check (the exact optimum for partitioning a sequence into at most k
+contiguous parts minimising the largest part), then a fill step that uses every
+screen available. Both old promises are kept — one sentence per screen where that
+fits, no text ever dropped — and a story of 7 sentences or fewer comes back
+byte-identical, so stages 1-3 do not move at all.
+
+### 19.2 — the numbers are MEASURED, and not off the pool being judged
+
+A budget derived from the same stories it exists to judge is circular. So the
+`fit-check` harness was driven directly with **465 synthetic rows** — every
+character length from 100 to 209, over three word-length profiles and 0-3
+story-word chips — through the real `ReadingView` in the production bundle:
+
+| viewport | size | box | all-fit up to | first overflow |
+|---|---|---|---|---|
+| 1024x768 landscape | 40px | 583px | **129** | **130** |
+| 1024x768 landscape | 34px | 583px | 153 | 156 |
+| 768x1024 portrait | 40px | 839px | 180 | 183 |
+| 768x1024 portrait | 34px | 839px | 204 | — |
+
+**The binding configuration is 1024x768 at 40px** and its ceiling is 129
+characters. `SEGMENT_CHAR_BUDGET = 125` is that with ~3% margin. The
+pool-derived figure would have been 131, which is *above* the adversarial
+measurement — the pool simply had no 130-char long-word segment in it.
+
+Chars per word was measured the same way, over all 110 servable stories: 4.76
+overall, 4.41-4.87 per stage, 5.33 for the wordiest single story.
+`LAYOUT_CHARS_PER_WORD = 5.2` is deliberately above the mean because it converts
+a **ceiling**.
+
+### 19.3 — §6 and §10 are arithmetically incompatible, and §10 says which gives
+
+§6 asks for 120-200 words at stages 8-11. 7 screens x 125 chars = **875
+characters**, which at 5.2 chars/word is **168 words**. 200 words cannot fit
+seven screens at any pagination, so the old pool is what that contradiction looks
+like rendered.
+
+§10 resolves it in its own words — *"if text overflows, generation length is
+wrong, not the layout"* — so `load_vocabulary` clamps `target_max` to
+`layout_word_ceiling()`. Stages 8-11 read 120-**168**; stages 1-7 are untouched
+(`min`, never `max`, and the FLOOR is never raised).
+
+It is clamped on `Vocabulary` and not in the prompt, because `Vocabulary` is the
+one object both halves read: the model is told `target_max`, the validator judges
+against the same box, and `eval`/`measure_length` score compliance off the same
+field. A prompt-only clamp would leave the §14 harness calling a 190-word story
+compliant while the gate refused it — two rules disagreeing at the margin, which
+is the defect this whole pass is about.
+
+### 19.4 — field ordering, the shape that has bitten this project before
+
+`StoryDraft` was `title, segments, story_words_used`. A constrained decoder emits
+properties in schema order, so that order is the order the model *thinks* in: it
+went straight into `segments[0].text` with no commitment to how many screens
+there would be or what was on the last one. It wrote the opening before it had
+budgeted for the ending, and then had to fit the ending into what was left.
+
+That is `well_formed` before `grammar_note` (8.70-8.82) exactly — a field whose
+value depends on reasoning the schema lets the model skip, because the reasoning
+came after the commitment. `page_plan: list[str]` now sits **before** `segments`
+and asks for one line per screen including the ending, decided first.
+
+`story_words_used` stays last, and that is also deliberate: it is a report about
+text that by then exists.
+
+**Schema constraints were deliberately NOT used.** Anthropic structured outputs
+do not support `maxLength`/`minLength` and the SDK strips them from the schema
+and validates them *client-side* — so `max_length` on `StorySegment.text` would
+not constrain the model at all, and would convert an over-long draft from
+something the rewrite loop repairs into a parse exception §7 scores as `api_fail`.
+The budget reaches the model through field descriptions and the prompt; §0's
+validator is what enforces it.
+
+### 19.5 — two gates, not one, and why `passes_gate` was left alone
+
+`passes_gate` answers "can this child read every word", and `llm/questions.py`
+asks it about one-line question text where a page budget is meaningless. §10 asks
+"does the reading view show every word", which is only a question about a story.
+So `layout.fit_refusal` is separate, `run_pipeline` takes the conjunction, and
+`build_rewrite_block` gained a **sixth** thing it could not previously say.
+
+That last part is not cosmetic. A draft failing on length alone produced no
+violation, no OOV and no story word, so `lines` came out empty and the model was
+told its story was under 95% decodable — F1's false premise (9.40) for the third
+time. The refusal now names the ceiling, the overflow and the size of the cut.
+
+### 19.6 — the repair: 61 of 68 free, 7 paid, against the real local database
+
+Run deliberately against `storyforge` on port 5433, with `story_segments` copied
+to `story_segments_prerefit` first.
+
+**Free — `--refit-segments`, $0.00.** One query, one pure function, one UPDATE per
+moved row. 581 screens across 83 stories re-spread. Two refusals, asserted rather
+than documented: the joined text must be byte-identical before and after, and the
+segment count must not change (`questions.segment_id` is NULL on all 204 live
+rows, but "nobody happens to reference it" is not a licence). Both verified in
+SQL after the write: text unchanged YES, row count unchanged YES. Idempotent —
+the second run wrote nothing.
+
+`fit-check` went **68 clipped / 7006 words below the fold → 25 clipped / 2 words**.
+
+**Paid — 7 stories, $0.8323.** The residual was 885-967 characters against the
+875 the box holds: too much *story* for seven screens, not a bad split. They were
+quarantined (`gen_meta.fit_quarantine`, registered as the fourth pull path in
+`test_phase3._PULL_PATHS`) and refilled with
+`storyforge.warm --stages 8..11 --themes all`, which fills only the shortfall.
+7 warm, 0 rejected, 0 api_fail. Coverage returned to 33/33 pairs and 11/11 stages.
+
+The 7 new stories, generated under the new prompt and gate: 7 screens each,
+widest screen **96-119 chars**, total **595-710 chars**, **124-145 words** — every
+one inside every bound, with 0 or 1 rewrites.
+
+The $0.83 is 3x the $0.27 projection. The projection extrapolates from a pool
+concentrated at the low stages and says so; these were all stages 8-11, the
+longest, and `page_plan` adds output tokens. Authorisation was $3.00; **total
+spend $0.8323**, and it is the only money spent in this pass.
+
+### 19.7 — sabotage: fifteen, each confirmed at its own assertion line
+
+| # | what was broken | test that failed | line |
+|---|---|---|---|
+| 1 | tail-merge restored in `paginate` | `test_the_last_screen_is_not_where_the_rest_of_the_story_goes` | 114 |
+| 2 | `SEGMENT_CHAR_BUDGET` 125 → 140 | `test_the_screen_budget_stays_under_what_the_box_was_measured_to_hold` | 76 |
+| 3 | `fit_refusal` always returns None | `test_a_story_too_long_for_seven_screens_is_refused` | 164 |
+| 4 | fill step deleted | `test_pagination_uses_every_screen_it_is_given` | 162 |
+| 5 | rule 9 deleted from `SYSTEM_RULES` | `test_the_frozen_rules_state_the_screen_budget` | 265 |
+| 6 | SCREENS section removed from the request block | `test_the_request_block_states_the_screen_budget_alongside_the_word_band` | 268 |
+| 7 | `page_plan` no longer precedes `segments` | `test_the_schema_makes_the_model_plan_the_pages_before_it_writes_one` | 296 |
+| 8 | `load_vocabulary` clamp removed | `test_load_vocabulary_clamps_the_word_target_to_what_the_box_holds` | 319 |
+| 9 | fit refusal dropped from the PROBLEMS list | `test_the_rewrite_prompt_says_the_story_is_too_long...` | 248 |
+| 10 | `run_pipeline` computes the refusal, drops it from the gate | `test_run_pipeline_refuses_a_story_that_does_not_fit...` | 305 |
+| 11 | `warm._split_segments` keeps its own tail-merge | `test_the_splitter_that_writes_the_database_is_the_one_that_was_fixed` | 186 |
+| 12 | per-stage material into the frozen block | `test_the_frozen_prefix_is_identical_for_every_stage_and_theme` | 184 |
+| 13 | a word count leaks back into rule 8 | `test_the_length_rule_carries_no_per_request_detail` | 167 |
+| 14 | fill loop stops at an unsplittable widest | `test_pagination_uses_every_screen_it_is_given` | 162 |
+| 15 | `paginate` under-fills (early return) | `test_pagination_uses_every_screen_it_is_given` | 162 |
+
+**Two of these caught defects in the work itself rather than confirming it, and
+that is the point of doing them.**
+
+* **Sabotage 4 came back GREEN the first time.** `test_paginate_into_holds_the_
+  screen_count_fixed` used a fixture of equal-length sentences, for which the
+  binary search already lands on the requested screen count — so the loop that
+  made the function different from `paginate` never ran, and deleting it changed
+  nothing. `LUMPY_STORY` (one long sentence, eight short) exists solely to make
+  that assertion capable of failing. Re-run, it failed — **and it failed for a
+  real reason**: the function gave up when the *widest* screen was a single
+  sentence, which is precisely the shape that makes the search under-fill, so it
+  bailed on exactly the cases it existed for.
+* **Sabotage 9 came back GREEN the first time.** The test asserted on the
+  rewrite prompt's *headline*, so deleting the line that puts the refusal in
+  PROBLEMS left it passing — a headline naming a problem beside a list that does
+  not contain it, which is F1 verbatim. It now asserts `fit_refusal(body) in
+  block`.
+
+Two further findings came out of the same discipline. Sabotage 14's first form
+**hung** rather than failing, because the fill loop could pick an unsplittable
+screen forever; the loop now advances only on a real increase, so it terminates
+whatever the selection does. And the full suite caught the repair's write
+condition being "is the fullest screen smaller" when it needed to be "do the
+stored screens differ from what the splitter produces" — three live stories were
+left in a partition the splitter would not reproduce, which
+`test_story_body_round_trips_through_the_segment_split` refuses.
+
+### 19.8 — the honest residual
+
+* **`make fit-check` is GREEN** — 0 of 735 segments clipped at both §10 viewports
+  and both §11 reading sizes, exit 0. It has never been green before. **§11's
+  34px/40px floors were not touched, the font was not shrunk, and the gate's
+  threshold was not moved**; the only thing that changed is how much story goes
+  on a screen.
+* **`SEGMENT_CHAR_BUDGET` is stricter than the box.** Six live stories carry a
+  127-132 char screen that the real `ReadingView` renders fine and the validator
+  would refuse. That is the intended direction — the enforced number is
+  conservative and the gate is the truth — but it means `--refit-segments`
+  reports a residual of 6 while `fit-check` reports 0. Not reconciled, on
+  purpose: moving the constant up to silence a report is how a measured bound
+  becomes a chosen one.
+* **Scene tags now describe text that partly moved.** 553 screens across 83
+  stories changed body; 541 of them carry `scene_tags` derived from the OLD
+  partition. `make art-check` is green and distinctness actually improved
+  (1x3/15x4/32x5/38x6/19x7 distinct pictures per story), because the metric is
+  distinctness and the tags did not move — but a picture may match its page less
+  well than it did. Illustration is decorative and invariant 11 says an
+  enrichment node degrades, so this was NOT re-tagged: `--backfill` also
+  re-derives questions, and §8 evidence hangs off those rows.
+* **`make vocab-check` is RED and one of the 23 stories is mine.** It was red
+  before this pass with 22 stories over `sam`/`dan`/`tom` (proper nouns the
+  Hunspell filter removed) and `every`/`family`/`together` (21.2's syllable-cap
+  move). Regenerated story 30824 is titled "Dan and the Treasure" and adds a
+  23rd. The generator invents character names and nothing forbids it; that is a
+  pre-existing defect this pass neither caused nor fixed, and it was not worth
+  another $0.12 to re-roll a story that would likely invent another name.
+* **`make promote-check` is RED, unchanged.** Stages [6, 7, 8, 9, 10] terminal —
+  the same set STATE's invariant 15 records. Nothing here moves it.
+* **The model's own `segments` are still advisory.** `draft_text` joins them and
+  the splitter re-derives the page breaks, so `page_plan` and the segment
+  descriptions shape the TEXT the model writes rather than the pagination it
+  gets. Honouring the model's own boundaries would need the draft threaded
+  through `PipelineResult` into `warm.persist`, which is a wider change than this
+  defect needs — and the splitter is now good enough that it is not obviously
+  better. Named, not taken.
+* **`title` still precedes the story in the schema.** It is the same ordering
+  shape as 19.4 — a title committed to before the story exists — and it is not
+  what was broken here. Observed, deliberately not changed.

@@ -33,6 +33,7 @@ from storyforge.decoder import (
     validate_text,
     validate_word,
 )
+from storyforge.layout import MAX_SEGMENTS, fit_refusal, layout_word_ceiling
 from storyforge.llm.client import generation_model, generation_timeout, get_client
 from storyforge.llm.generate import (
     MAX_OUTPUT_TOKENS,
@@ -307,11 +308,28 @@ async def load_vocabulary(session, stage_id: int, theme_slug: str) -> Vocabulary
         )
         if story_word_is_eligible(r[0], stage_id)
     }
+    # §10's box, converted into §6's unit and applied as a CEILING (DEVIATIONS
+    # 19.3). `stages.target_len_max` is §6's number and it is 200 at stages 8-11;
+    # 7 screens hold `STORY_CHAR_BUDGET` characters, which is 168 words at the
+    # pool's measured 5.2 characters per word. Those two numbers cannot both be
+    # obeyed, and §10 says in its own words which one gives: "if text overflows,
+    # generation length is wrong, not the layout."
+    #
+    # It is clamped HERE rather than in `build_request_block` because `Vocabulary`
+    # is the one object both halves read: the prompt tells the model
+    # `target_max`, `validate_draft`/`fit_refusal` judge against the same box, and
+    # `eval`/`measure_length` score length compliance off the same field. Clamping
+    # in the prompt alone would leave the harness calling a 190-word story
+    # compliant while the gate refused it — two rules disagreeing at the margin,
+    # which is the defect this whole pass is about.
+    #
+    # `min` and never `max`: the floor is §6's and is never raised to fit the box.
+    # At stages 1-7 the ceiling is 60 or 120 and this changes nothing at all.
     return Vocabulary(
         stage_id=stage_id,
         stage_name=stage[0],
         target_min=stage[1],
-        target_max=stage[2],
+        target_max=min(stage[2], layout_word_ceiling()),
         allowed_words=allowed,
         sight_words=sight,
         story_words=story,
@@ -539,6 +557,15 @@ def build_rewrite_block(
     # is to write the story, not to edit it.
     empty = report.word_count == 0
 
+    # The SIXTH thing it could not say (DEVIATIONS 19.4). §10's refusal is not a
+    # decodability failure, so none of the three loops below can describe it: no
+    # violation, no OOV, no story word. A draft that failed only on length would
+    # have reached the generic fallback and been told it was under 95% decodable
+    # — F1's false premise for the third time. It is derived from `body` here
+    # rather than passed in, so the sentence the rewrite reads and the verdict
+    # `run_pipeline` acts on are the same function of the same text.
+    unfit = fit_refusal(body) if not empty else None
+
     lines = []
     if empty:
         lines.append(
@@ -546,6 +573,8 @@ def build_rewrite_block(
             f"{vocab.target_min}-{vocab.target_max} words, using only the "
             f"permitted, sight and story words."
         )
+    if unfit:
+        lines.append(f"- {unfit}")
     for w in adopt:
         lines.append(
             f'- "{w}" is one of your STORY WORDS, not a word this child cannot '
@@ -583,16 +612,17 @@ def build_rewrite_block(
 
     if not lines:
         # DEVIATIONS 9.45. Unreachable from a real gate failure — decodability
-        # cannot fall below 1.0 with zero violations and zero OOV, so all FOUR
-        # `passes_gate` conditions are describable (the fourth, the empty-text
-        # refusal, is handled at the top of `lines`) — but this is a live
-        # child-facing prompt and an empty problem list beside "change only what is
-        # listed" is the entirety of F1. Never ship that sentence again.
+        # cannot fall below 1.0 with zero violations and zero OOV, so all FIVE
+        # refusals are describable (the fourth, the empty-text refusal, and the
+        # fifth, §10's fit refusal, are both handled at the top of `lines`) — but
+        # this is a live child-facing prompt and an empty problem list beside
+        # "change only what is listed" is the entirety of F1. Never ship that
+        # sentence again.
         lines.append(
             f"- The story did not pass the reading check. It must be at least "
             f"{round(DECODABILITY_GATE * 100)}% decodable, contain no unknown words, "
-            f"and use at most {MAX_STORY_WORDS} different story words. Fix that "
-            f"without changing what the story is about."
+            f"use at most {MAX_STORY_WORDS} different story words, and fit on "
+            f"{MAX_SEGMENTS} screens. Fix that without changing what the story is about."
         )
 
     # 9.44 made the headline conditional so it could never be false; 9.77 keeps it
@@ -611,6 +641,15 @@ def build_rewrite_block(
         headline = (
             "Your story is readable, but it used story words without declaring "
             "them. Rewrite it."
+        )
+    elif unfit:
+        # Last of the specific headlines, not first, because every clause above
+        # it is a word the child cannot read and this one is a word the child
+        # cannot SEE. Both are listed in PROBLEMS either way; this only decides
+        # which one leads when a draft manages both.
+        headline = (
+            "Your story is readable, but it does not fit on the screen. "
+            "Rewrite it shorter."
         )
     else:
         headline = "Your story did not pass the reading check. Rewrite it."
@@ -757,7 +796,17 @@ async def run_pipeline(
             ) as val_span:
                 t_node = time.perf_counter()
                 report = validate_draft(vocab, body, draft.story_words_used)
-                gate = passes_gate(report)
+                # §10 is a SECOND gate on the same draft, and it is deliberately
+                # not folded into `passes_gate` (DEVIATIONS 19.4). `passes_gate`
+                # answers "can this child read every word", and `llm/questions.py`
+                # asks it about one-line question text, where a page budget is
+                # meaningless. This asks "does the reading view show every word",
+                # which is only a question about a STORY. Two gates, two remedies,
+                # named separately so the rewrite prompt can say which one failed
+                # — an empty problem list beside "change only what is listed" is
+                # the entirety of DEVIATIONS 9.40.
+                unfit = fit_refusal(body)
+                gate = passes_gate(report) and unfit is None
                 val_ms = (time.perf_counter() - t_node) * 1000
                 val_span.update(
                     output={
@@ -765,6 +814,7 @@ async def run_pipeline(
                         "counts": report.counts,
                         "violations": [w.word for w in report.violations],
                         "distinct_story_words": report.distinct_story_words,
+                        "fit_refusal": unfit,
                         "passes_gate": gate,
                     },
                     level=None if gate else "WARNING",
