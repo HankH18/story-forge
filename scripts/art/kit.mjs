@@ -1,14 +1,14 @@
 /**
  * The shared drawing kit for Story Forge's illustration pool (§12, style guide §06).
  *
- * §06's consistency gates are the reason this file exists rather than 33
+ * §06's consistency gates are the reason this file exists rather than 43
  * hand-written SVGs:
  *
  *   "Same palette across every theme · same texture · same light direction
  *    (upper left) · no photoreal, no 3D render, no anime, no thick vector-clipart
  *    outlines."
  *
- * Thirty-three independently drawn files drift on exactly those axes. Here there
+ * Forty-three independently drawn files drift on exactly those axes. Here there
  * is one `PALETTE`, one `grain()` texture, and one `LIGHT` offset that every
  * rounded form takes its highlight from, so drift is not expressible.
  *
@@ -277,6 +277,56 @@ export const mountain = (fill = P.ink500, light = P.shade) =>
 export const caveMouth = (fill = P.ink) =>
   path('M-52 0 Q -56 -66 0 -70 Q 56 -66 52 0 Z', fill)
 
+/**
+ * A cave seen from OUTSIDE — a rock mass with a dark mouth cut into it.
+ *
+ * `caveMouth` on its own is a dark arch sitting on the backdrop, which reads as
+ * a doorway with no house. Outdoors the mouth needs something to be a hole IN,
+ * so the hill is drawn first and the mouth twice: a lighter rim, then the dark
+ * inside, which is what gives an opening depth without a gradient (§06).
+ */
+export const caveHill = (fill = P.ink500, light = P.shade) =>
+  path('M-100 0 Q -86 -80 0 -88 Q 86 -80 100 0 Z', fill) +
+  path('M-100 0 Q -86 -80 0 -88 Q -26 -56 -42 0 Z', light, 'opacity="0.5"') +
+  at(0, 0, 0.66, caveMouth(P.ink700)) +
+  at(0, 0, 0.58, caveMouth(P.ink)) +
+  at(-72, 0, 0.5, rocks(fill, light)) +
+  at(76, 0, 0.42, rocks(fill, light))
+
+/**
+ * One broad leaf on a stalk, big enough for a small animal to sit under.
+ *
+ * `fern` is the wrong shape for shelter: its fronds radiate UPWARD, so a rabbit
+ * placed beneath one looks like it has grass growing out of its head. Shelter
+ * needs a canopy — one wide shape, arching over, with the stalk to one side.
+ */
+export const bigLeaf = (base = P.leaf, light = P.leaf100) =>
+  stroke('M0 0 Q 10 -40 -4 -76', P.leaf700, 7) +
+  path('M-78 -70 Q -44 -114 0 -106 Q 48 -114 78 -72 Q 32 -54 -6 -62 Q -44 -56 -78 -70 Z', base) +
+  path('M-72 -72 Q -42 -108 -2 -102 Q -22 -80 -10 -64 Q -42 -58 -72 -72 Z', light, 'opacity="0.38"') +
+  stroke('M-6 -76 L-58 -78', P.leaf700, 2.5) +
+  stroke('M-6 -80 L-2 -102', P.leaf700, 2.5) +
+  stroke('M-4 -78 L52 -76', P.leaf700, 2.5)
+
+/**
+ * Rain: short slanted strokes on a fixed lattice, plus a puddle ring or two.
+ *
+ * Deliberately NOT a lightning bolt. §06's "nothing frightening" is the rule a
+ * weather scene is most likely to break, and `storm` in a story for a
+ * five-year-old is the sky the animals shelter from, not a hazard.
+ */
+export const rain = (w, h, step, color = P.sky100, o = 0.55) => {
+  let out = ''
+  let row = 0
+  for (let y = 30; y < h; y += step) {
+    for (let x = (row % 2) * (step / 2) + 16; x < w; x += step) {
+      out += stroke(`M${n(x)} ${n(y)} l -11 30`, color, 4.5, `opacity="${o}"`)
+    }
+    row++
+  }
+  return out
+}
+
 export const rocks = (color = P.ink500, light = P.shade) =>
   litEllipse(-22, -8, 20, 12, color, light) +
   litEllipse(16, -6, 15, 9, color, light) +
@@ -458,6 +508,43 @@ export const dragon = ({ pose = 'standing', asleep = false, flip = false } = {})
   if (pose === 'peeking') {
     return dragonHead(0, -6, 1.25, { asleep: false }) + at(-30, -30, 0.55, dragonWing(false))
   }
+  if (pose === 'running') {
+    // The standing dragon with its legs turned into STROKES that reach fore and
+    // aft, and the tail pulled straight out behind. Two posts and a curled tail
+    // read as "standing still"; the diagonal of a reaching leg is the whole cue.
+    return (
+      stroke('M-28 -32 Q -62 -40 -80 -26', P.leaf, 12) +
+      path('M-82 -28 Q -74 -34 -64 -26 Q -74 -20 -82 -28 Z', P.gold300) +
+      at(-6, -42, 0.78, dragonWing(false)) +
+      stroke('M-13 -26 Q -27 -16 -33 -3', P.leaf700, 10) +
+      stroke('M12 -26 Q 26 -16 32 -4', P.leaf700, 10) +
+      ellipse(-33, -1, 9, 4, P.gold700) +
+      ellipse(32, -2, 9, 4, P.gold700) +
+      litEllipse(0, -36, 37, 22, P.leaf, P.leaf100) +
+      path('M-16 -55 q 8 -8 14 0 q 8 -8 14 0 Z', P.gold300) +
+      dragonHead(30, -46, 1, { asleep: false, flip })
+    )
+  }
+  if (pose === 'cheering') {
+    // Both wings thrown UP and out — the flying pose has them out to the sides,
+    // which at thumbnail size is the same silhouette as gliding. Up is the
+    // difference between "celebrating" and "leaving".
+    return (
+      stroke('M-28 -34 Q -58 -34 -54 -12', P.leaf, 12) +
+      path('M-56 -14 Q -48 -20 -40 -12 Q -48 -6 -56 -14 Z', P.gold300) +
+      at(12, -48, 0.84, dragonWing(false)) +
+      at(-12, -48, 0.84, dragonWing(true)) +
+      rect(-20, -16, 12, 16, P.leaf700, 5) +
+      rect(8, -16, 12, 16, P.leaf700, 5) +
+      ellipse(-14, -1, 9, 4, P.gold700) +
+      ellipse(14, -1, 9, 4, P.gold700) +
+      litEllipse(0, -38, 34, 24, P.leaf, P.leaf100) +
+      path('M-14 -60 q 7 -8 13 0 q 7 -8 13 0 Z', P.gold300) +
+      stroke('M-20 -44 Q -34 -54 -33 -66', P.leaf700, 8) +
+      stroke('M20 -44 Q 34 -54 33 -66', P.leaf700, 8) +
+      dragonHead(4, -54, 1.05, { asleep: false })
+    )
+  }
   // standing
   return (
     stroke('M-30 -34 Q -60 -30 -58 -6', P.leaf, 12) +
@@ -502,6 +589,78 @@ export const rabbit = ({ pose = 'sitting', hiding = false } = {}) => {
       stroke('M14 -34 Q 30 -26 34 -14', P.shade, 9) +
       ears +
       head
+    )
+  }
+  if (pose === 'hopping') {
+    // Hind legs reaching BACK, forepaws reaching forward, body tipped along the
+    // same diagonal. The rabbit part is otherwise the sitting egg, and an egg
+    // does not travel however many motion lines are drawn round it.
+    return (
+      stroke('M-4 -24 Q -28 -18 -41 -7', P.ink300, 12) +
+      stroke('M2 -17 Q -20 -10 -33 -2', P.shade, 10) +
+      litEllipse(4, -30, 27, 20, P.ink300, P.shade) +
+      circle(-23, -32, 9, P.card) +
+      stroke('M17 -30 Q 30 -22 34 -9', P.ink300, 9) +
+      at(13, 5, 0.95, ears + head)
+    )
+  }
+  if (pose === 'cheering') {
+    // Up on the hind feet with both forepaws raised. Same arms-up shape as the
+    // cheering astronaut, so a child reads the two celebrations as the same
+    // event in two different books.
+    return (
+      ellipse(-11, -2, 11, 5, P.ink300) +
+      ellipse(11, -2, 11, 5, P.ink300) +
+      litEllipse(0, -27, 20, 25, P.ink300, P.shade) +
+      // pale chest, not a tail: cheering faces the reader and a tail drawn on
+      // that side reads as a white belly patch, which is what the first pass did
+      path('M0 -44 Q 11 -34 10 -14 Q 0 -8 -10 -14 Q -11 -34 0 -44 Z', P.card, 'opacity="0.7"') +
+      // arms in the LIGHT tone. In the body tone they vanish into the body and
+      // the whole point of the pose goes with them.
+      stroke('M-14 -40 Q -31 -50 -31 -66', P.shade, 8) +
+      stroke('M14 -40 Q 31 -50 31 -66', P.shade, 8) +
+      circle(-31, -68, 5, P.ink300) +
+      circle(31, -68, 5, P.ink300) +
+      at(0, -7, 1, ears + head)
+    )
+  }
+  if (pose === 'eating') {
+    // Head lowered, both forepaws holding a leaf up to the mouth. Without the
+    // leaf this is a rabbit looking at the floor, which is not a picture of
+    // eating — the food has to be IN the drawing and in contact with the face.
+    return (
+      litEllipse(0, -24, 26, 24, P.ink300, P.shade) +
+      ellipse(-22, -6, 12, 7, P.ink300) +
+      ellipse(20, -6, 12, 7, P.ink300) +
+      circle(-24, -22, 8, P.card) +
+      at(11, 12, 0.94, ears + head) +
+      // The leaf is drawn in the PALE green: in `P.leaf` it is a green shape on
+      // a green forest floor and disappears at thumbnail size, and a picture of
+      // eating with no visible food is a picture of a rabbit looking down.
+      path('M28 -32 Q 50 -52 70 -30 Q 48 -12 28 -32 Z', P.leaf100) +
+      path('M28 -32 Q 48 -48 66 -32 Q 46 -22 28 -32 Z', P.leaf, 'opacity="0.35"') +
+      stroke('M30 -32 L66 -31', P.leaf700, 2.2) +
+      stroke('M42 -41 L46 -34', P.leaf700, 1.6) +
+      stroke('M54 -40 L56 -33', P.leaf700, 1.6) +
+      stroke('M16 -22 Q 27 -25 33 -31', P.shade, 7)
+    )
+  }
+  if (pose === 'sleeping') {
+    // Curled low with the ears laid BACK along the body. Ears up on a sleeping
+    // animal reads as awake-and-lying-down; the ears are the only part of a
+    // rabbit that can say asleep from across a room.
+    return (
+      litEllipse(0, -18, 34, 18, P.ink300, P.shade) +
+      circle(-33, -11, 7, P.card) +
+      path('M-2 -29 Q -34 -41 -41 -29 Q -20 -21 -2 -25 Z', P.ink300) +
+      path('M-4 -29 Q -28 -37 -34 -29 Q -18 -24 -4 -26 Z', P.berry100) +
+      ellipse(24, -6, 14, 5, P.shade) +
+      litEllipse(18, -22, 17, 15, P.ink300, P.shade) +
+      closedEyes(18, -25, 12, 5) +
+      circle(28, -18, 2.4, P.berry700) +
+      smile(26, -14, 7, P.ink700, 1.6) +
+      stroke('M22 -16 L8 -20', P.ink500, 1.3) +
+      stroke('M34 -16 L48 -20', P.ink500, 1.3)
     )
   }
   return (
@@ -664,28 +823,82 @@ export const fish = ({ body = P.amber, light = P.gold300 } = {}) =>
   circle(15, -19, 1.1, P.card) +
   smile(20, -11, 6, P.ink700, 1.4)
 
-export const knight = () =>
-  // cloak
-  path('M-20 0 Q -26 -46 0 -50 Q 26 -46 20 0 Z', P.sky700) +
-  path('M-20 0 Q -26 -46 -2 -50 Q -4 -30 -8 0 Z', P.sky) +
-  // arms
-  stroke('M-16 -40 Q -30 -30 -28 -16', P.shade, 9) +
-  stroke('M16 -40 Q 30 -32 30 -20', P.shade, 9) +
-  // legs + boots
-  rect(-13, -14, 10, 14, P.ink700, 4) +
-  rect(3, -14, 10, 14, P.ink700, 4) +
-  ellipse(-8, -1, 9, 4, P.ink) +
-  ellipse(8, -1, 9, 4, P.ink) +
-  // tabard
-  rect(-11, -46, 22, 22, P.card, 2) +
-  path('M0 -44 L5 -34 L0 -26 L-5 -34 Z', P.berry) +
-  // helm — open visor, friendly face
-  litEllipse(0, -60, 17, 16, P.shade, P.rule) +
-  path('M-13 -62 Q 0 -50 13 -62 L13 -56 Q 0 -46 -13 -56 Z', P.warm) +
-  eyes(0, -62, 13, 2.6) +
-  smile(0, -55, 8, P.ink700, 1.6) +
-  path('M-4 -76 Q 0 -88 6 -76 Z', P.berry) +
-  at(30, -18, 0.9, lantern())
+export const knight = ({ pose = 'standing' } = {}) => {
+  if (pose === 'running') {
+    // The standing knight is a bell — cloak to the ground, two boot rectangles.
+    // Running needs the cloak OFF the ground and streaming behind, and legs that
+    // are strokes on opposite diagonals. The lantern stays in the leading hand:
+    // §06 says nothing frightening, so he never carries a weapon.
+    return (
+      // The cloak stops ABOVE the trailing leg. Overlapping them puts a dark
+      // boot on a dark cloak and the back half of the stride disappears.
+      path('M-8 -50 Q -48 -50 -59 -29 Q -34 -29 -12 -37 Z', P.sky700) +
+      path('M-8 -50 Q -42 -49 -51 -33 Q -32 -34 -13 -41 Z', P.sky, 'opacity="0.65"') +
+      // ONE leg reaching forward to the ground and one trailing behind. The
+      // first pass had both legs splayed symmetrically, which is a man standing
+      // astride — a stride is asymmetric or it is not a stride.
+      stroke('M-3 -19 Q 14 -16 23 -5', P.ink700, 9) +
+      stroke('M-7 -19 Q -23 -15 -32 -19', P.ink700, 9) +
+      ellipse(25, -3, 9, 4, P.ink) +
+      ellipse(-34, -20, 9, 4, P.ink) +
+      path('M-16 -18 Q -21 -50 1 -52 Q 21 -50 17 -18 Z', P.sky700) +
+      rect(-10, -48, 22, 24, P.card, 2) +
+      path('M1 -46 L6 -36 L1 -28 L-4 -36 Z', P.berry) +
+      stroke('M-14 -42 Q -29 -37 -31 -25', P.shade, 9) +
+      stroke('M16 -42 Q 33 -40 37 -28', P.shade, 9) +
+      litEllipse(2, -62, 17, 16, P.shade, P.rule) +
+      path('M-11 -64 Q 2 -52 15 -64 L15 -58 Q 2 -48 -11 -58 Z', P.warm) +
+      eyes(2, -64, 13, 2.6) +
+      smile(2, -57, 8, P.ink700, 1.6) +
+      path('M-2 -78 Q 2 -90 8 -78 Z', P.berry) +
+      at(39, -26, 0.9, lantern())
+    )
+  }
+  if (pose === 'cheering') {
+    // Standing, both arms up, and NO lantern — he is holding it with neither
+    // hand, so drawing it anyway puts a lamp floating beside him.
+    return (
+      path('M-20 0 Q -26 -46 0 -50 Q 26 -46 20 0 Z', P.sky700) +
+      path('M-20 0 Q -26 -46 -2 -50 Q -4 -30 -8 0 Z', P.sky) +
+      stroke('M-16 -42 Q -31 -54 -29 -70', P.shade, 9) +
+      stroke('M16 -42 Q 31 -54 29 -70', P.shade, 9) +
+      rect(-13, -14, 10, 14, P.ink700, 4) +
+      rect(3, -14, 10, 14, P.ink700, 4) +
+      ellipse(-8, -1, 9, 4, P.ink) +
+      ellipse(8, -1, 9, 4, P.ink) +
+      rect(-11, -46, 22, 22, P.card, 2) +
+      path('M0 -44 L5 -34 L0 -26 L-5 -34 Z', P.berry) +
+      litEllipse(0, -60, 17, 16, P.shade, P.rule) +
+      path('M-13 -62 Q 0 -50 13 -62 L13 -56 Q 0 -46 -13 -56 Z', P.warm) +
+      eyes(0, -62, 13, 2.6) +
+      smile(0, -55, 8, P.ink700, 1.6) +
+      path('M-4 -76 Q 0 -88 6 -76 Z', P.berry)
+    )
+  }
+  return (
+    // cloak
+    path('M-20 0 Q -26 -46 0 -50 Q 26 -46 20 0 Z', P.sky700) +
+    path('M-20 0 Q -26 -46 -2 -50 Q -4 -30 -8 0 Z', P.sky) +
+    // arms
+    stroke('M-16 -40 Q -30 -30 -28 -16', P.shade, 9) +
+    stroke('M16 -40 Q 30 -32 30 -20', P.shade, 9) +
+    // legs + boots
+    rect(-13, -14, 10, 14, P.ink700, 4) +
+    rect(3, -14, 10, 14, P.ink700, 4) +
+    ellipse(-8, -1, 9, 4, P.ink) +
+    ellipse(8, -1, 9, 4, P.ink) +
+    // tabard
+    rect(-11, -46, 22, 22, P.card, 2) +
+    path('M0 -44 L5 -34 L0 -26 L-5 -34 Z', P.berry) +
+    // helm — open visor, friendly face
+    litEllipse(0, -60, 17, 16, P.shade, P.rule) +
+    path('M-13 -62 Q 0 -50 13 -62 L13 -56 Q 0 -46 -13 -56 Z', P.warm) +
+    eyes(0, -62, 13, 2.6) +
+    smile(0, -55, 8, P.ink700, 1.6) +
+    path('M-4 -76 Q 0 -88 6 -76 Z', P.berry) +
+    at(30, -18, 0.9, lantern())
+  )
+}
 
 export const astronaut = ({ pose = 'standing', flip = false } = {}) => {
   const suit = P.card

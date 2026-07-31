@@ -273,13 +273,100 @@ def test_every_seeded_asset_has_meaningful_alt_text():
         assert alt.endswith("."), f"{row['url']}: alt_text should be a sentence"
 
 
-def test_each_seeded_theme_has_eight_to_twelve_assets():
+# ---------------------------------------------------------------------------
+# §12's pool size: the FLOOR is a requirement, the ceiling was a transcription.
+#
+# This was one assertion, `8 <= n <= 12`, copied from §12 line 260 ("curated
+# asset pool — ~8–12 images per theme"). The floor half is real and stays. The
+# ceiling half was retired by the operator after DEVIATIONS 26.1-26.8 measured
+# what it costs, and 28.1-28.6 paid for it in drawings.
+#
+# The reason it had to go is that §12 says two things that cannot both be true.
+# It mandates a CLOSED 42-tag vocabulary that the scene-tagging node must emit
+# from, and a pool of ~12 pictures per theme to answer them with. Measured on
+# the live pool at 11 assets per theme: coverage was 22/20/15 of 42 tags, THREE
+# tags (`climbing`, `eating`, `storm`) had no asset in any theme at all, 41
+# servable animals screens asked for `cave` in a theme that owned no cave, and 5
+# screens rendered §06's placeholder outright. The tilde in "~8–12" is on the
+# pool size; there is no tilde on the vocabulary.
+#
+# So the ceiling is replaced, not deleted, by two assertions that bound the pool
+# by what it can ANSWER instead of by how many files it is.
+# ---------------------------------------------------------------------------
+
+#: Distinct §12 tags each theme's SEGMENT pool can answer, measured after
+#: DEVIATIONS 28.1-28.6. A RATCHET: curation may broaden a theme, never narrow
+#: it. Lowering a number here is the change this file exists to make visible.
+TAG_COVERAGE_FLOOR = {"animals": 28, "dragons": 23, "space": 15}
+
+
+def _segment_tags_by_theme() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for row in ASSET_ROWS:
+        if row["kind"].strip() != "segment":
+            continue
+        out.setdefault(row["theme"].strip(), set()).update(
+            t.strip() for t in row["tags"].split("|") if t.strip()
+        )
+    return out
+
+
+def test_no_theme_holds_fewer_than_section_12s_eight_pictures():
+    """§12's FLOOR, unchanged. A theme below it cannot illustrate a story."""
     counts: dict[str, int] = {}
     for row in ASSET_ROWS:
         counts[row["theme"]] = counts.get(row["theme"], 0) + 1
     assert set(counts) == {"dragons", "space", "animals"}
     for theme, n in counts.items():
-        assert 8 <= n <= 12, f"{theme} has {n} assets, §12 wants 8-12"
+        assert n >= 8, f"{theme} has {n} assets, §12's floor is 8"
+
+
+def test_no_theme_grows_without_broadening_what_it_can_answer():
+    """The anti-sprawl bound that replaced §12's transcribed ceiling.
+
+    A theme may hold no more SEGMENT pictures than the number of distinct tags
+    it covers. That refuses the thing a raw count was standing in for — a pool
+    that grows by adding pictures which answer nothing new — while permitting
+    the thing the count forbade by accident, which is a SECOND picture for a tag
+    the live pool asks for 41 times (the novelty tiebreak in `select_asset` has
+    nothing to choose between until there are two).
+    """
+    tags = _segment_tags_by_theme()
+    counts: dict[str, int] = {}
+    for row in ASSET_ROWS:
+        if row["kind"].strip() == "segment":
+            counts[row["theme"]] = counts.get(row["theme"], 0) + 1
+    for theme, n in counts.items():
+        covered = len(tags[theme])
+        assert n <= covered, (
+            f"{theme} holds {n} segment pictures covering only {covered} tags — "
+            "the pool is growing without broadening"
+        )
+
+
+def test_no_theme_covers_fewer_tags_than_it_did_when_this_was_measured():
+    """The ratchet. Narrowing a theme's coverage is what the old ceiling would
+    have quietly permitted, and it is the failure that actually hurts."""
+    tags = _segment_tags_by_theme()
+    for theme, floor in TAG_COVERAGE_FLOOR.items():
+        assert len(tags[theme]) >= floor, (
+            f"{theme} answers {len(tags[theme])} of the {len(TAG_VOCABULARY)} §12 "
+            f"tags, down from the measured {floor}"
+        )
+
+
+def test_the_three_tags_no_theme_could_draw_are_drawable_now():
+    """`climbing`, `eating` and `storm` were in the closed vocabulary the model
+    is told to choose from and in NO asset row anywhere (DEVIATIONS 26.7).
+
+    A tag the model may emit and the library cannot answer is not a neutral gap:
+    every screen that picks it either falls to §06's placeholder or is answered
+    by whichever of its OTHER tags happens to match, which is how a rabbit in a
+    burrow ended up illustrating a screen about a mountain.
+    """
+    drawn = set().union(*_segment_tags_by_theme().values())
+    for tag in ("climbing", "eating", "storm"):
+        assert tag in drawn, f"{tag}: still in the vocabulary and in no drawing"
 
 
 def test_each_theme_has_exactly_one_cover():

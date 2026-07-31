@@ -193,6 +193,11 @@ vocab-check: ## Refuse a pool whose stories use words the current allowlist no l
 # model had nothing to draw, or the library owns no picture for these tags — which
 # is a curation shopping list and not a bug. Free: two SQL queries, no API client.
 # The repair is `make art-repair` and is also free (DEVIATIONS 26.1-26.8).
+# That shopping list was then FILLED (28.1-28.6): the pool is 43 rows / 43 files,
+# every one of §12's 42 tags is reachable in some theme, and the "no asset for
+# these tags" half of the placeholder census is 0. `data/seed/assets.csv` and
+# `scripts/art/` are where a new picture is added; `node scripts/generate-art.mjs`
+# draws it and cross-checks the CSV both ways.
 art-check: ## Refuse a pool whose stories render one repeated picture on every page
 	cd $(API) && uv run python -m storyforge.warm --check-art
 

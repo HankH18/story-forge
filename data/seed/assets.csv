@@ -1,4 +1,4 @@
-# Curated illustration pool (§12): ~8-12 images per theme, hand-tagged from the
+# Curated illustration pool (§12): hand-tagged from the
 # CLOSED vocabulary in storyforge/llm/scene_tags.py. A tag outside that
 # vocabulary is a seed-time ERROR, not a warning — the scene-tagging node can
 # never emit it, so the asset would be permanently unreachable and every segment
@@ -62,3 +62,17 @@ animals,segment,dog|running|meadow,/assets/art/v1/animals/dog-01.svg,A brown dog
 animals,segment,fox|snow|path,/assets/art/v1/animals/snow-01.svg,A red fox stepping carefully along a snowy path.
 animals,segment,dog|cat|helping|found,/assets/art/v1/animals/help-01.svg,A dog and a cat nose to nose after the dog found the cat.
 animals,cover,fox,/assets/art/v1/animals/cover.svg,A cheerful red fox sitting in the middle of a gold circle.
+# Ten pictures drawn against MEASURED demand, not against the vocabulary
+# (DEVIATIONS 28.1-28.6). Each fills a (theme, tag) that live servable screens
+# asked for and no asset in that theme could answer; the number after each is
+# how many screens that was, counted on the live pool before any were drawn.
+animals,segment,cave|rabbit|forest,/assets/art/v1/animals/cave-01.svg,A brown rabbit sitting outside the dark mouth of a cave in the forest.
+animals,segment,cave|rabbit|sleeping,/assets/art/v1/animals/cave-02.svg,A rabbit asleep on a bed of soft green moss inside a quiet cave.
+animals,segment,celebrating|rabbit|found|meadow,/assets/art/v1/animals/celebrate-01.svg,Two rabbits cheering with their paws in the air in a sunny meadow.
+animals,segment,mountain|rabbit|climbing,/assets/art/v1/animals/mountain-01.svg,A rabbit hopping up a winding path on a tall green mountain.
+animals,segment,eating|rabbit|forest,/assets/art/v1/animals/eat-01.svg,A rabbit holding a big green leaf and nibbling it on the forest floor.
+animals,segment,storm|rabbit|hiding,/assets/art/v1/animals/storm-01.svg,A rabbit keeping dry under a wide green leaf while rain falls.
+dragons,segment,knight|running|path,/assets/art/v1/dragons/run-01.svg,A knight running along a sandy path between tall pine trees.
+dragons,segment,dragon|running|cave,/assets/art/v1/dragons/run-02.svg,A green dragon running out of a cave into the daylight.
+dragons,segment,dragon|celebrating|fire|cave,/assets/art/v1/dragons/celebrate-01.svg,A dragon cheering outside its cave with a happy puff of orange fire.
+dragons,segment,dragon|knight|celebrating|friendly_creature,/assets/art/v1/dragons/celebrate-02.svg,A knight and a dragon and a little round creature all cheering together in a meadow.

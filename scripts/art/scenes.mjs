@@ -1,5 +1,5 @@
 /**
- * The 33 curated illustrations (§12) and the 14 story-word cutouts (§06),
+ * The 43 curated illustrations (§12) and the 15 story-word cutouts (§06),
  * composed from `kit.mjs`.
  *
  * Each entry's key is the file it writes and its `tags` MUST equal the tag set
@@ -14,9 +14,11 @@
 import {
   P,
   at,
+  bigLeaf,
   bird,
   castle,
   cat,
+  caveHill,
   caveMouth,
   circle,
   cloud,
@@ -42,6 +44,7 @@ import {
   pine,
   planetBall,
   rabbit,
+  rain,
   rect,
   rocketShip,
   rocks,
@@ -137,7 +140,7 @@ const caveInterior = ({ mouthX = 1140, mouthScale = 3.2 } = {}) =>
   at(190, 708, 1.4, rocks(P.ink500, P.ink300))
 
 /* -------------------------------------------------------------------------- */
-/* the pool — 30 segment illustrations (4:3) + 3 covers (1:1)                  */
+/* the pool — 40 segment illustrations (4:3) + 3 covers (1:1)                  */
 /* -------------------------------------------------------------------------- */
 
 export const SEGMENTS = {
@@ -604,6 +607,221 @@ export const SEGMENTS = {
       star4(576, 600, 20, P.gold300) +
       star4(612, 660, 12, P.gold) +
       tufts(W, 850, 92, P.leaf700, 1.3),
+  },
+
+  /* ---- the ten drawn against MEASURED demand (DEVIATIONS 28.1-28.6) -------
+   *
+   * Every one of these fills a (theme, tag) the live pool asks for and the
+   * library could not answer. The counts are servable screens carrying that tag
+   * in that theme with no asset in that theme tagged with it, measured on the
+   * live pool before any of this was drawn — not guessed from the vocabulary.
+   */
+
+  // animals `cave`: 41 screens, the largest hole in the library. TWO pictures,
+  // not one, because the selector's novelty tiebreak needs a second equally-good
+  // match before a story with several cave screens can show two different caves.
+  'animals/cave-01': {
+    tags: ['cave', 'rabbit', 'forest'],
+    draw: () =>
+      forestBackdrop(560, { pines: false }) +
+      at(120, 620, 2.6, pine()) +
+      at(1110, 650, 3.0, pine()) +
+      at(340, 592, 1.8, pine()) +
+      // the hillside the cave is cut into. Right of centre, so the rabbit keeps
+      // the upper-left light (§06) and is not standing in its own shadow.
+      at(830, 900, 6.4, caveHill()) +
+      at(330, 858, 4.4, rabbit({ pose: 'sitting' })) +
+      at(140, 890, 2.8, fern(P.leaf700, P.leaf100)) +
+      at(1160, 900, 2.6, pine()) +
+      tufts(W, 700, 68, P.leaf700),
+  },
+
+  'animals/cave-02': {
+    tags: ['cave', 'rabbit', 'sleeping'],
+    draw: () =>
+      caveInterior({ mouthX: 130, mouthScale: 3.2 }) +
+      // a bed of moss, wide enough to still be visible round the sleeper
+      ellipse(700, 830, 330, 74, P.leaf700) +
+      ellipse(700, 812, 282, 56, P.leaf) +
+      ellipse(660, 800, 150, 30, P.leaf100, 'opacity="0.35"') +
+      at(700, 818, 7.2, rabbit({ pose: 'sleeping' })) +
+      at(1060, 730, 1.5, rocks(P.ink500, P.ink300)),
+  },
+
+  // animals `celebrating`: 16 screens. Arms up and sparkles is the same
+  // celebration `space/celebrate-01` already uses, on purpose.
+  'animals/celebrate-01': {
+    tags: ['celebrating', 'rabbit', 'found', 'meadow'],
+    draw: () =>
+      dayBackdrop(600) +
+      tufts(W, 690, 56, P.leaf700) +
+      at(1090, 700, 1.8, tree()) +
+      at(150, 706, 1.5, tree(P.leaf700, P.leaf)) +
+      at(410, 850, 4.6, rabbit({ pose: 'cheering' })) +
+      at(790, 862, 4.2, rabbit({ pose: 'cheering' })) +
+      star4(600, 470, 26, P.gold300) +
+      star4(520, 560, 15, P.gold) +
+      star4(680, 580, 12, P.gold300) +
+      tufts(W, 860, 90, P.leaf700, 1.3),
+  },
+
+  // animals `mountain`: 9 screens — and `climbing`, which had no asset in ANY
+  // theme. One drawing, both tags, because the only way a rabbit is in a
+  // mountain picture is on its way up one.
+  'animals/mountain-01': {
+    tags: ['mountain', 'rabbit', 'climbing'],
+    draw: () =>
+      rect(0, 0, W, H, P.sky100) +
+      at(1050, 60, 1.3, sun(30)) +
+      cloud(250, 150, 2.0) +
+      cloud(900, 120, 1.5) +
+      at(230, 830, 4.2, mountain(P.ink500, P.shade)) +
+      at(1010, 840, 3.4, mountain(P.ink300, P.shade)) +
+      at(640, 880, 7.4, mountain(P.leaf700, P.leaf)) +
+      ground(W, H, 852, P.leaf, P.leaf700) +
+      // The way up has to be ON the slope and has to NARROW with height, or it
+      // is a pale wedge lying in front of a triangle. Two switchbacks, drawn
+      // over the mountain and under the rabbit.
+      // SWITCHBACKS, not one ribbon. A single tapering band up the face reads as
+      // a plank leaning on the mountain however it is coloured or curved; five
+      // short legs that reverse direction read as a mountain track and nothing
+      // else, which is the whole job of the `climbing` tag.
+      [
+        ['M424 858 L822 812', 20],
+        ['M822 812 L466 742', 18],
+        ['M466 742 L802 676', 16],
+        ['M802 676 L498 608', 14],
+        ['M498 608 L718 546', 12],
+      ]
+        .map(([d, w]) => stroke(d, P.shade, w + 5))
+        .join('') +
+      [
+        ['M424 858 L822 812', 20],
+        ['M822 812 L466 742', 18],
+        ['M466 742 L802 676', 16],
+        ['M802 676 L498 608', 14],
+        ['M498 608 L718 546', 12],
+      ]
+        .map(([d, w]) => stroke(d, P.rule, w))
+        .join('') +
+      at(640, 706, 2.3, rabbit({ pose: 'hopping' })) +
+      tufts(W, 884, 74, P.leaf700),
+  },
+
+  // `eating`: 8 screens across two themes and no asset anywhere.
+  'animals/eat-01': {
+    tags: ['eating', 'rabbit', 'forest'],
+    draw: () =>
+      forestBackdrop(620) +
+      at(230, 890, 3.0, fern(P.leaf700, P.leaf100)) +
+      at(560, 862, 5.0, rabbit({ pose: 'eating' })) +
+      // a couple more leaves on the floor, so the one it holds reads as food
+      path('M250 806 Q 282 784 314 806 Q 282 828 250 806 Z', P.leaf700) +
+      path('M980 838 Q 1012 816 1044 838 Q 1012 860 980 838 Z', P.leaf700) +
+      tufts(W, 790, 66, P.leaf700),
+  },
+
+  // `storm`: 2 screens, and the last of the three tags with no asset in any
+  // theme. Rain and a dark sky, never lightning — §06's "nothing frightening"
+  // is the rule a weather picture is most likely to break.
+  'animals/storm-01': {
+    tags: ['storm', 'rabbit', 'hiding'],
+    draw: () =>
+      rect(0, 0, W, H, P.sky) +
+      // ONE low cloud mass across the whole top rather than three small clouds
+      // in a dark tone — small dark clouds over a dark sky read as rocks in the
+      // air, which is what the first pass drew.
+      rect(0, 0, W, 210, P.ink500) +
+      path(
+        `M0 206 Q 130 292 280 214 Q 420 292 560 216 Q 700 298 850 218 Q 990 292 1200 208 L1200 0 L0 0 Z`,
+        P.ink500,
+      ) +
+      path(`M0 126 Q 200 200 420 126 Q 640 196 880 126 Q 1030 172 1200 122 L1200 0 L0 0 Z`, P.ink700) +
+      hills(W, 700, P.leaf700, P.ink500) +
+      ground(W, H, 790, P.leaf700, P.leaf) +
+      // rabbit FIRST, leaf over it. Drawn the other way round the ear tips sit
+      // on top of the canopy and it is a rabbit standing in the rain beside a
+      // plant, which is the opposite picture.
+      at(560, 886, 3.6, rabbit({ pose: 'sitting' })) +
+      at(760, 950, 5.2, bigLeaf(P.leaf, P.leaf100)) +
+      at(300, 900, 2.6, fern(P.leaf700, P.leaf100)) +
+      ellipse(200, 862, 74, 15, P.sky100, 'opacity="0.4"') +
+      ellipse(1000, 884, 62, 13, P.sky100, 'opacity="0.4"') +
+      rain(W, H, 132),
+  },
+
+  // dragons `running`: 26 screens, of which 9 are a knight running and 2 were
+  // rendering the placeholder outright. Two pictures, one of each subject.
+  'dragons/run-01': {
+    tags: ['knight', 'running', 'path'],
+    draw: () =>
+      forestBackdrop(590, { pines: false }) +
+      at(130, 640, 2.8, pine()) +
+      at(1080, 664, 3.2, pine()) +
+      at(330, 606, 2.0, pine()) +
+      at(880, 612, 2.2, pine()) +
+      // the path he is running down, going away from the reader
+      path('M200 900 L860 900 L672 630 L510 630 Z', P.shade) +
+      path('M250 900 L812 900 L656 640 L524 640 Z', P.shell) +
+      // off the centre line, so the path is a road he is on rather than a shape
+      // hidden behind him
+      at(690, 884, 4.3, knight({ pose: 'running' })) +
+      tufts(W, 700, 64, P.leaf700),
+  },
+
+  'dragons/run-02': {
+    tags: ['dragon', 'running', 'cave'],
+    draw: () =>
+      rect(0, 0, W, H, P.sky100) +
+      cloud(280, 140, 1.9) +
+      cloud(950, 190, 1.4) +
+      hills(W, 640, P.shade, P.rule) +
+      ground(W, H, 720, P.shade, P.rule) +
+      // cave on the LEFT and the dragon facing right, so the picture reads as
+      // running OUT of it rather than towards it
+      at(250, 760, 6.0, caveHill()) +
+      at(740, 872, 3.9, dragon({ pose: 'running' })) +
+      at(1130, 830, 1.6, rocks()) +
+      tufts(W, 760, 96, P.rule),
+  },
+
+  // dragons `celebrating`: 20 screens, 3 of them rendering the placeholder.
+  // Two pictures again — 13 of the 20 also carry `dragon`, so one of them would
+  // have taken every page of any story that celebrates more than once.
+  'dragons/celebrate-01': {
+    tags: ['dragon', 'celebrating', 'fire', 'cave'],
+    draw: () =>
+      rect(0, 0, W, H, P.amber100) +
+      rect(0, 0, W, 440, P.sky100) +
+      cloud(230, 150, 1.9, P.card) +
+      cloud(950, 190, 1.4, P.card) +
+      ground(W, H, 690, P.shade, P.rule) +
+      at(920, 748, 5.0, caveHill()) +
+      at(380, 862, 4.6, dragon({ pose: 'cheering' })) +
+      // the puff starts at the SNOUT. The cheering head sits at local (4,-54)
+      // and its snout tip is another (19, 8) out from there, so at scale 4.6
+      // that lands here — the first pass put the flame up by the ear.
+      at(560, 590, 2.3, flameBurst()) +
+      star4(180, 380, 22, P.gold300) +
+      star4(280, 290, 13, P.gold) +
+      star4(760, 330, 16, P.gold300) +
+      at(1130, 830, 1.5, rocks()),
+  },
+
+  'dragons/celebrate-02': {
+    tags: ['dragon', 'knight', 'celebrating', 'friendly_creature'],
+    draw: () =>
+      dayBackdrop(600) +
+      tufts(W, 690, 58, P.leaf700) +
+      at(1100, 700, 1.7, tree()) +
+      at(140, 708, 1.5, tree(P.leaf700, P.leaf)) +
+      at(270, 856, 4.4, knight({ pose: 'cheering' })) +
+      at(660, 866, 4.0, dragon({ pose: 'cheering' })) +
+      at(1000, 872, 3.2, creature({ body: P.berry, light: P.berry100 })) +
+      star4(470, 520, 24, P.gold300) +
+      star4(870, 480, 17, P.gold300) +
+      star4(560, 610, 12, P.gold) +
+      tufts(W, 866, 92, P.leaf700, 1.2),
   },
 }
 

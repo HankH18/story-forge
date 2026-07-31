@@ -183,16 +183,28 @@ stories, run against the live pool, $0.00**, idempotent, never writing
 `scene_tags`, never reading a questions row, never editing story text. Distinct
 pictures per story went 1x4/2x40/3x34/4x20/5x12 -> 2x1/3x11/4x32/5x30/6x26/7x10,
 and **5 of the 30 segment illustrations had never been shown to any child**.
-**The remaining hole is the LIBRARY, not the selector, and that is the honest
-half**: 30 segment images (10 per theme) against a 42-tag vocabulary covers
-22/20/15 of 42 tags per theme, 3 tags (`climbing`, `eating`, `storm`) have no
-asset anywhere, and 24 of 763 screens still draw §06's placeholder — 19 because
-the model returned no tags (its prompt invites that, so it is NOT a
-generation-time refusal: illustration is decorative and invariant 11 says an
-enrichment node degrades) and 5 because the theme owns no picture for their tags
-(dragons `celebrating`, dragons `running`). The library is AT §12's spec
-("~8-12 images per theme") and the spec under-provisions; **the fix is roughly
-6-10 more drawings, not more code** (DEVIATIONS 26.1-26.8).
+**The remaining hole was the LIBRARY, not the selector, and it is now CLOSED at
+the top of the demand curve** (DEVIATIONS 26.1-26.8 diagnosed it, 28.1-28.6 paid
+for it in drawings). It was 30 segment images against a 42-tag vocabulary,
+covering 22/20/15 of 42 tags per theme, with 3 tags (`climbing`, `eating`,
+`storm`) having no asset anywhere and 5 screens rendering §06's placeholder for
+want of one. **Ten more pictures now**: 40 segment + 3 cover = **43 asset rows,
+43 files**, coverage **28/23/15**, **every one of the 42 tags reachable in some
+theme**, and **0 screens tagged-but-unmatched** (was 5). Distinct pictures per
+story went 2x1/3x11/4x32/5x33/6x19/7x10 -> **2x1/3x1/4x13/5x35/6x38/7x18** after
+a free `--reselect-art` (185 screens, 65 stories, $0.00, idempotent). Every one
+of the ten is in use — 163 screens between them. **§12's "~8-12 images per
+theme" is the half of the spec that gave way**: it mandates a CLOSED 42-tag
+vocabulary in the same sentence, and eleven pictures cannot answer forty-two
+tags. The transcribed 12-ceiling in `test_each_seeded_theme_has_eight_to_twelve_
+assets` is retired; the FLOOR of 8 is unchanged, and two stronger assertions
+replaced the ceiling — a pool may not grow without broadening (segments <= tags
+covered) and per-theme coverage is a RATCHET at 28/23/15. **The honest residual
+is 8 (theme, tag) pairs over 25 screens** — `dragons water` 9, `dragons village`
+6, then a tail of 1-2 — **none of which renders a placeholder**; they are
+answered through another tag, so what is lost is match quality, not the picture.
+The 18-19 untagged screens are unchanged and correct (the prompt invites an
+empty list; invariant 11 says an enrichment node degrades).
 All eight are free, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and

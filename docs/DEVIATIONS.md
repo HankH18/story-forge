@@ -13523,3 +13523,172 @@ on 292 to mean anything, and it does.
 - **`docs/STATE.md`'s suite line reads "775 passed, 2 skipped"** and the suite is
   1190/3. Documentation drift, no code effect, and not corrected here because two
   other agents are live in this worktree and `docs/RESUME.md` is the current doc.
+
+## Phase 8 — the six-to-ten drawings the selector could not substitute for (28.1-28.6)
+
+26.1-26.8 fixed §12's *selection* and said so honestly in its last paragraph: the
+remaining hole is the **library**, not the selector, and *"the fix is roughly
+6-10 more drawings, not more code."* This is that fix. Ten pictures, drawn
+against a census taken first and independently, and no change at all to
+`select_asset`.
+
+### 28.1 — the census, re-measured before a line was drawn
+
+The handed-down numbers were not inherited. Re-measured against the live pool
+(`SERVABLE_STATUSES` + `ANSWERABLE_SQL`, port **5433**) with one SQL query,
+free and read-only, plus `python -m storyforge.warm --check-art`:
+
+| claim handed down | measured |
+|---|---|
+| 30 segment images, 10 per theme, 42-tag vocabulary | **confirmed** — 33 asset rows, 30 segment + 3 cover |
+| animals `cave` 41 screens, no asset | **41** |
+| dragons `running` 26 | **26** |
+| dragons `celebrating` 20 | **20** |
+| animals `celebrating` 16 | **16** |
+| animals `mountain` 9 | **9** |
+| `eating` 8 | **8** — 6 animals + 2 dragons |
+| `climbing`, `eating`, `storm` in NO theme | **confirmed**, 39 of 42 tags covered somewhere |
+| 24 of 763 screens on §06's placeholder: 19 untagged, 5 unmatched | **confirmed** — the 5 are dragons `['celebrating']` x3 and dragons `['running']` x2 |
+
+Per-theme tag coverage was **22 / 20 / 15** of 42 (animals / dragons / space).
+
+**The two populations are different and both matter.** Only 5 screens rendered
+the placeholder for want of an asset; the other ~120 screens of unmet demand
+*did* get a picture — through one of their OTHER tags. A screen tagged
+`rabbit, forest, cave` in a theme with no cave scored 2 on `forest-02` and was
+answered by a rabbit hiding under a fern. That is not a missing picture, it is a
+WRONG one, and no placeholder census can see it.
+
+### 28.2 — §12 contradicts itself, and the test had transcribed the wrong half
+
+§12 line 260 asks for a *"curated asset pool — ~8–12 images per theme"* and, in
+the same sentence, for a **closed 42-tag vocabulary** the scene-tagging node must
+choose from. Eleven pictures cannot answer forty-two tags: at `MAX_TAGS_PER_
+SEGMENT` = 4 the arithmetic ceiling is 44 tag-slots with no overlap at all, and
+the measured reality was 20-22. **The tilde is on the pool size. There is no
+tilde on the vocabulary.**
+
+`test_each_seeded_theme_has_eight_to_twelve_assets` asserted `8 <= n <= 12`. It
+was green, and would have stayed green — it is not a test this work broke, it is
+a ceiling that forbade the remedy. The floor half is a real requirement and is
+**unchanged**. The ceiling half is retired, and replaced by two assertions that
+bound the pool by what it can ANSWER rather than by how many files it is:
+
+- `test_no_theme_grows_without_broadening_what_it_can_answer` — a theme may hold
+  no more segment pictures than distinct tags it covers. This refuses what the
+  count was standing in for (a pool growing without broadening) and permits what
+  the count forbade by accident (a SECOND picture for a tag asked 41 times —
+  `select_asset`'s novelty tiebreak has nothing to choose between until there
+  are two).
+- `test_no_theme_covers_fewer_tags_than_it_did_when_this_was_measured` — a
+  RATCHET at the measured 28 / 23 / 15. Narrowing coverage is the failure that
+  actually hurts and the old ceiling would have permitted it silently.
+
+Both sabotage-verified, each red at its own assertion line.
+
+### 28.3 — ten drawings, and why two of some and one of others
+
+Every one is composed from `scripts/art/kit.mjs` — one palette, one `grain`
+pattern, one upper-left `LIGHT` offset — so §06's consistency gates hold by
+construction rather than by review. Six new poses were added to the kit
+(`rabbit` hopping/cheering/eating/sleeping, `dragon` running/cheering, `knight`
+running/cheering) plus three parts (`caveHill`, `bigLeaf`, `rain`). The existing
+48 files are **byte-identical** afterwards: `generate-art.mjs --check` confirms
+it, which is what proves the additions are additive.
+
+| file | tags | fills |
+|---|---|---|
+| `animals/cave-01` | cave, rabbit, forest | animals `cave` (41) |
+| `animals/cave-02` | cave, rabbit, sleeping | animals `cave` — the novelty partner |
+| `animals/celebrate-01` | celebrating, rabbit, found, meadow | animals `celebrating` (16) |
+| `animals/mountain-01` | mountain, rabbit, climbing | animals `mountain` (9) **and** `climbing` |
+| `animals/eat-01` | eating, rabbit, forest | `eating` (8 across two themes) |
+| `animals/storm-01` | storm, rabbit, hiding | `storm` (2) — the last tag with no asset anywhere |
+| `dragons/run-01` | knight, running, path | dragons `running`, the 9 knight screens |
+| `dragons/run-02` | dragon, running, cave | dragons `running`, the dragon screens; a THIRD cave for the 106 dragons cave screens |
+| `dragons/celebrate-01` | dragon, celebrating, fire, cave | dragons `celebrating` (20) |
+| `dragons/celebrate-02` | dragon, knight, celebrating, friendly_creature | dragons `celebrating` + `friendly_creature` (9) |
+
+**Two pictures where the demand is concentrated, one where it is not.** The
+selector's novelty tiebreak is a tiebreak between EQUAL matches: with one animals
+cave picture, every cave screen in a story scores identically and the same
+picture repeats down the page — the exact defect 26.1 was written about, rebuilt
+one tag lower. 41 screens is enough concentration for that to happen.
+
+**New assets take the HIGHEST ids, and that is load-bearing.** `select_asset`
+falls back to lowest id, so a new picture can only win by strictly greater
+overlap or as the novelty alternative to a spent one. Nothing already
+well-matched was displaced by the mere fact of being older.
+
+### 28.4 — the drawings were LOOKED AT, on a contact sheet, six times
+
+Every one of these was rendered to PNG through a real browser and inspected as a
+grid beside the original thirty. Six went back for a second and third pass, and
+the reasons are the reasons flat vector scenes fail:
+
+- **the rabbit `cheering` arms were the body colour** and vanished into the body,
+  so the pose was a rabbit sitting up. They are the LIGHT tone now.
+- **the `running` knight's legs were splayed symmetrically** — that is a man
+  standing astride, not a stride. And the trailing leg was drawn dark-on-dark
+  over the cloak, so the back half of the stride was invisible; the cloak was
+  raised off it.
+- **`mountain-01`'s path was one tapering ribbon** and read as a plank leaning on
+  the mountain however it was coloured or curved. It is five switchbacks now,
+  which reads as a mountain track and nothing else.
+- **`storm-01`'s sky was three small clouds in a dark tone**, which over a dark
+  sky read as rocks in the air. One low cloud mass across the top instead. The
+  rabbit was sheltering under a `fern`, whose fronds radiate UPWARD — it looked
+  like grass growing out of its head. `bigLeaf` is a canopy, and the rabbit is
+  drawn BEFORE it so the leaf covers it rather than the other way round.
+- **`eat-01`'s leaf was `P.leaf` on a `P.leaf` forest floor** and disappeared. A
+  picture of eating with no visible food is a picture of a rabbit looking down.
+- **the fire in `dragons/celebrate-01` started by the dragon's ear**, not its
+  snout.
+
+None of these is visible in code review and none would fail a test. §06's
+"nothing frightening" was the other standing constraint: the storm has rain and
+no lightning, and the running knight carries the lantern, never a weapon.
+
+### 28.5 — measured after, against the real local database
+
+`make seed` re-run twice against a private copy first (`sfscratch`), then twice
+deliberately against the live local DB: **43 rows both times, identical content
+hash, ids 1-33 unchanged and the ten new rows appended at 352-361, zero
+`story_segments.asset_id` orphaned.** The `(theme, kind, tags)` natural key from
+11.22 is what makes that true.
+
+Then `--check-art` and the free `--reselect-art`, live:
+
+| | before | after |
+|---|---|---|
+| screens on §06's placeholder, **tagged but unmatched** | **5** | **0** |
+| screens on the placeholder, model returned no tags | 18 | 18 (unchanged, and correct — the prompt invites it) |
+| distinct pictures per story | 2x1, 3x11, 4x32, 5x33, 6x19, 7x10 | **2x1, 3x1, 4x13, 5x35, 6x38, 7x18** |
+| per-theme tag coverage of 42 | 22 / 20 / 15 | **28 / 23 / 15** |
+| §12 tags with no asset in ANY theme | 3 | **0** |
+
+185 screens across 65 stories were re-selected, **$0.00**, no API call, and the
+second run selected nothing — idempotent. Every one of the ten new pictures is
+in use: 32, 26, 24, 20, 17, 14, 13, 6, 6, 5 screens respectively, 163 in total.
+
+### 28.6 — the honest residual
+
+**Eight (theme, tag) pairs over 25 screens still have no asset in their own
+theme**, measured over the durable pool (94 stories, 652 screens; the live DB
+also held ~12 transient test-suite stories while this was measured, and those are
+excluded):
+
+`dragons water` 9, `dragons village` 6, `animals friendly_creature` 2,
+`dragons dog` 2, `animals lost` 2, `dragons eating` 2, `dragons climbing` 1,
+`space running` 1.
+
+**None of them renders a placeholder.** Every one of those screens is answered
+through another of its tags; what is lost is match quality, not the picture. They
+were left because the brief was the 6-10 highest-demand gaps and this is the tail
+— the largest is 9 screens against the 41 that justified `animals/cave-01`.
+
+Also unchanged and correct: **18 screens where the model returned NO tags.** Its
+prompt says *"If a screen is just dialogue or feeling with nothing to draw,
+return an empty list"*, so that is the node obeying its instructions, not a
+failure. §06's placeholder is the right answer there and invariant 11 says an
+enrichment node degrades rather than raises.

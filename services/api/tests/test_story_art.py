@@ -293,14 +293,32 @@ async def test_apply_tags_records_and_logs_the_screens_that_lost_their_picture(
             )
         ).scalars()
     )
+    # A tag the ANIMALS theme owns no picture for — ASSERTED, not assumed. This
+    # was `celebrating`, and `animals/celebrate-01` (DEVIATIONS 28.3) gave the
+    # theme a celebrating picture, which turned the fixture's premise into a
+    # silent lie: the screen matched, so the test was no longer exercising the
+    # unmatched branch at all. A test whose subject is a hole in the library has
+    # to check the hole is still there.
+    unowned = "castle"
+    assert not (
+        await session.execute(
+            warm.text(
+                "SELECT 1 FROM assets a JOIN themes t ON t.id = a.theme_id "
+                "WHERE t.slug = 'animals' AND a.kind = 'segment' "
+                "AND :tag = ANY(a.tags)"
+            ),
+            {"tag": unowned},
+        )
+    ).all(), f"animals now owns a {unowned!r} picture — pick another library hole"
+
     meta: dict = {}
-    tagging = SceneTagResult(tags=[["rabbit", "forest"], [], ["celebrating"]])
+    tagging = SceneTagResult(tags=[["rabbit", "forest"], [], [unowned]])
     with caplog.at_level(logging.WARNING, logger="storyforge.warm"):
         await warm._apply_tags(session, story, segments, tagging, meta)
     await session.commit()
 
     assert meta["art_untagged_idx"] == [1]
-    assert meta["art_unmatched"] == [{"idx": 2, "tags": ["celebrating"]}]
+    assert meta["art_unmatched"] == [{"idx": 2, "tags": [unowned]}]
     assert meta["art_distinct"] == 1
     logged = [r.getMessage() for r in caplog.records]
     assert any("placeholder" in m and "untagged idx [1]" in m for m in logged), logged
