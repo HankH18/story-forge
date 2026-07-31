@@ -13692,3 +13692,515 @@ prompt says *"If a screen is just dialogue or feeling with nothing to draw,
 return an empty list"*, so that is the node obeying its instructions, not a
 failure. §06's placeholder is the right answer there and invariant 11 says an
 enrichment node degrades rather than raises.
+
+## Phase 8 — kid mode was a route, and one back gesture left it (27.1-27.8)
+
+`docs/AUDIT` round 3 found this, reproduced it, and deliberately left it
+(DEVIATIONS 25.4, 25.6): *"the platform back gesture leaves kid mode entirely and
+lands on the parent home — with the parent's email address and an 'Add a reader'
+text field, which §13 forbids inside kid mode. Reported, not fixed"*, because
+*"it is a route-architecture change with a real failure mode of its own (a
+history trap the parent then cannot escape), it cannot be covered by a
+pure-helper test, and it is not the worst thing a child meets."* Both halves of
+that reason were right. Neither is a reason to leave it: a trap is avoidable if
+you notice that the child and the adult are different people holding the same
+tablet, and "untestable in a pure-helper suite" is a statement about the suite.
+
+### 27.1 — reproduced first, both of them, before anything was written
+
+Driven live at **1024x768** through `~/.claude/skills/gstack/browse` against a
+FastAPI on **:8097** started with `DEMO_BYPASS_AUTH=false`, with a REAL Clerk
+session minted through the Backend API (`sign_in_tokens` → `?__clerk_ticket=`).
+**Enforcement was confirmed first, not assumed**: `/api/health` reported
+`demo_bypass_auth: false`, `GET /api/kids` with no token returned **401**, and
+with `Bearer garbage.token.here` returned **401** with a malformed-header detail.
+
+- **The leak.** `/app` → *Read a story* for Maya (kid 162, stage 3) → theme
+  picker → *Dragons* → page **3 of 7** ("The fire was hot.") → **one `back`** →
+  `http://localhost:5197/app`, rendering `SIGNED IN AS HOLCOMBHANK@GMAIL.COM`,
+  seven readers' first names and stages, and an `Add a reader` card. One further
+  tap reaches `/app/add-kid`, whose form reports `{"tag":"input","type":"text",
+  "id":"kid-name","placeholder":"Maya"}`.
+  **The audit's wording was one step optimistic and the correction matters:**
+  `/app` itself carries the email and a LINK; the free-text input is on
+  `/app/add-kid`, one tap further. Two taps, not one — and still two taps from a
+  five-year-old's reading screen, with no adult in the loop at either.
+- **The reload.** Same session, page **4 of 7**, `reload` → the theme picker.
+  The story, the place in it and the open `readings` row (28322, `completed_at`
+  NULL) are all lost, and because §7's sort key prefers a story this kid has NOT
+  read, the next tap serves a different one.
+
+Both are the same defect wearing two faces: `/read/:kidId` is ONE route with the
+phase in React state, so a kid session has no representation the platform can
+see — no history entry of its own, nothing to restore.
+
+### 27.2 — the §13 line, quoted, and the honest limit of what it says
+
+Build doc §13, bullet 2, verbatim:
+
+> Kids: rows under parent, display-name only. **No email, DOB, mic, camera,
+> free-text input, or third-party trackers in kid mode.** TTS is on-device.
+
+§11's kid-mode paragraph closes with the same rule from the other side: *"No text
+input anywhere in kid mode. No mic anywhere in the app."* The style guide §11
+restates it for the design layer: *"Kid mode renders no text input, no mic
+affordance, no camera, no share, no external link, no ad slot, and no avatar
+upload. If a design needs any of those, the design is wrong (§13). The only
+free-text field in the entire app is the admin playground."*
+
+**What that sentence does NOT say, stated plainly, because the alternative is the
+inference that cost 71 of 125 question rows their meaning (11.82):** §13 does not
+say the parent home may not show the parent's email. It should — that is the
+adult's own screen, and §16 phase 6 puts a kid picker and an add-kid form on it
+by name. Read strictly as a property of one route, §13 was never violated: `/app`
+is not kid mode.
+
+**The defect is that reading is the only one available, because the app does not
+implement kid mode as a mode.** §13's clause is a promise about what a child in a
+kid session is exposed to; if "kid mode" means only "the component mounted at
+`/read/:kidId`", the promise is satisfiable by any app that keeps an email one
+platform gesture away, and it constrains nothing. So the rule enforced here is:
+**the sentence is about the session — the interval between an adult handing over
+the tablet and taking it back — and everything a child can reach inside that
+interval without an adult acting is "in kid mode".** That is a design decision,
+stated as one, not a requirement read into the spec. Two things in the same
+document support it and neither compels it: §9 records that "kids have no
+accounts and no auth identity — deliberate COPPA posture, §13", so everything the
+child touches rides the PARENT's session; and §01 gives kid mode no error state,
+which only means anything if kid mode is somewhere a child can be.
+
+### 27.3 — the containment: the back gesture IS the ← button
+
+`lib/kidHistory.ts`. Kid mode pushes one extra history entry for its own URL on
+mount, and re-pushes it every time a back gesture consumes it, so `history.back()`
+inside a session is always answered by this app and never by the browser leaving
+the route. What it then does is `backOutcome(phase)`, which is the ← control's
+behaviour handed to the platform gesture:
+
+| phase | back | why |
+|---|---|---|
+| `reading` / `story-end` / `questions` | → picker | exactly what `←` does |
+| `celebration` | → picker | "read another?" is that screen's own offer, and the reading was completed before it painted |
+| `picker` | stay | leaving is not one of the answers |
+| `loading` | stay | `pickTheme` calls `beginStory` when the in-flight request lands; going back here shows the picker and then yanks the child into the story they just left |
+
+`needsGuardEntry(history.state)` keeps the depth at exactly **one across a
+reload** — an unconditional push adds an entry every time the tablet reloads, and
+Chrome's 50-entry cap then silently evicts the parent's own history from the
+bottom. `guardState` copies the entry it shadows rather than replacing it, so
+react-router's `idx`/`key` bookkeeping survives the raw `pushState`.
+
+### 27.4 — the escapes, five of them, each one driven
+
+A back button that never leaves is a trap, and a trap is worse than the leak.
+The asymmetry the containment rests on is **not what the two people can see, it
+is what they can INTEND** — so the door is not hidden, it is held.
+
+1. **`ui/GrownUpExit`, on the theme picker** — a **1500 ms press-and-hold**.
+   Proven both ways: three taps in a row and a 1200 ms hold released early both
+   left the browser on `/read/162`; a full hold reached `/app`. It is **236x48
+   px** (§11's floor is 48 in both axes — hiding the exit would trade a §13
+   defect for a §11 one) at ink-500 on paper-page, **5.99:1** against a 4.5
+   floor. It is on the picker and not in the reading view because §10 fixes the
+   reading chrome at three controls, and because the picker is where a parent
+   already is when they hand the tablet over and when they take it back.
+2. **The address bar.** A typed URL is a fresh navigation, not a `popstate`, and
+   this guard cannot see one. `goto /app` from inside a live session → parent
+   home. This is the escape that exists even if every line of the fix is wrong.
+3. **A new tab.** Same origin, same session, no guard: parent home.
+4. **The session's own end.** `Celebration` → *All done* → `/`, driven through a
+   full reading of story 1685 to the stars.
+5. **The app's own hand-back, unchanged.** `/read/999999` (an id the account does
+   not own), `/read/nonsense` and `/read` all still land on `/app`, and the
+   MAX_STALLS path still navigates there — a `leaving` ref makes the guard stand
+   aside for a navigation this component asked for.
+
+The parent who leaves by (1) lands on `/app` with `/read/162` behind them in
+history; pressing back there re-enters kid mode, which is honest history rather
+than a trap, and (1)-(4) are all still available from inside it.
+
+### 27.5 — the resume decision: YES, and bounded five ways
+
+25.6 left this open because *"that is a design decision about whether a kid
+session is resumable, and §11's route list does not answer it."* It is answered
+here: **a kid session IS resumable, and "resumable" means the story and the place
+in it, for thirty minutes, for the same reader, on the same device — nothing
+else** (`lib/resume.ts`).
+
+1. **Thirty minutes**, not `lastStory`'s seven days. A resume is about one
+   sitting; a tablet that slept resumes, the next morning is a new story. It is
+   strictly inside 8.62's retraction bound.
+2. **The STORY comes from `lastStory`**, which already refuses a story above the
+   reader's stage and already shape-checks a value anyone with the device can
+   edit. This module stores a POSITION and never a story, so exactly one place
+   decides whether a stored story may be shown to a child.
+3. **Reading, story-end and questions — never celebration.** The celebration is
+   downstream of `POST /complete`, whose latch means a replay returns empty
+   deltas and would blank the "Sounds you read" card (25.4's triple-`Finish`).
+   Questions ARE resumable, deliberately: the alternative orphans a reading that
+   was read to the end, and re-answering costs nothing because `POST /answers` is
+   `ON CONFLICT DO NOTHING` on `(reading_id, question_id)` and says so — *"first
+   answer wins … a client that retries a question until it guesses correctly
+   changes the feedback it sees and not the mastery signal."*
+4. **The reading id is REUSED, not reopened.** Proven live: reading **28324** on
+   story 1685 survived a reload mid-story AND a second reload mid-questions,
+   completed once, and recorded both answers (`answers` rows 28800/28801, both
+   `t`) with §8 deltas `a+3 · i+1 · l+1 · v+1 · w+1 · ed+1`. Before this change
+   that reading was lost twice.
+5. **A branch that cannot be replayed exactly refuses the whole resume.** The
+   live pool is linear, so this path runs only under `?fixture=branch` — which is
+   exactly where an off-by-one in a step index would sit unseen until the
+   generator starts emitting branches.
+
+Walking out of a story clears the record: `toPicker` is both the ← button and the
+back gesture, and a reload after either must not drop the child back into the
+story they just left.
+
+### 27.6 — `make kid-check`, the NINTH gate, and the first that measures the BROWSER
+
+`apps/web/scripts/kid-check.mjs`. Eight assertions — four containing the child,
+four freeing the adult — driven at 1024x768 through the **production bundle**
+under `vite preview`, against an enforced API, with a real Clerk session:
+
+```
+A1  back at the theme picker stays inside kid mode
+A2  back mid-story returns to the picker, inside kid mode
+A3  no email and no free-text input is reachable by backing out (§13)
+A4  a reload mid-story resumes the same story on the same page
+A5  reloading does not deepen the guard (history 3 -> 3 over 3 reloads)
+A6  three taps on the grown-up control do not leave — only a hold does
+A7  holding the grown-up control reaches /app
+A8  the address bar and a new tab always reach the parent home
+```
+
+**8 of 8 GREEN.** Like `fit-check` it **exits 2 when it cannot run** — no
+browser, no Clerk secret, no reader, no build are never a pass — and it
+additionally **refuses to run against `DEMO_BYPASS_AUTH` and proves the refusal
+with a garbage token**, because this file's whole subject is a screen that is
+only wrong when a real session is on it.
+
+Three properties worth keeping:
+
+- **The premise is a precondition, not an assumption.** Before asserting
+  anything the gate confirms that `/app` really does show an email address and
+  that `/app/add-kid` really does have a text input. If either stops being true
+  it exits 2 saying *"the premise moved"*, rather than passing quietly over a
+  containment there is no longer anything to contain.
+- **The child-facing assertions are denominated in §13's own terms** — the count
+  of email-shaped strings and of `input`/`textarea`/`contenteditable` nodes on
+  screen — and not only in "is the URL still `/read/:id`", because that is the
+  question the defect answered YES to while the parent's email was on screen.
+- **It reports all of its findings.** The first version died at the first leak
+  with "no story was served", hiding the two assertions after it; `ensureKidMode`
+  now restores a known state between assertions.
+
+It opens **one `readings` row per run** for the reader it drives and leaves it
+uncompleted, which is what a child who walks away produces; there is no way to
+drive a kid session without producing one.
+
+### 27.7 — sabotage: eighteen, and the one that came back GREEN
+
+**Twelve on the pure helpers** (`bun test src`, 40 new tests). Every one broke the
+SOURCE and reddened a NEW assertion at its own line; every one was restored and
+re-verified at 40 pass / 0 fail.
+
+| # | sabotage | red at |
+|---|---|---|
+| 1 | `backOutcome('reading')` → `'stay'` | `kidHistory.test.ts:24:36` |
+| 2 | `backOutcome('picker')` → `'to-picker'` | `kidHistory.test.ts:34:35` |
+| 3 | `backOutcome('loading')` → `'to-picker'` | `kidHistory.test.ts:41:36` |
+| 4 | `needsGuardEntry` always true | `kidHistory.test.ts:61:53`, `:99:53` |
+| 5 | `guardState` drops the router's state | `kidHistory.test.ts:83:23` |
+| 6 | the resume expiry window removed | `resume.test.ts:111:69`, `:117:45` |
+| 7 | the position's story id no longer checked | `resume.test.ts:129:45` |
+| 8 | `celebration` added to `RESUMABLE` | `resume.test.ts:141:30`, `:200:45` |
+| 9 | `replayChoices` tolerates an unmatched arm | `resume.test.ts:231:71` |
+| 10 | `replayChoices` ignores leftover choices | `resume.test.ts:235:75`, `:239:68` |
+| 11 | `restoreSession` accepts a step past the end | `resume.test.ts:283:48` |
+| 12 | `saveResume` stops validating the phase | `resume.test.ts:141:30` |
+
+**Six on the gate**, each a full rebuild and re-drive of the production bundle:
+
+| # | sabotage | red |
+|---|---|---|
+| 1 | the `popstate` guard never installed (the pre-fix behaviour) | A1, A2, A3 |
+| 2 | `backOutcome('reading')` → `'stay'` | A2 |
+| 3 | the reload no longer resumes | A4 |
+| 4 | `needsGuardEntry` always true | A5 |
+| 5 | the grown-up exit opens on a TAP | A6 |
+| 6 | the grown-up exit never opens | A7 |
+
+**Sabotage 4 came back GREEN the first time, and that is the finding.** A5 counts
+history entries, and Chrome caps a tab's history at 50; driven in the tab that
+had already run A1-A3, the count was pinned at the ceiling and *"the length did
+not change"* was true no matter what the code did. It is this project's signature
+defect — a check that passes because the environment has already answered its
+question — inside the gate written to prevent one. A4/A5 now run in a **fresh
+tab** (`history.length` starts at 3) and the assertion additionally fails if the
+depth it is handed is ≥40, so the ceiling can never quietly answer for it. With
+that, sabotage 4 reddens: `history 3 → 6 over 3 reloads`.
+
+Also removed rather than kept: an `i += 1` in `replayChoices` that skipped the
+arm just spliced in. The loop skips it anyway (it is a segment, not a choice), so
+no test could ever redden it, and a line that cannot be broken is a line that is
+not doing anything.
+
+### 27.8 — not fixed here, and why
+
+- **A parent who backs out of `/app` re-enters kid mode.** History says the kid
+  session is what came before, and it is. Rewriting the stack on the way out
+  (`history.go(-2)`) races the guard's own listener and buys a tidier back button
+  at the cost of a mechanism nobody can reason about.
+- **The grown-up exit is on the picker only.** A parent taking the tablet
+  mid-story presses back once, then holds — two gestures. Putting a fourth
+  control in the reading view is the §10 change 13.1-13.3 argued against, and the
+  address bar is one gesture for an adult who wants one.
+- **`?fixture=branch` cannot be resumed.** The fixture story is `id: -1` and
+  `lastStory` refuses a non-positive id by design (it is the guard against a
+  hand-edited cache). Dev-only, and the branch REPLAY is unit-tested against a
+  branching story either way.
+- **The gate needs a Clerk secret and cannot run in CI.** So does driving the app
+  at all, which is the point: the Phase 6 audit's finding 0 was a browser session
+  driven against a bypassed API. A gate that could run without a session would be
+  a gate that proves nothing about this defect.
+
+## Phase 8 — Dale-Chall is a 1948 list and it was wrong about the theme words (31.1-31.6)
+
+Two gates were red. The handed-down analysis said they were "one residual" —
+`dragon` and `planet` — and that regenerating ~36 stories for **$1.22-1.32** was
+the remedy. Both halves of that were wrong, and the measurement is the entry.
+
+### 31.1 — the question the spend assumed, answered: the WORD LIST was wrong
+
+`--check-vocabulary` classified `dragon` as `REGISTER` — "no stage offers the word
+and Dale-Chall does not vouch for it… THIS is the class the child sees". That
+class is the one the owner complained about, and the one 11.7-11.11 built the
+filter for after `amid` (SUBTLEX rank 7,528) was offered to five-year-olds.
+
+**The register filter asks "does a young child know this word?" It was answering
+wrongly for two words, and the pool proves it rather than intuition doing so:**
+
+| measured on the live pool, 2026-07-31 | |
+|---|---|
+| servable DRAGONS stories | **38** |
+| …that contain the word `dragon` | **38 (100%)** |
+| …carrying it as a §5.5 picture chip (the only licensed route) | 35 |
+| …that simply said it, becoming `REGISTER` offences | 3 (7270, 7324, 7336) |
+| stages of `allowed_words` offering `dragon` | **0 of 11** |
+
+Not one dragons story avoided the word. **The exclusion prevented zero
+occurrences.** All it did was convert every one into a defect: 35 of them into a
+chip spent on a word decodable from stage 1 — which is invariant 17's exact
+defect, committed by the VOCABULARY rather than by the bank — and 3 into
+`--check-vocabulary` failures.
+
+And the forward cost was worse than the backlog. Since 14.20 the chip route is
+closed too: `story_word_is_eligible('dragon', s)` is `False` at **every** stage,
+because the word is decodable and a chip must not be. So `dragon` was in no
+stage's `allowed_words` AND offerable as no stage's story word — **a dragons story
+generated today had no licensed way to say "dragon" at all.** That is not a
+backlog; it is a generator that cannot name its own theme, and it was getting
+worse with every warm run, not better.
+
+`planet` is the same shape: 3 stage-1 space stories chip it, and
+`--story-word-repair` provably cannot free them, because dropping a chip whose
+word no stage permits trades a wasted chip for a §5.4 violation (invariant 17).
+
+**Verdict: regeneration was the wrong remedy.** Rewriting 38 stories to remove the
+word "dragon" from a dragon-themed reader, at a cost of $1.22-1.32, in order to
+satisfy a 1948 fourth-grade word list's silence, is paying money to make the
+product worse. §18's escape valve is "shrink the inventory rather than add code
+cleverness"; this is that argument in the other direction, and the honest fix is
+one data file.
+
+### 31.2 — what was added, where, and what was deliberately NOT added
+
+`data/child-vocabulary-additions.txt`: **`dragon` and `planet`. Two words.**
+
+**NOT patched into `data/child-vocabulary.txt`, and that is the whole design.**
+That file is a verbatim vendored copy of textstat's `easy_words.txt`, SHA-256
+pinned in `decoder/data/PINS.md` and asserted on every run by
+`tests/decoder/test_inventory.py::test_vendored_artifacts_match_their_pins`.
+DEVIATIONS 22.9 proposed patching it directly; that would break the digest
+(sabotage-verified: `assert 19098 == 19091`), destroy the provenance of the 2,883
+words that ARE Dale-Chall's, and be silently reverted by the next
+`scripts/vendor-word-lists.py` run. A local judgement has to be stored where it
+reads as a local judgement.
+
+`precompute.child_forms()` unions the two files; `child_additions()` stays a
+separate accessor so the additions can be ratcheted and asserted on their own.
+
+**22.9 also proposed `rocket`, and `rocket` needed nothing** — it is a Dale-Chall
+word and has been in `allowed_words` from stage 1 all along. Adding words that
+need nothing dilutes the ratchet, so the file is exactly the two words with a
+measured cost. `comet` and `orbit` are in the same *structural* position
+(decodable, Dale-Chall-absent, dead bank entries) and are **not** added, because
+no gate is red over them: the file's rule 3 requires a measurement in the pool,
+not a hunch about the word.
+
+**Adding words is monotone, and that was verified rather than inherited**: the
+allowlist diff before/after is exactly four words added (`dragon`, `planet`,
+`dragons`, `planets` — the inflections arrive by Dale-Chall's own convention and
+still have to clear CMUdict and `align()`), zero removed. 34,221 -> 34,263 rows.
+
+**The decodability gate is unchanged and was never a candidate for weakening.**
+Being thematic is not an argument for being decodable. `compute_rows` still drops
+any candidate the 93-GPC inventory cannot align, and
+`test_every_local_addition_is_decodable_by_the_unchanged_inventory` asserts it per
+word — sabotage-verified by adding `alien` (permanently unalignable), RED at its
+own line.
+
+### 31.3 — the OTHER half of `--check-story-words`, which is not the same defect
+
+The handed-down number said "43 (`dragon` x39, `planet` x4) plus 23 four-to-seven
+stages ahead". Measured: **54 of 132 slots — `dragon` x35, `planet` x3 wasted, and
+16 far (`moon` x11, `stars` x4, `giraffe` x1) over 12 stories.** Numbers inherited
+rather than re-measured were wrong in both directions.
+
+The two halves have opposite remedies and only the first is free:
+
+* **wasted (38)** — freed by `--story-word-repair` the moment the allowlist
+  admits the word, because condition 2 (the stage's own vocabulary permits it) now
+  holds. **38 chips dropped from 38 stories, $0.00, against the live pool.** It
+  had been able to free **0** of them before.
+* **far (16 over 12 stories)** — no free repair exists and adding to the allowlist
+  cannot help: `moon` and `stars` are already Dale-Chall words already offered at
+  the stages that decode them (7 and 6). The defect is that stage-1 stories chipped
+  them. The word is in the text either way, so dropping the chip leaves a word the
+  child cannot decode with no picture — strictly worse. These stories have to leave
+  the pool.
+
+`storyforge/quarantine_story_words.py` is that second remedy, and it is a MODULE
+rather than a `warm.py` flag for two reasons: it is a one-shot remediation tied to
+one deviation rather than a standing gate, and `warm.py` was being edited by
+another agent in the same worktree at the same time — a shared 5,000-line file is
+not somewhere to land a change that has to be committed path-scoped. It is inside
+the package rather than in `scripts/` because `services/api/Dockerfile` copies
+`storyforge/` and `data/` and nothing else: **a remediation an operator cannot run
+in the container they deployed is not a remediation.**
+
+**Nothing is deleted.** `answers.question_id` is `ON DELETE CASCADE` and
+`questions.story_id` cascades from `stories`, so a DELETE erases a real child's
+history to fix our defect. Verified after the live write: **12 of 12 rows still
+exist, 10 readings and 1 answer preserved.** Nine of the twelve had been read.
+
+### 31.4 — coverage was checked BEFORE acting, and the refill is what cost money
+
+The twelve cluster. Quarantining them took **(stage 1, space) and (stage 2, space)
+to ZERO** servable stories and (stage 3, space) to 1 — which §7's ladder answers
+silently by serving another theme and reports to nobody (8.40-8.48). So the
+quarantine command prints coverage before and after and prints the refill command
+with the word SPENDS on it; it never generates anything itself.
+
+**Actual spend: $0.502206**, over 10 stories (8 kept, 2 rejected and still paid
+for), against a `--dry-run` floor of $0.33. Authorised $3.00. Both runs are in the
+pool's own `gen_meta.cost_usd` and the sum reconciles to the two run totals
+($0.4403 + $0.0619) exactly. Coverage after: **33 of 33 pairs, 11 of 11 stages.**
+
+### 31.5 — the honest caveat: PERMITTED is not the same as OFFERED
+
+`dragon` is now permitted at all eleven stages, so a dragons story that uses the
+word is legal everywhere. It is **not** shown to the generator everywhere:
+`load_vocabulary` sends `ORDER BY freq_rank LIMIT PROMPT_WORD_LIMIT` (400), and
+`dragon` is frequency rank 3,486 against a 400th-rank cutoff of 6,448 at stage 1,
+3,577 at stage 2 and **3,002 at stage 3**. Measured:
+
+| | stage 1 | stage 2 | stage 3 | stage 4 | stage 5+ |
+|---|---|---|---|---|---|
+| `dragon` in the prompt window | yes | yes | **no** | no | no |
+| `planet` in the prompt window | yes | yes | yes | yes | no |
+
+This is strictly better than before (permitted nowhere, offered nowhere) and it is
+what makes the three `REGISTER` offences legal rather than defects. But above
+stage 2 the generator still is not told the word, so §5.4's "every word from the
+permitted list" cannot be relied on to surface it. **The fix is to pin theme words
+into the window rather than to raise the limit** — raising it grows every cached
+prefix for every stage (invariant 10). Named, not done: it is a §6 prompt change,
+which is the owner's call.
+
+### 31.6 — sabotage: fourteen, each restored and re-verified
+
+Every test written here was broken at its SOURCE and confirmed RED at its OWN
+assertion line, never an earlier one.
+
+`tests/test_vocabulary_filters.py` (the additions):
+
+| # | sabotage | RED at |
+|---|---|---|
+| 1 | `alien` (permanently unalignable) added to the file | `:468` |
+| 2 | `moon` (already Dale-Chall) added to the file | `:484` |
+| 3 | `planet` removed from the file — the ratchet | `:496` |
+| 4 | `child_forms()` stops unioning the additions | `:517` |
+| 4a | the addition patched into the PINNED vendored file | `:513` + `test_inventory.py:33` |
+| 5a | `kill` (a blocklist entry) added to the file | `:531` |
+| 5b | `zzdragon` (not a Hunspell headword) added | `:536` |
+| 6 | same source break + `make precompute` rebuild | `:560` |
+
+`tests/test_story_word_quarantine.py` (the module):
+
+| # | sabotage | RED at |
+|---|---|---|
+| 7 | the wasted/far split removed — a servable story would be purged | `:94` |
+| 8 | `--only` ignored | `:104` |
+| 9 | the UPDATE replaced with a DELETE | `:149` |
+| 10 | `at` dropped from the pull record | `:187` |
+| 11 | the record nested under `gen_meta.enrichment` (11.117's shape) | `:206` |
+| 12 | the status left servable — idempotence | `:219` |
+
+`tests/test_phase3.py` (the fourth pull path), after `justify-test-edit`:
+
+| # | sabotage | RED at |
+|---|---|---|
+| 13 | an UNSERVED quarantined row with no `at` | `:247` — and assertion 1 provably cannot see it (0 rows) |
+| 14 | the key de-registered from `_PULL_PATHS` | `:225`, all 12 rows unaccounted |
+
+**The suite caught a real defect in this work before any reviewer did.** The first
+version of the pull record had a reason and no `at`, and
+`test_rejected_stories_are_kept_but_never_warm` went red on twelve rows: without a
+timestamp the row is indistinguishable from one `_SERVE_SQL` leaked to a child.
+The remedy was entirely in the new code. `_PULL_PATHS` now drives both `_PULLED_AT`
+and assertion 4's `_UNDATED`, because the old comment promised "a new path is one
+entry here" while assertion 4 separately re-spelled the key names — so a fourth
+path was really two edits, and the forgettable one was the dated check.
+
+A second defect was caught the same way: `jsonb_build_object(:key, …)` raises
+`IndeterminateDatatype` because the function is variadic `any` and Postgres cannot
+infer a bound parameter's type there. The `/tmp` prototype had hardcoded the key
+and never hit it.
+
+### 31.7 — not fixed here, and why `--check-vocabulary` CANNOT be driven to zero
+
+`--check-vocabulary` went **36 of 110 stories / 9 words -> 23 of 106 / 6 words**,
+and its `REGISTER` class — the only one the gate itself calls a child-facing
+defect — is now **EMPTY**. It still exits 1, and no amount of money closes it:
+
+* **NAME class (`sam`, `tom`, `dan`) — 13 stories.** The proper-noun filter is
+  answering its own question CORRECTLY here: `sam` IS a name, and
+  `test_capitalised_only_hunspell_entries_are_rejected_as_proper_nouns` already
+  parametrises it alongside `nixon` and `nasa`. So this is NOT 31.1's argument
+  again, and adding names to the register list would re-open the hole 11.9 closed.
+  **It is a rules conflict**: `SYSTEM_RULES` rule 1 says every word comes from the
+  three lists, and rule 6 *demonstrates* `"Sam sat. A cat sat on Sam."` as the
+  worked example of correct output.
+  **The decisive measurement is that this is an UNBOUNDED SOURCE TERM, not a
+  backlog**: across the pool's generation batches, **~10% of newly generated
+  servable stories carry a fresh name offence** (7 of the 67 most recent). The
+  population is open — the model can invent a name this gate has never seen — so
+  regenerating the 13 buys a smaller number that refills itself. **Money cannot
+  close this gate; a decision can.** Two coherent resolutions, both prompt changes
+  and both invalidating every cached prefix (invariant 10), both the owner's call:
+  a small curated decodable name list fed into the prompt AND into `permitted_at`,
+  or rule 6 stops demonstrating a name.
+* **WRONG-STAGE class (`every` x10, `family`, `together`) — 11 stories.** Pure
+  21.2 drift: `every` aligns at stage 5 in three syllables against a cap of two.
+  Regeneration is the only remedy and it would cost ~$0.40. **Deliberately not
+  spent**, for two reasons: it closes no gate (the NAME class keeps it red either
+  way), and stages 5-7 sit at EXACTLY the coverage floor of 3 per pair, so
+  quarantining 11 stories there would put a currently-GREEN gate at risk to shrink
+  a red one. $2.50 of the $3.00 authorisation is unspent, which is the right answer
+  when the spend does not buy a gate.
+* **The `eval`-status rows still carry out-of-band chips.** Seven `eval` stories
+  written after 14.20 carry a `dragon` chip that `load_vocabulary` would refuse.
+  They are not servable, so no gate reads them and no child sees them — but it
+  means the eval harness's vocabulary path does not agree with the warm path.
+  Noticed, out of scope, named here so it is not re-discovered as new.

@@ -28,6 +28,8 @@ import pytest
 from sqlalchemy import text
 
 from storyforge.db import SessionLocal
+from storyforge.decoder import MAX_STAGE
+from storyforge.pipeline import decodable_from_stage
 from storyforge.precompute import (
     DATA,
     FRAGMENT_SECTION,
@@ -35,6 +37,7 @@ from storyforge.precompute import (
     _read_word_list,
     blocked_forms,
     candidate_pool,
+    child_additions,
     child_forms,
     common_forms,
     inflect,
@@ -43,6 +46,18 @@ from storyforge.precompute import (
 )
 
 DALE_CHALL_LITERALS = frozenset(_read_word_list("child-vocabulary.txt"))
+
+#: DEVIATIONS 31.1-31.5. The RATCHET on `data/child-vocabulary-additions.txt`,
+#: written out literally rather than read from the file, because a guard that
+#: takes its expectation from the thing it guards cannot notice the thing
+#: changing (the same construction `test_the_register_filter_is_applied_where_it
+#: _is_configured` uses for `REGISTER_FILTER_FROM_STAGE`).
+#:
+#: Widening the register filter is the one direction 11.7-11.11 spent a whole
+#: phase narrowing, so it costs an edit HERE as well as an edit to the data file —
+#: and this line is where a reviewer is forced to look at the whole set at once
+#: instead of at one added line in a diff.
+LOCAL_ADDITIONS = frozenset({"dragon", "planet"})
 
 # The 50 variants the sweep found in the live `allowed_words`, minus the four the
 # mandate flagged as false alarms of its own crude suffixing (11.4). Every one of
@@ -424,3 +439,127 @@ async def test_every_stage_holds_only_child_vocabulary_where_the_filter_applies(
     )
     strays = [(stage, word) for stage, word in rows if word not in child]
     assert not strays, f"non-child vocabulary above the filter boundary: {strays[:10]}"
+
+
+# --- the LOCAL additions to the register list (DEVIATIONS 31.1-31.5) ---------
+# Dale-Chall is a 1948 list and it is silent about `dragon` and `planet`. Two of
+# this app's three §8 themes are named after them. The measurement that made this
+# a defect rather than a preference: 38 of 38 servable DRAGONS stories contained
+# the word `dragon` while it was in NO stage's `allowed_words`, so the exclusion
+# prevented zero occurrences and instead converted every one into either a §5.5
+# picture chip spent on a word decodable from stage 1 or a `--check-vocabulary`
+# REGISTER offence.
+#
+# Widening a filter is the dangerous direction — 11.7-11.11 exists because §5.4's
+# original filter was too WIDE — so these guards are deliberately about what the
+# widening must NOT do, not about the two words being nice to have.
+
+
+def test_every_local_addition_is_decodable_by_the_unchanged_inventory():
+    """A word being THEMATIC is not an argument for it being DECODABLE.
+
+    Nothing in 31.1 touches §1's gate: `precompute.compute_rows` still refuses any
+    candidate the 93-GPC inventory cannot align (`if first is None: continue`), so
+    an undecodable addition would be silently ignored rather than loudly wrong —
+    which is the shape a filter change should never have. This asserts it at the
+    word, so the file cannot accumulate lines that do nothing.
+    """
+    undecodable = sorted(w for w in child_additions() if decodable_from_stage(w) is None)
+    assert not undecodable, (
+        f"{undecodable} cannot be aligned by the 93-GPC inventory at any stage, so "
+        "adding them to the register list permits a word no child here can read. "
+        "The decodability gate is never weakened to admit a theme word (STATE "
+        "invariant 1)."
+    )
+
+
+def test_no_local_addition_is_already_a_dale_chall_word():
+    """The file must be a true DELTA, or it stops recording a decision.
+
+    A line that duplicates Dale-Chall changes nothing and makes the additions list
+    look bigger than the judgement actually was — and the next re-vendor could
+    quietly move a word from one file to the other with no diff anywhere.
+    """
+    duplicates = sorted(child_additions() & DALE_CHALL_LITERALS)
+    assert not duplicates, (
+        f"{duplicates} are already in the vendored Dale-Chall list, so the addition "
+        "records a judgement that was never made"
+    )
+
+
+def test_the_local_additions_are_a_closed_deliberate_set():
+    """The ratchet. A new register word costs an edit HERE too.
+
+    `LOCAL_ADDITIONS` is written out literally rather than read from the file it
+    guards — a guard sourced from its own subject cannot see the subject move.
+    """
+    assert child_additions() == LOCAL_ADDITIONS, (
+        "data/child-vocabulary-additions.txt changed. Every line there widens the "
+        "REGISTER filter that DEVIATIONS 11.7-11.11 narrowed on purpose (`amid` was "
+        "reaching stage-1 five-year-olds), so it is ratcheted: state the measurement "
+        "in the file, then update LOCAL_ADDITIONS here."
+    )
+
+
+def test_the_vendored_dale_chall_file_is_not_where_additions_go():
+    """The provenance half, and the reason for a second file at all.
+
+    `data/child-vocabulary.txt` is a verbatim vendored copy, SHA-256 pinned in
+    `decoder/data/PINS.md` and asserted by
+    `tests/decoder/test_inventory.py::test_vendored_artifacts_match_their_pins`.
+    Patching a local judgement into it would break that pin and be reverted by the
+    next `scripts/vendor-word-lists.py` run.
+    """
+    assert not (LOCAL_ADDITIONS & DALE_CHALL_LITERALS), (
+        "a local addition was written into the PINNED vendored list — that breaks "
+        "its digest and the next re-vendor silently drops it"
+    )
+    assert LOCAL_ADDITIONS <= child_forms(), (
+        "the additions file is no longer reaching the register filter, so the two "
+        "words are permitted nowhere again"
+    )
+
+
+def test_the_additions_pass_every_other_filter_on_their_own_merits():
+    """Widening ONE filter must not tunnel under the other two.
+
+    `child_forms()` is unioned into `common_forms()` (11.9), so a word added here
+    is exempted from the proper-noun filter by construction. That is safe only
+    while the addition is a real lowercase dictionary word and not on the
+    blocklist — asserted, not assumed.
+    """
+    assert not (child_additions() & blocked_forms()), (
+        "an addition is a blocklist entry or an inflection of one — the register "
+        "list must never be a route around §5.4 layer 1"
+    )
+    for word in sorted(child_additions()):
+        assert word in _read_word_list("common-words-en.txt"), (
+            f"{word!r} is not a lowercase Hunspell headword, so it is only reaching "
+            "`common_forms()` through the child-list union — which is exactly how a "
+            "proper noun would get in (11.9)"
+        )
+
+
+async def test_a_local_addition_reaches_every_stage_that_can_decode_it(session):
+    """The table, not the set. `child_forms()` being right proves nothing alone.
+
+    `compute_rows` applies the syllable cap and the alignment search AFTER the
+    register test, so a word can pass the filter and still reach no stage. `dragon`
+    and `planet` are two syllables against a stage-1 cap of two; if that cap ever
+    moves, this fails rather than the pool quietly going back to having no word for
+    its own theme.
+    """
+    for word in sorted(child_additions()):
+        first = decodable_from_stage(word)
+        assert first is not None
+        rows = await session.execute(
+            text("SELECT stage_id FROM allowed_words WHERE word = :w ORDER BY 1"),
+            {"w": word},
+        )
+        stages = [r[0] for r in rows]
+        assert stages == list(range(first, MAX_STAGE + 1)), (
+            f"{word!r} is decodable from stage {first} but `allowed_words` offers it "
+            f"at {stages}. Run `make precompute`; if that does not fix it, the "
+            "syllable cap or the register filter is dropping it again and a "
+            f"{word}-themed reader has no licensed way to say the word."
+        )

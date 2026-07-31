@@ -415,14 +415,23 @@ def test_the_repair_drops_only_what_the_reader_can_already_decode():
 
 
 def test_the_repair_leaves_a_decodable_word_the_vocabulary_does_not_permit():
-    """Condition 2 — the one the first analysis missed, and it holds back 43 slots.
+    """Condition 2 — the one the first analysis missed.
 
-    `dragon` and `planet` are decodable from stage 1 but appear in NO stage's
-    `allowed_words` (§5.4's register/frequency filters drop them). They are in
-    these stories only under the story-word exemption, so de-chipping one converts
-    a licensed word into a word the stage's own vocabulary does not permit —
-    trading a wasted chip for a vocabulary violation, which is a real defect
-    rather than a bookkeeping one.
+    A chip may be dropped only when the reader can already decode the word AND the
+    stage's own vocabulary permits it. Dropping one the vocabulary does not permit
+    converts a licensed word into a §5.4 violation — trading a wasted chip for a
+    real defect rather than a bookkeeping one.
+
+    **The example this was written about is no longer an example, and the rule is
+    unchanged** (DEVIATIONS 31.1). `dragon` and `planet` were the 43 slots this
+    condition held back, because they were decodable from stage 1 and in NO stage's
+    `allowed_words` — Dale-Chall's 1948 list does not contain them. That was a
+    defect in the WORD LIST, not in these stories: the register filter is a proxy
+    for "does a young child know this word?", and it was answering wrongly for two
+    words that two of the three themes are named after. Both are now in
+    `allowed_words` at every stage they decode at, so the free repair reaches them.
+    The assertion below is deliberately over a HAND-BUILT permitted set and not
+    over the live table, so it goes on testing the rule after the data moved.
     """
     permits_neither = frozenset({"cave"})
     drop, keep = warm.droppable_chips(["dragon", "cave"], 4, permits_neither)

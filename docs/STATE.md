@@ -63,6 +63,11 @@ make dev | test | seed | precompute | warm | warm-plan
 make warm-check | promote-check | prompt-check | mcq2-check | fit-check \
      story-word-check | vocab-check | art-check                # the eight gates
 make art-repair                        # free, no API call (DEVIATIONS 26.4)
+cd services/api && uv run python -m storyforge.warm --story-word-repair     # free
+cd services/api && uv run python -m storyforge.quarantine_story_words       # free
+       # ^ the two halves of --check-story-words. The first DROPS a chip the reader
+       #   never needed; the second PULLS a story whose chip no repair can fix (the
+       #   word is in the text either way) and prints the PAID refill (31.3-31.4).
 make eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
@@ -155,14 +160,44 @@ and drops every chip whose word the reader can already decode AND that the stage
 pool, $0.00**, idempotent, never editing story text and never reading a questions
 row. The rest is regeneration: a chip ABOVE the reader's stage is load-bearing (the
 word is in the story either way, so dropping it leaves a word the child cannot read
-with no way in), and so is a decodable word the stage's vocabulary does not permit
-(`dragon`, `planet` are in NO stage's `allowed_words` — de-chipping one would trade
-a wasted chip for a §5.4 vocabulary violation). Free: one SQL query and the decoder
+with no way in). Free: one SQL query and the decoder
 (DEVIATIONS 14.20-14.21, 14.40-14.42).
+**GREEN today, and it had never been green** (DEVIATIONS 31.1-31.6). The residual
+14.42 left was two defects wearing one face. (a) `dragon`/`planet` were held back
+by condition 2 — no stage's `allowed_words` permitted them — and **that was a
+defect in the WORD LIST, not in the stories**: `dragon` is decodable, is what a
+theme is named after, and Dale-Chall (1948) simply does not list it, so **38 of 38
+servable dragons stories contained the word while 0 of 11 stages offered it.** The
+exclusion prevented no occurrence; it forced each into either a wasted chip (35) or
+a `--check-vocabulary` violation (3), and since 14.20 closed the chip route too, a
+dragons story generated today had NO licensed way to say "dragon" at all. Two words
+in `data/child-vocabulary-additions.txt` + `make precompute` let the FREE repair
+reach them: **38 chips dropped from 38 stories, $0.00.** (b) The 16 far chips
+(`moon` ×11, `stars` ×4, `giraffe`) have no free repair and no allowlist answer —
+`moon` is already offered at stage 7, the defect is that stage-1 stories chipped
+it. Quarantined with `python -m storyforge.quarantine_story_words` (**12 stories,
+all 12 rows KEPT, 10 readings and 1 answer preserved**), which emptied (stage 1,
+space) and (stage 2, space) entirely, then refilled for **$0.502206**. The
+handed-down counts (43 + 23) were wrong in both directions; they were 38 + 16.
 **`make vocab-check` (`--check-vocabulary`) is the SEVENTH gate and the first
 that reads the pool against something OUTSIDE it** — every servable title and
 body re-validated against the CURRENT `allowed_words`, because a precomputed
 input changing must invalidate the artefacts built from it (DEVIATIONS 22.1-22.9).
+**RED, at 23 of 106 stories / 6 words — but its `REGISTER` class, the only one
+the gate itself calls a child-facing defect, is now EMPTY** (31.1, 31.7). What is
+left is two classes that money cannot close, and the NAME class is the reason:
+`sam`/`tom`/`dan` are refused by the proper-noun filter ANSWERING CORRECTLY — a
+name is a name, and 11.9 exists to keep `nixon`/`nasa` out — while `SYSTEM_RULES`
+rule 6 *demonstrates* `"Sam sat. A cat sat on Sam."` as correct output. **Measured:
+~10% of newly generated servable stories carry a FRESH name offence (7 of the 67
+most recent), so this is an unbounded SOURCE TERM, not a backlog** — regenerating
+the 13 buys a smaller number that refills itself. The remedy is a decision, not a
+spend: either a small curated decodable name list fed into the prompt AND into
+`permitted_at`, or rule 6 stops demonstrating a name. Both are prompt changes and
+invalidate every cached prefix (invariant 10). The `every`/`family`/`together`
+class (11 stories) is pure 21.2 drift, costs ~$0.40, closes no gate while the NAME
+class stands, and would risk stages 5-7 which sit at EXACTLY the coverage floor —
+deliberately not spent.
 **`make art-check` (`--check-art`) is the EIGHTH gate and the first whose unit is
 the STORY** — §12's illustration. The owner's first complaint about this app was
 "there are no images in the stories", and the art was never missing: **33 asset
@@ -321,9 +356,20 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     can already decode the word AND the stage's `allowed_words`/`sight_words`
     permit it — both, never either.** Dropping one above the reader's stage leaves
     a word they cannot read with no way in; dropping a decodable word the
-    vocabulary does not permit (`dragon`, `planet` are in NO stage's
-    `allowed_words`) trades a wasted chip for a §5.4 violation. 182 of 225 met both
-    and were repaired free against the live pool; 43 did not (14.40-14.42).
+    vocabulary does not permit trades a wasted chip for a §5.4 violation. 182 of
+    225 met both and were repaired free against the live pool; 43 did not
+    (14.40-14.42). **Condition 2's own worked example turned out to be a defect in
+    the WORD LIST, and that is the lesson worth keeping** (31.1): `dragon`/`planet`
+    were "in NO stage's `allowed_words`" because Dale-Chall (1948) does not list
+    them, not because they are adult register — and the pool showed the exclusion
+    cost 35 wasted chips and 3 vocabulary violations while preventing **zero**
+    occurrences of the word (38 of 38 servable dragons stories contained it). The
+    rule is unchanged and both conditions still hold; the DATA moved, via
+    `data/child-vocabulary-additions.txt`, which is ratcheted by
+    `test_the_local_additions_are_a_closed_deliberate_set` and never patched into
+    the SHA-pinned vendored list. **When a condition keeps refusing the same word,
+    ask whether the word or the list is wrong — and require a MEASUREMENT in the
+    pool before widening, never a hunch about the word.**
 18. **A client-side fallback is only real if it is tested against the payload the
     SERVER SENDS.** `lib/grade.ts` is what decides right from wrong when
     `POST /answers` does not answer, and `Comprehension` turns "undecidable" into

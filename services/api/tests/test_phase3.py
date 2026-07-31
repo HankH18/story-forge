@@ -114,18 +114,59 @@ async def test_every_warm_story_has_segments(session):
     assert not rows.all()
 
 
-# When was this row pulled from the pool? One expression, every pull path, so a
-# new path is one entry here rather than a fourth copy of the invariant. Kept as
-# SQL rather than Python because assertions 1 and 2 must ask the DATABASE — a
-# Python-side coalesce would only see rows a query had already selected.
-_PULLED_AT = (
-    "coalesce(gen_meta->'moderation'->>'pulled_at',"
-    "         gen_meta->'vocabulary_quarantine'->>'at')"
+# Every pull path, as `(does this row carry the record, when does it say)`. One
+# table, because the comment above this used to promise that "a new path is one
+# entry here" while assertion 4 separately re-spelled the same key names — so a
+# fourth path was really two edits, and the one an author would forget is the
+# assertion that a record must be DATED. Now both expressions are derived from
+# this, and forgetting is not available.
+#
+# Kept as SQL rather than Python because assertions 1 and 2 must ask the DATABASE
+# — a Python-side coalesce would only see rows a query had already selected.
+#
+# The presence test differs by shape and that is not an oversight: `moderation`
+# exists on every story, so its pull record is the FIELD `pulled_at`; a quarantine
+# is a top-level object whose very presence means "pulled" (DEVIATIONS 11.117 —
+# such a key must never live under `enrichment`, which `_record_enrichment`
+# replaces wholesale).
+_PULL_PATHS = (
+    ("gen_meta->'moderation' ? 'pulled_at'", "gen_meta->'moderation'->>'pulled_at'"),
+    ("gen_meta ? 'vocabulary_quarantine'", "gen_meta->'vocabulary_quarantine'->>'at'"),
+    # DEVIATIONS 31.3 — `storyforge.quarantine_story_words`, the far-chip half of
+    # §5.5 that `--story-word-repair` structurally cannot fix.
+    ("gen_meta ? 'story_word_quarantine'", "gen_meta->'story_word_quarantine'->>'at'"),
+    # DEVIATIONS 27.6 — §10's fit quarantine. A body over STORY_CHAR_BUDGET
+    # cannot be shown on 7 screens at ANY pagination, so `--refit-segments`
+    # structurally cannot repair it and the row is pulled for regeneration.
+    ("gen_meta ? 'fit_quarantine'", "gen_meta->'fit_quarantine'->>'at'"),
 )
+
+#: When was this row pulled from the pool, under ANY path.
+_PULLED_AT = f"coalesce({', '.join(value for _, value in _PULL_PATHS)})"
+
+#: A recognised pull record that carries no time. See assertion 4.
+_UNDATED = " OR ".join(f"({present} AND {value} IS NULL)" for present, value in _PULL_PATHS)
 
 
 async def test_rejected_stories_are_kept_but_never_warm(session):
     """Rejects are eval evidence for why a pair is hard — kept, never served.
+
+    `justify-test-edit`, run 2026-07-31 (THIRD time, FOURTH pull path). VERDICT:
+    THE TEST IS RIGHT AND THE NEW CODE WAS WRONG — which is the opposite of the
+    two verdicts below and is why the note is worth keeping. DEVIATIONS 31.3 added
+    `storyforge.quarantine_story_words`, and its first version wrote a pull record
+    with a reason and NO `at`. Assertion 1 went red on twelve rows. The remedy was
+    entirely in the new code: it now writes `at`, and the twelve rows already
+    written were backfilled. Only THEN was the key registered in `_PULL_PATHS`,
+    and registering it without the timestamp is still red — verified by sabotage,
+    at assertion 4's line, which is the whole reason assertion 4 exists.
+
+    The one structural change: `_PULL_PATHS` now drives both `_PULLED_AT` and
+    assertion 4's `_UNDATED`, because the comment promising "a new path is one
+    entry here" was false — assertion 4 re-spelled the key names, so a new path
+    was two edits and the forgettable one was the dated check. Nothing is
+    weakened: the same three questions are asked of a strictly larger set of pull
+    paths.
 
     `justify-test-edit`, run 2026-07-30 (SECOND time, third pull path). VERDICT:
     THE TEST IS AMBIGUOUS AGAIN, for the same structural reason and not a new
@@ -205,13 +246,7 @@ async def test_rejected_stories_are_kept_but_never_warm(session):
     #    invisible to both assertions above. This sees it: any recognised pull
     #    record must carry its own time, served or not.
     undated = await session.execute(
-        text(
-            "SELECT id FROM stories WHERE status='rejected' AND ("
-            "  (gen_meta ? 'vocabulary_quarantine'"
-            "   AND gen_meta->'vocabulary_quarantine'->>'at' IS NULL)"
-            "  OR (gen_meta->'moderation' ? 'pulled_at'"
-            "      AND gen_meta->'moderation'->>'pulled_at' IS NULL))"
-        )
+        text(f"SELECT id FROM stories WHERE status='rejected' AND ({_UNDATED})")
     )
     assert not undated.all()
 
