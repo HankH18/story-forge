@@ -110,13 +110,19 @@ scrolling on tablet — if text overflows, generation length is wrong, not the
 layout." It renders every servable segment through the real `ReadingView` in the
 real production bundle at both §10 viewports and both §11 reading sizes and
 exits non-zero on any text below the clip edge. **RED today, and it has never
-been green**: 65-75 of 825 segments are clipped, **every one of them `idx = 6`,
+been green**: 49-68 of 763 segments are clipped, **every one of them `idx = 6`,
 the last page**, which is the page carrying the ending — and because the clip
 falls between lines nothing looked sliced, so a child pressed `Finish` on a story
 they had not read the end of (DEVIATIONS 13.1-13.3). The spine is 20-31
 characters at every stage while the last page averages 45 at stage 1 and 586 at
-stage 9; the measured budget is <=131 chars at the §10 reference viewport and
-<=81 including portrait at 40px. The remedy is a per-stage length budget on
+stage 9; the measured budget is <=131 chars at the §10 reference viewport.
+**Portrait is no longer the binding configuration** (DEVIATIONS 25.2): it used to
+hold ~81 chars at 40px against ~131 landscape, because §06's full-width 4:3 art
+took 531 of the portrait box's 791 usable pixels and left three lines — the art
+is now a flex item with a `min-h-[40%]` floor, so it yields height only on the
+pages that would otherwise hide words, and portrait clipping fell 73→49 (34px)
+and 75→57 (40px) while landscape stayed at 65/68, correctly. The remedy for what
+is left is a per-stage length budget on
 GENERATION — never a smaller font (§03 floors story text at 28px) and never a
 shorter tap target (§11 floors it at 48px). Free: one SQL query, a build, and a
 headless browser (`BROWSE_BIN=`), no API client. **It exits 2 when it cannot
@@ -297,8 +303,25 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     vocabulary does not permit (`dragon`, `planet` are in NO stage's
     `allowed_words`) trades a wasted chip for a §5.4 violation. 182 of 225 met both
     and were repaired free against the live pool; 43 did not (14.40-14.42).
+18. **A client-side fallback is only real if it is tested against the payload the
+    SERVER SENDS.** `lib/grade.ts` is what decides right from wrong when
+    `POST /answers` does not answer, and `Comprehension` turns "undecidable" into
+    ACCEPT on purpose — so a fallback that cannot decide is a screen that marks
+    every tap correct. Its `tap_word` branch read `payload.target_grapheme`, which
+    `_public_payload` **redacts by design** because it is the answer key, so the
+    branch was dead for every live question and `grade.test.ts` was green
+    throughout on a fixture that supplied the redacted field. Driven live with the
+    network down: cue `get`, tapped `up`, straight to "You read the whole story!".
+    Four doors reach it and they are one branch — a dropped socket, a 401 from a
+    Clerk token whose lifetime is 60s, a 500, and a `readingId` that never opened.
+    The recovery derives the answer from `cue_word`, which is already served and
+    already printed on screen, through the three properties `check_tap_word`
+    proves; it returns `null` on a tie, on no shared onset, and on a response
+    outside the offered options, so it adds a way to be right about "wrong" and no
+    way to guess. **Never let a test fixture invent a field the DTO omits**
+    (DEVIATIONS 25.1).
 
-| 5 kid mode + mastery | Full kid session live in a real browser (dev AND production bundle): theme picker → reading → questions → celebration, TTS, §11 floors verified by computed style. `readings`/`answers` APIs, `gpc_stats`, stage promotion proven at the 79/80% boundary. |
+| 5 kid mode + mastery | Full kid session live in a real browser (dev AND production bundle): theme picker → reading → questions → celebration, TTS, §11 floors verified by computed style. `readings`/`answers` APIs, `gpc_stats`, stage promotion proven at the 79/80% boundary. **§11 re-measured from RENDERED PIXELS at both §10 viewports and both reading sizes** (DEVIATIONS 25.3): no contrast, tap-target, gap or focus-order violation; narrowest margins are the earned foil seal at 7.24:1 (floor 7) and the kid primary button at 4.70:1 (floor 4.5); smallest gap between two targets 9.5px (floor 8); and `speechSynthesis` was wrapped for a whole session — 72 operations, every `speak()` preceded by a `cancel()`, never two at once. |
 
 ## Recently closed
 - **Phase 4 adversarial audit** — 8 findings, all fixed (DEVIATIONS 5.12–5.16).

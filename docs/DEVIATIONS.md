@@ -13064,3 +13064,276 @@ because an earlier assertion fired first; this is that lesson applied.
   call, and no gate asks that question yet.
 - **The `stage` dimension.** Art is chosen per theme and per tag; nothing
   varies it by stage, and nothing here changed that. §12 does not ask for it.
+
+## Phase 8 — the surfaces a five-year-old touches, walked end to end (25.1-25.6)
+
+Round 3 audit. The whole kid session — picker → reading → story end → questions →
+celebration — driven live at both §10 viewports and both §11 reading sizes, against
+a **separately started, auth-ENFORCED** API (`:8091`, `DEMO_BYPASS_AUTH=false`;
+`garbage token -> 401` and `x-storyforge-auth: enforced` confirmed before anything
+else was believed) and the **production bundle** through `vite preview`, signed in
+with a real Clerk session. Two defects fixed, both measured before and after.
+
+### 25.1 — `localGrade` branched on a field the server redacts, so every offline tap was "correct"
+
+`Comprehension` grades in three steps: `POST /api/readings/{id}/answers` first,
+`lib/grade.ts` if that does not answer, and — deliberately — **ACCEPT** if neither
+can decide, because "telling a child they are wrong on no evidence is the one
+outcome worth avoiding at any cost".
+
+Step two could never decide. Its `tap_word` branch read
+`question.payload.target_grapheme`, and `_public_payload` **redacts that field by
+design** — it is the answer key (DEVIATIONS 4.9, `llm/questions.py`: shipped in the
+payload it reduces the question to
+`[o for o in options if o.startswith(payload["target_grapheme"])][0]`). So the
+branch was dead in production, every live `tap_word` graded itself `null`, and
+`null` is accepted.
+
+**Driven live, network down, on the real pool:** cue `get`, options
+`up` / `got` / `sat`, tapped **`up`** — and the app went straight to "You read the
+whole story!". The listening game had become a screen where every tap is right.
+
+Four doors reach that branch and they are one branch: `optional()` returns `null`
+for anything `request()` throws, and `request()` throws on every non-2xx as well as
+on a dropped socket. Each was reproduced separately, each now shows "try again":
+
+| door | how it was produced | before | after |
+|---|---|---|---|
+| dropped connection | `fetch` rejects | accepted, celebration | `try again`, cue `run`, tapped `big` |
+| 401 (expired Clerk token) | 401 on `/answers` | accepted | `try again`, cue `but`, tapped `man` |
+| 500 | 500 on `/answers` | accepted | `try again`, cue `sad`, tapped `and` |
+| `readingId` never opened | `POST /api/readings` rejects, so `/answers` is never called at all | accepted | `try again`, cue `him`, tapped `big` |
+
+The 401 door is not hypothetical: `auth.py` records that Clerk's browser session
+token measures `exp - iat = 60`, and this audit hit a real
+`ExpiredSignatureError` mid-run from a token 90 seconds old.
+
+**The recovery is `cue_word`, and it ships no new information.** The cue is already
+in the payload and the rule is already printed next to the options in English
+("Tap the word that starts with the same sound as get."). What `llm/questions.py`
+*proves* is stronger than that sentence, and it is a chain of three facts:
+`sound_targets` picks a cue whose onset GPC **is** the target
+(`onset_gpc(c, mastered) == gpc_id`); `check_tap_word` requires the correct option
+to start with the target grapheme (`graphemes[0] != grapheme` is a rejection); and
+a distractor may not contain that grapheme **anywhere** (`grapheme in graphemes` is
+a rejection). Therefore a distractor cannot match the cue's first `len(grapheme)`
+characters, and **the correct option is the unique option with the longest shared
+spelling prefix with the cue** — strictly longer than any distractor's.
+
+`cueAnswer` returns `null` for a tie, for no shared onset, for fewer than two
+options and for an empty cue, and `localGrade` returns `null` for a response that
+is not one of the offered options. This adds a way to be RIGHT about "wrong"; it
+adds no way to guess, and it never runs when the server answers.
+
+**Also verified in the other direction** — offline, tapping the CORRECT option
+(cue `run`, tapped `ran`) is still accepted and the session advances. A fix that
+made everything wrong would be worse than the defect.
+
+**Why the suite could not see it.** `grade.test.ts` supplied
+`payload: { target_grapheme: 'sh' }` — a payload no server has ever sent. The test
+proved the branch worked on a shape production does not produce, which is the
+fourth test-that-cannot-fail found in this repo. The new cases use the LIVE payload
+shape (`{ cue_word }`, no grapheme) and are the reason the file can now fail.
+
+### 25.2 — portrait at 40px had three lines of text, and the art now yields
+
+At 768x1024 the reading box is **839px**. `py-4`/`pb-8` take 48, the flex gap takes
+32, and §06's full-card-width 4:3 illustration takes **531** — leaving **228px**,
+which at §11's 40px reading size (line-height 1.9 = 76px) is **three lines**.
+Measured, not estimated: `main.clientHeight 839, art 708x531, p 708x78`.
+
+`make fit-check` priced the consequence over the whole pool. The **portrait-at-40px
+budget was ~80 characters against ~131 at §10's own landscape reference**, so a
+single generation budget could not serve both, and the tighter number is set by one
+configuration in four while the story spine is 20-31 characters a page.
+
+`READING_ART_CLASS` is the decision. The art stops being `shrink-0` and becomes a
+flex item with a floor:
+
+    'w-full min-h-[40%] lg:min-h-0'
+
+- Flex shrinks an item **only by the overflow it must absorb**, so every page that
+  already fitted is pixel-identical — art 531px, 4:3, full card width. Verified in
+  the production bundle: short page `art 708x531, scroll == client`.
+- A page that would overflow shrinks the art instead, and only as far as needed:
+  the same viewport with a 170-character segment gives `art 708x379, p 708x380,
+  scroll == client` — five lines of 40px where there were three, and the page fits
+  where it previously overflowed by 152px.
+- `min-h-[40%]` (316px at the reference viewport) is chosen by measurement, not by
+  taste: it is the point at which portrait-at-40px holds at least as many characters
+  as landscape-at-40px (five 708px lines against seven 466px ones). Going lower buys
+  nothing, because past that point the budget is set by landscape.
+- `lg:min-h-0` — landscape is the two-column grid, where art and text never compete
+  for height. Confirmed: `artMinH: 0px`, art 466x350 unchanged.
+
+**`make fit-check`, same command, before and after:**
+
+| viewport x size | before | after |
+|---|---|---|
+| 1024x768 @ 34px | 65 of 763 clipped | 65 — unchanged, correctly |
+| 1024x768 @ 40px | 68 of 763 | 68 — unchanged, correctly |
+| 768x1024 @ 34px | **73 of 763** | **49** |
+| 768x1024 @ 40px | **75 of 763** | **57** |
+
+And the budget table, which is the real result — "longest that FITS / shortest that
+does NOT", portrait at 40px:
+
+| stage | before | after |
+|---|---|---|
+| 1 | 78 / 100 | 100 / – |
+| 3 | 73 / 148 | 148 / – |
+| 4 | 56 / 107 | 171 / 208 |
+| 5 | 52 / 149 | 175 / 195 |
+| 6 | 50 / 176 | 176 / 207 |
+| 7 | 41 / 170 | 180 / 191 |
+
+**Portrait is no longer the binding configuration at any stage.** The generation
+length budget `fit-check` has been asking for is now set by §10's own reference
+viewport instead of by the tightest of four. The gate is still RED — 68 segments,
+every one of them `idx = 6` at stages 8-11, 481-809 characters — and that is
+13.1's generation-length finding, untouched and out of scope here.
+
+**What this trades: §06's "4:3", on the pages that would otherwise hide words, and
+on no others.** The `<img>` is already `object-cover`, so the picture crops
+symmetrically rather than distorting, and at the measured floor the frame is
+708x316 — a wide picture, still a picture. §06's "full card width" and "never behind
+text" both still hold, as do §03's 28px type floor and §11's 48px target floor,
+which are the two things §10 explicitly refuses to trade and the reason a smaller
+font was never on the table. The alternative — cap the height and keep 4:3 by
+narrowing the picture — was rejected because it gives up "full card width" on
+**every** portrait page including the ones that fit, to buy the same pixels.
+
+### 25.3 — §11, measured from rendered pixels rather than from the stylesheet
+
+Every number below is sampled from a PNG of the running production bundle (minimum
+and maximum luminance inside each element's own box, WCAG relative luminance), not
+read off `tailwind.config.ts`. Both viewports, both reading sizes, every kid screen.
+
+**Contrast — no violation found.** Story text (Andika, floor 7:1): 13.80-15.23
+across reading view, options, chips and prompts. Display and chrome (floor 4.5:1):
+headline 14.63, `sounds` band 10.92, `the story` band 13.22, Kalam captions 5.99,
+celebration deltas 7.04, `2 of 3` metadata 6.23. Two ratios sit close to their floor
+and are worth knowing: the **earned foil seal** is ink-900 on gold-500 at **7.24:1**
+against the 7:1 story-text floor, and the **kid primary button** is paper-page on
+berry-500 at **4.70:1** against the 4.5:1 body floor — the narrowest margin in kid
+mode, on the one control every screen depends on.
+
+The `wrong` choice card, the 2.44:1 that DEVIATIONS 13.9 fixed, re-measured at
+**9.13:1** for the dimmed label and **9.13:1** for the "try again" caption, at
+768x1024 @ 40px. It held.
+
+**Tap targets — no violation found.** §11 asks 48px everywhere, 64px for kid primary
+actions, 8px minimum between any two targets. Measured: theme cards 208x266; back
+and Aa 75x50 / 81x50; word tokens 48-156 x 62 (34px) and 48-163 x 68 (40px), never
+below 48 in either axis; choice cards 139x64 and 630x64; option speakers 48x48; the
+cue card 149x86; `Next`/`Finish` 145x64 / 156x64; `Let's go` 173x64; `Read another`
+195x64; `All done` 149x64. Smallest gap between any two targets anywhere: **9.5px**
+(adjacent words at 34px), against the 8px floor.
+
+**Focus order — correct, and the ring is present.** Tab order on the reading view is
+back → Aa → every word in reading order → Next, then out; the computed focus style is
+`outline: rgb(43,33,24) solid 2px` plus `box-shadow: rgb(242,212,138) 0 0 0 4px`,
+which is §11's "4px gold-300 ring plus a 2px ink outline", verbatim. `Enter` on a
+focused word speaks it (logged utterance `"It"`); `→` advances through
+`advance()`, so the keyboard cannot skip a page the button would not.
+
+**`speechSynthesis` never speaks twice.** `window.speechSynthesis.speak`/`.cancel`
+were wrapped and a whole session driven through them, including three rapid word
+taps on every page, the story-word chip auto-announce, both phase transitions and
+three speaker buttons hit inside one second on the question screen: **72 operations,
+every single `speak()` immediately preceded by a `cancel()`, and `speaking === false`
+at every `speak()`.** §11's "one utterance at a time — cancel before speaking again"
+holds. The two autoplays that are not a story-word chip — `StoryEnd`'s intro and
+`Comprehension`'s prompt — remain deliberate deviations (6.27, 11.31): below stage 4
+the written prompt provably cannot say what the task is, and speech has no
+allowlist.
+
+### 25.4 — the states nobody stages
+
+Everything below was produced deliberately. **Nothing in this section mutated the
+live database**: the server-side cases ran against `sfscratch`, a `pg_dump` copy,
+behind a second enforced API on `:8092`.
+
+- **A story with one segment.** Renders correctly: one progress dot, the button says
+  `Finish` on the first page, no crash and no empty dot row.
+- **A story whose questions were all removed.** Invariant 14 holds at every gate:
+  `GET /api/stories/{id}` **200 → 404**, `POST /api/readings` **201 → 404**
+  (`{"detail":"story 6 not found"}`), and twelve consecutive
+  `POST /api/stories/request` never returned it. A child cannot reach the dead end.
+  The client half is also sound — a zero-question story forced into the browser goes
+  reading → celebration with no question screen and no error.
+- **A thin pool, three depths.** (stage 1, dragons) emptied → a stage-1 story of
+  another theme, `fallback.kind = "other_theme"`. All of stage 5 emptied for a
+  stage-5 reader → **stage 4, same theme**, `kind = "lower_stage"` — the ladder
+  descends and never climbs (invariant 6). Everything at and below stage 1 emptied →
+  `503` with an operator-facing message, and the CHILD sees the printer screen and
+  one `Try again`; a second failure hands the tablet to `/app`. §01's "never stuck",
+  driven rather than asserted.
+- **Double-tapping Next.** Safe on every page but harmless-costly on one. `next()`
+  closes over `step`, so two clicks inside one frame advance one page rather than
+  two — a child cannot skip a page by tapping fast. On a zero-question story a
+  triple-tap of `Finish` fires `POST /api/readings/{id}/complete` **three times**;
+  the server's conditional-UPDATE latch means only the first counts, so no §8
+  evidence is forged, but the two replays return `gpc_updates: []` and whichever
+  resolves last wins `setCompleted` — which would empty the "Sounds you read" card.
+  Not fixed: see 25.6.
+- **The back button.** The whole session is one route with the phase in React state,
+  so the platform back gesture leaves kid mode entirely and lands on the parent home
+  — with the parent's email address and an "Add a reader" text field, which §13
+  forbids inside kid mode. Reported, not fixed: see 25.6.
+- **A reload halfway through.** Returns to the theme picker. The story and the place
+  in it are lost, the open `readings` row is never completed, and because §7 prefers
+  unread stories the child is then served a *different* story. No error, no crash.
+- **A tapped theme that is not the theme served.** Tapping `Dragons` at stage 1
+  produced a *space* story, art and all, with nothing on screen acknowledging it.
+  This is 9.80-9.86 working as designed — novelty outranks theme in `_SERVE_SQL`, to
+  stop a child who loves one theme from being stuck at "3 of 5" forever — and the
+  cost is that the one choice a five-year-old makes can be silently overruled. Named
+  here because no document had stated the child-facing half of that trade.
+
+### 25.5 — sabotage: six, each restored and re-verified
+
+Every one broke the SOURCE and reddened a NEW assertion at its own line.
+
+| # | sabotage | red at |
+|---|---|---|
+| 1 | the cue fallback removed (`if (!grapheme) return null` — the pre-fix behaviour) | `grade.test.ts:107:41`, `:120:42` |
+| 2 | the tie guard removed | `grade.test.ts:153:53` |
+| 3 | the "response must be one of the options" guard removed | `grade.test.ts:135:45` |
+| 4 | "longest shared prefix" degraded to "first option sharing an onset" | `grade.test.ts:107:41` |
+| 5 | `sharedPrefix` compares only the first letter (digraph blindness) | `grade.test.ts:120:42`, `:142:55` |
+| 6 | the "no shared onset" guard removed | `grade.test.ts:155:45` |
+
+Sabotages 2 and 6 are a deliberate pair: the first version of `cueAnswer` let the
+tie guard subsume the zero-onset case, so removing the zero-onset guard changed
+nothing and sabotage 6 came back GREEN. The loop now `continue`s on a zero-length
+match, which makes the two guards independently reachable and independently
+sabotage-able. A guard that cannot be broken is a guard that is not doing anything.
+
+The portrait change (25.2) is held by `make fit-check`, which is a measurement over
+the real pool in the real bundle, and by nothing in `bun test src` — a suite of pure
+helpers structurally cannot see a rendered box, which is the same reason 13.1 and
+13.4 shipped under a green suite.
+
+### 25.6 — not fixed here, and why
+
+- **The back button leaving kid mode.** The honest fix is a history entry pushed
+  when a story begins and a `popstate` handler that returns to the picker — the ←
+  button's behaviour, handed to the platform gesture. It is a route-architecture
+  change with a real failure mode of its own (a history trap the *parent* then
+  cannot escape), it cannot be covered by a pure-helper test, and it is not the
+  worst thing a child meets. Named, measured, left.
+- **The triple-`Finish` double-complete.** Reachable only on a story with no
+  questions, which `_SERVE_SQL` refuses to serve (invariant 14), so no child in
+  front of the real pool can produce it. The fix is a one-line in-flight guard in
+  `finish()`; it is not free of risk (a guard that latches on a failed call is a
+  celebration that never settles) and it buys nothing measurable today.
+- **A reload losing the reading.** Fixing it means putting the phase, the story and
+  the step in the URL or in storage. That is a design decision about whether a kid
+  session is resumable, and §11's route list does not answer it.
+- **The theme a child taps not being the theme they get.** The §7 sort key is
+  correct and was argued for at length in 9.80-9.86; the remedy is pool depth, not
+  code. What is missing is any acknowledgement to the child, and §10 fixes the
+  reading chrome at three controls, so there is nowhere honest to put one.
+- **`fit-check` is still RED at 68 segments.** That is 13.1's finding — a per-stage
+  length budget on GENERATION — and this pass deliberately did not touch it.
