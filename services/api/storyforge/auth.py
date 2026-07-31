@@ -73,6 +73,7 @@ configuration, not code.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -169,7 +170,20 @@ def _unauthorized(detail: str) -> HTTPException:
 
 
 class JwksUnavailable(RuntimeError):
-    """The JWKS endpoint could not be reached or did not parse."""
+    """The JWKS endpoint could not be reached or did not parse.
+
+    `document_rejected` separates the two, because they are different operator
+    problems with the same HTTP status. False means nothing usable came back
+    over the wire — Clerk is down, DNS is wrong, the connect timed out. True
+    means the endpoint **answered** and what it said could not be used: an empty
+    `keys` array, an HTML error page served as 200, a key set this service has
+    no algorithm for. The second is nearly always a misconfigured
+    `CLERK_JWKS_URL` or a proxy in the way, and telling an operator "the JWKS
+    endpoint is unreachable" while it is answering every request sends them to
+    look at the wrong thing (DEVIATIONS 26.5).
+    """
+
+    document_rejected: bool = False
 
 
 class UnknownSigningKey(LookupError):
@@ -322,9 +336,9 @@ class JwksCache:
                     return self._serve_stale(kid, now, "the last fetch failed moments ago")
                 try:
                     await self._fetch(now)
-                except JwksUnavailable:
+                except JwksUnavailable as exc:
                     if self._stale_key_usable(kid, now):
-                        return self._serve_stale(kid, now, "the JWKS endpoint is unreachable")
+                        return self._serve_stale(kid, now, _stale_reason(exc))
                     raise
                 fetched_now = True
                 if kid in self._keys:
@@ -374,20 +388,31 @@ class JwksCache:
         """Replace the cached document. Callers hold the lock."""
         self.fetches += 1
         self._last_rotation_fetch = now
+
+        # Split in two so the failure can say WHICH half failed. Both arm the
+        # backoff and both are `JwksUnavailable`; only the second one means the
+        # endpoint answered (DEVIATIONS 26.5). `raise_for_status` stays on the
+        # transport side: a 5xx from a JWKS host is a broken host or proxy, not
+        # a statement about the key set.
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as client:
                 response = await client.get(self.url)
                 response.raise_for_status()
-                document = response.json()
-            keys = _parse_jwks(document)
-        except JwksUnavailable:
-            # A document that parsed to nothing usable is as unavailable as one
-            # that never arrived, and both should arm the backoff.
-            self._failed_at = now
-            raise
         except Exception as exc:  # noqa: BLE001 — every transport failure is one thing here
             self._failed_at = now
             raise JwksUnavailable(f"{type(exc).__name__}: {exc}") from exc
+
+        try:
+            keys = _parse_jwks(response.json())
+        except JwksUnavailable as exc:
+            self._failed_at = now
+            exc.document_rejected = True
+            raise
+        except Exception as exc:  # noqa: BLE001 — a body that is not JSON is a bad document
+            self._failed_at = now
+            rejected = JwksUnavailable(f"{type(exc).__name__}: {exc}")
+            rejected.document_rejected = True
+            raise rejected from exc
 
         self._keys = keys
         self._fetched_at = now
@@ -399,6 +424,20 @@ class JwksCache:
             len(self._keys),
             sorted(self._keys),
         )
+
+
+def _stale_reason(exc: JwksUnavailable) -> str:
+    """Why a stale key is being served, in the operator's terms (26.5).
+
+    The two are one HTTP status and two completely different things to go and
+    look at, so the log line has to tell them apart.
+    """
+    if exc.document_rejected:
+        return (
+            "the JWKS endpoint ANSWERED but its document carries no key this service "
+            f"can use ({exc}) — check CLERK_JWKS_URL and anything proxying it"
+        )
+    return "the JWKS endpoint is unreachable"
 
 
 def _parse_jwks(document: Any) -> dict[str, Any]:
@@ -647,6 +686,11 @@ CONTAINER_CGROUP_MARKERS: Final[tuple[str, ...]] = (
 CONTAINER_OVERRIDE_VAR: Final = "STORYFORGE_BYPASS_IN_CONTAINER"
 CONTAINER_OVERRIDE_VALUE: Final = "i-understand-this-disables-auth"
 
+#: `localhost` as a peer name. Every other loopback form is decided numerically
+#: by `ipaddress`, which covers all of 127.0.0.0/8, `::1` and `::ffff:127.0.0.1`
+#: without a list of spellings to keep in step.
+LOOPBACK_PEER_NAMES: Final[frozenset[str]] = frozenset({"localhost"})
+
 _BYPASS_BANNER = (
     "DEMO_BYPASS_AUTH=true — Clerk verification is DISABLED and every request "
     "runs as the fixed local session %r (§18). This is a laptop-only fallback; "
@@ -788,6 +832,47 @@ def deployment_signals(database_url: str = "", clerk_secret_key: str | None = No
         signals.append("CLERK_SECRET_KEY is a live key (sk_live_…)")
 
     return signals
+
+
+def peer_is_loopback(request: Request) -> bool:
+    """Did this request arrive from this machine? (DEVIATIONS 26.7)
+
+    Every other signal in the §18 guard is read at IMPORT, and 8.66 recorded the
+    consequence in its own words: "The remaining half of the inverse control —
+    refuse unless the process is bound to `127.0.0.1` — is still not taken,
+    because the bind address does not exist yet when this runs". Measured, that
+    gap is real: a rented VPS running `uvicorn --host 0.0.0.0` directly on the
+    host, with Postgres on `localhost` and a `sk_test_…` key, produces **zero**
+    deployment signals and boots a fully unauthenticated children's-data API.
+
+    `assert_demo_bypass_is_local` is already called a second time from inside
+    `current_principal`, which *does* hold the request — so the peer address is
+    available exactly where the grant is made, and this is that half of the
+    control, taken at request time instead of at import.
+
+    **What it does not close, stated rather than implied**: a reverse proxy on
+    the same host (nginx public, uvicorn on 127.0.0.1) makes every peer look
+    like loopback, and nothing inside this process can see nginx. The bound
+    address would catch that and is not usable here — under an ASGI test
+    transport `scope["server"]` is not an address at all — so this narrows the
+    hole rather than closing it. It costs nothing on the sanctioned path: `make
+    dev` serves on the host and both the browser and the Vite proxy reach it
+    over loopback.
+
+    No peer address is **not** evidence of a laptop, so it returns False.
+    """
+    client = getattr(request, "client", None)
+    host = (getattr(client, "host", "") or "").strip().lower()
+    if not host:
+        return False
+    if host in LOOPBACK_PEER_NAMES:
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return (mapped or address).is_loopback
 
 
 def assert_demo_bypass_is_local() -> None:
@@ -1035,6 +1120,31 @@ async def current_principal(
 
     if config.demo_bypass:
         assert_demo_bypass_is_local()
+        if not peer_is_loopback(request):
+            # The half of the guard that could not be taken at import (8.66,
+            # DEVIATIONS 26.7). A refusal rather than a fall-through to real
+            # verification: `demo_bypass_auth` is one bit on `/api/health` and
+            # a bypass that applied to some callers and not others would put
+            # this API back where AUDIT-PHASE6's finding 0 found it — two
+            # readers, opposite conclusions about whether auth was on.
+            peer = getattr(request.client, "host", None) if request.client else None
+            log.error(
+                "DEMO_BYPASS_AUTH: REFUSING %s %s from non-loopback peer %r — §18's "
+                "bypass is a laptop-only fallback and this request came from the "
+                "network. Unset DEMO_BYPASS_AUTH and configure CLERK_JWKS_URL.",
+                request.method,
+                request.url.path,
+                peer,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "DEMO_BYPASS_AUTH is active and this request did not come from "
+                    f"this machine (peer {peer!r}). §18 permits the bypass on a "
+                    "laptop only; it is never a way to serve remote traffic without "
+                    "authentication."
+                ),
+            )
         # Loud on every request, on purpose. This is an auth bypass; a single
         # startup banner scrolls away and a quiet bypass is how one ships.
         log.warning(
@@ -1165,6 +1275,7 @@ __all__ = [
     "deployment_signals",
     "is_deployed_env_value",
     "load_or_create_user",
+    "peer_is_loopback",
     "owned_kid",
     "owned_reading",
     "require_admin",

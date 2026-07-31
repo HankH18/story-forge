@@ -274,13 +274,25 @@ async def test_complete_another_parents_reading_is_404_and_changes_nothing(
     Completing writes `gpc_stats`, flips the story's status and can promote the
     child a stage. A check that ran after the latch would return 404 to the
     attacker with all of that already done.
+
+    **The status code alone cannot see that, and for two phases this test could
+    not either** (DEVIATIONS 26.3). Remove `owned_reading` from the handler and
+    every assertion below still passes: the request runs on to
+    `owned_kid(latched.kid_id)` further down, *that* raises 404, and the
+    transaction rolls back unread — so the 404 and the untouched row are both
+    still there, produced by a different mechanism than the one this test is
+    named after. The detail string is what distinguishes them, because
+    `owned_reading` names a READING and the downstream `owned_kid` names a KID.
     """
     a_kid = await _create_kid(client, parent_a)
     reading = await _start_reading(client, parent_a, a_kid, story["id"])
 
-    assert (
-        await client.post(f"/api/readings/{reading}/complete", headers=parent_b)
-    ).status_code == 404
+    refused = await client.post(f"/api/readings/{reading}/complete", headers=parent_b)
+    assert refused.status_code == 404
+    assert refused.json()["detail"] == f"reading {reading} not found", (
+        "the refusal did not come from `owned_reading` — the request reached "
+        "past the ownership check and was stopped by something downstream"
+    )
     still_open = (
         await session.execute(
             text("SELECT completed_at FROM readings WHERE id = :r"), {"r": reading}
@@ -471,47 +483,221 @@ async def test_the_column_refuses_a_bad_name_even_without_the_api(session):
 async def test_every_route_requires_a_session(client, local_clerk, method, url, body):
     """§9: "Clerk JWT required unless noted". `/api/health` is the only exception.
 
-    Parametrised over the route table rather than written once per handler, so a
-    route added without a dependency is caught by adding one line here — and
-    forgetting that line is the failure mode this guards, which is why the list
-    is checked against the app's own router below.
+    Parametrised over the route table rather than written once per handler. The
+    list is hand-maintained and that is exactly its weakness, which is why
+    `test_every_route_declares_its_auth_posture` below reads the app's own
+    inventory and refuses to pass while any route is missing from these tables.
     """
     call = getattr(client, method)
     resp = await (call(url, json=body) if body else call(url))
     assert resp.status_code == 401, f"{method.upper()} {url} → {resp.status_code}"
 
 
-async def test_health_is_the_only_unauthenticated_route(client, local_clerk):
-    """The complement of the table above, read off the app rather than a list.
+# --- the route inventory, read off the app (DEVIATIONS 26.1-26.4) ------------
+#
+# The version of this that stood here for two phases walked `app.routes` looking
+# for `route.dependant`, and **inspected zero routes**: FastAPI wraps every
+# `include_router` call in a `_IncludedRouter`, which holds the real `APIRoute`s
+# under `.original_router.routes` and carries no `.dependant` of its own, so
+# every entry took the `continue`. `open_routes` was `set()` on every run and
+# `set() <= anything` is True. The proof it should have been red is in the
+# repository: `/api/themes` and `/api/stages` have been unauthenticated since
+# DEVIATIONS 8.60 and were not in its allowlist.
+#
+# So the walk below recurses, and — because a recursion that silently finds
+# nothing is the same defect in a new place — `test_the_route_inventory_is_
+# readable` is the anti-vacuity control for every test that consumes it.
 
-    A new router registered without a dependency shows up here as a failure
-    naming the path, instead of quietly shipping open.
-    """
-    from storyforge.auth import current_principal
-    from storyforge.main import app
+#: §9's own division: the only routes in the service that take no principal.
+#: `api/catalog.py`'s docstring states it — "This and `/api/health` are the only
+#: routes in the service that take no principal, which is §9's own division."
+#: Spelled out here rather than derived from the routers, because the point is
+#: that this is a DECISION list: a public route added to `catalog.py` tomorrow
+#: must turn this file red, not update it.
+PUBLIC_API_ROUTES = frozenset({"/api/health", "/api/themes", "/api/stages"})
 
-    open_routes = set()
-    for route in app.routes:
-        dependants = getattr(route, "dependant", None)
-        if dependants is None:
-            continue
-        guarded = any(
-            d.call is current_principal for d in _flatten_dependencies(dependants)
-        )
-        if not guarded:
-            open_routes.add(getattr(route, "path", "?"))
+#: FastAPI's own schema and documentation routes. Not `/api/*` and not ours.
+FRAMEWORK_ROUTES = frozenset(
+    {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+)
 
-    assert open_routes <= {
-        "/api/health",
-        "/openapi.json",
-        "/docs",
-        "/docs/oauth2-redirect",
-        "/redoc",
-    }, f"unauthenticated route(s): {sorted(open_routes)}"
-    assert (await client.get("/api/health")).status_code == 200
+#: Routes that resolve a kid or a reading id through `auth.owned_kid` /
+#: `auth.owned_reading`. Each is DRIVEN with a second parent below, so adding a
+#: route here without the check is a failing test rather than a review comment.
+#: The template values are substituted from ids parent A really owns.
+OWNER_SCOPED_ROUTES: dict[str, tuple[str, dict | None]] = {
+    "/api/kids/{kid_id}/progress": ("get", None),
+    "/api/readings": ("post", {"kid_id": "{kid_id}", "story_id": "{story_id}"}),
+    "/api/readings/{reading_id}/choice": (
+        "post",
+        {"segment_id": "{segment_id}", "choice": "left"},
+    ),
+    "/api/readings/{reading_id}/answers": (
+        "post",
+        {"question_id": "{question_id}", "response": 0},
+    ),
+    "/api/readings/{reading_id}/complete": ("post", None),
+    "/api/stories/request": ("post", {"kid_id": "{kid_id}", "theme_id_or_slug": "dragons"}),
+}
+
+#: §9's `(admin)` block. Covered by `tests/test_admin.py`'s own matrix.
+ADMIN_ONLY_ROUTES = frozenset(
+    {
+        "/api/validate",
+        "/api/admin/eval-runs",
+        "/api/admin/eval-runs/{run_id}",
+        "/api/admin/allowed-words",
+        "/api/admin/cold-generate",
+        "/api/admin/cold-generate/{job_id}",
+    }
+)
+
+#: A verified session is required and there is no per-family owner to scope to.
+#: `GET /api/kids` is a FILTER on the caller rather than an id lookup; `POST
+#: /api/kids` creates under the caller; `GET /api/stories/{id}` serves a warm
+#: pool row, which is not a per-family artifact (`api/stories.py` docstring).
+SESSION_ONLY_ROUTES = frozenset(
+    {"/api/kids", "/api/stories/{story_id}"}
+)
 
 
 def _flatten_dependencies(dependant):
+    if dependant is None:
+        return
     yield dependant
     for sub in dependant.dependencies:
         yield from _flatten_dependencies(sub)
+
+
+def _api_routes():
+    """Every real route in the app, through the `_IncludedRouter` wrappers."""
+    from storyforge.main import app
+
+    found = []
+
+    def walk(routes):
+        for route in routes:
+            included = getattr(route, "original_router", None)
+            if included is not None:
+                walk(included.routes)
+            elif getattr(route, "methods", None):
+                found.append(route)
+
+    walk(app.routes)
+    return found
+
+
+def test_the_route_inventory_is_readable():
+    """The anti-vacuity control for every test that walks the app.
+
+    This is the assertion the old guard needed and did not have. It fails when
+    FastAPI changes how `include_router` stores routes — which is precisely what
+    happened, and which the old guard absorbed as silence instead of as a
+    failure. Every path below is one this file or `test_admin.py` drives with a
+    real request, so "the walk found them" and "they exist" are the same claim.
+    """
+    paths = {r.path for r in _api_routes()}
+    assert paths >= (
+        PUBLIC_API_ROUTES
+        | FRAMEWORK_ROUTES
+        | frozenset(OWNER_SCOPED_ROUTES)
+        | ADMIN_ONLY_ROUTES
+        | SESSION_ONLY_ROUTES
+    ), f"the route walk lost routes: {sorted(paths)}"
+
+
+def test_every_route_declares_its_auth_posture():
+    """A route this file has never heard of is a failure, not a default.
+
+    §9 gives every route one of four postures. The tables above are the whole
+    list; a new router mounted in `main.py` lands in none of them and turns this
+    red, which is the property the old `app.routes` walk was written to have.
+    """
+    declared = (
+        PUBLIC_API_ROUTES
+        | FRAMEWORK_ROUTES
+        | frozenset(OWNER_SCOPED_ROUTES)
+        | ADMIN_ONLY_ROUTES
+        | SESSION_ONLY_ROUTES
+    )
+    undeclared = {r.path for r in _api_routes()} - declared
+    assert not undeclared, (
+        f"route(s) with no declared auth posture: {sorted(undeclared)} — add each "
+        "to PUBLIC_API_ROUTES, OWNER_SCOPED_ROUTES, ADMIN_ONLY_ROUTES or "
+        "SESSION_ONLY_ROUTES, and to the matrix that drives it"
+    )
+
+
+async def test_no_route_ships_without_a_session(client, local_clerk):
+    """§9: "Clerk JWT required unless noted", read off the app rather than a list.
+
+    A new router registered without a dependency shows up here as a failure
+    naming the path, instead of quietly shipping open. `PUBLIC_API_ROUTES` is
+    §9's own division and nothing else is allowed to join it silently.
+    """
+    from storyforge.auth import current_principal
+
+    # A route with no `dependant` at all is FastAPI's own (`/docs`,
+    # `/openapi.json`) and is unauthenticated by definition — counted as open
+    # rather than skipped, which is the exact `continue` the old walk used to
+    # swallow the whole API with.
+    open_routes = {
+        route.path
+        for route in _api_routes()
+        if not any(
+            d.call is current_principal
+            for d in _flatten_dependencies(getattr(route, "dependant", None))
+        )
+    }
+    assert open_routes <= PUBLIC_API_ROUTES | FRAMEWORK_ROUTES, (
+        f"unauthenticated route(s): {sorted(open_routes - PUBLIC_API_ROUTES - FRAMEWORK_ROUTES)}"
+    )
+    assert (await client.get("/api/health")).status_code == 200
+
+
+async def test_every_owner_scoped_route_refuses_another_parent(
+    client, parent_a, parent_b, story
+):
+    """The Definition of Done, driven off the inventory instead of a prose list.
+
+    The route-by-route tests above each say one thing well; this says the same
+    thing about *every* route in `OWNER_SCOPED_ROUTES` at once, so a seventh
+    owner-scoped route cannot be added without either wiring the check or
+    turning this red. Parent A's ids are real and valid throughout — ownership
+    is the only thing left that can refuse B.
+    """
+    a_kid = await _create_kid(client, parent_a)
+    reading = await _start_reading(client, parent_a, a_kid, story["id"])
+    subs = {
+        "kid_id": a_kid,
+        "reading_id": reading,
+        "story_id": story["id"],
+        "segment_id": story["segment_id"],
+        "question_id": story["question_id"],
+    }
+
+    for template, (method, body_template) in OWNER_SCOPED_ROUTES.items():
+        url = template.format(**subs)
+        body = (
+            None
+            if body_template is None
+            else {
+                k: (subs[v.strip("{}")] if isinstance(v, str) and v.startswith("{") else v)
+                for k, v in body_template.items()
+            }
+        )
+        call = getattr(client, method)
+        mine = await (
+            call(url, json=body, headers=parent_a) if body else call(url, headers=parent_a)
+        )
+        assert mine.status_code < 400, (
+            f"{method.upper()} {url} refused its OWNER {mine.status_code}: {mine.text} — "
+            "the refusal below would then prove nothing"
+        )
+        theirs = await (
+            call(url, json=body, headers=parent_b) if body else call(url, headers=parent_b)
+        )
+        assert theirs.status_code == 404, (
+            f"{method.upper()} {url} → {theirs.status_code} for a parent who owns "
+            f"nothing in it: {theirs.text}"
+        )

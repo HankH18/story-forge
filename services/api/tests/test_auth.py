@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 
+import httpx
 import jwt
 import pytest
 from sqlalchemy import text
@@ -33,6 +35,9 @@ from sqlalchemy import text
 from storyforge.auth import (
     ALGORITHM,
     DEMO_CLERK_ID,
+    ENV_NAME_VARS,
+    PLATFORM_VARS,
+    SERVING_HINT_VARS,
     JwksCache,
     UnknownSigningKey,
     assert_demo_bypass_is_local,
@@ -43,6 +48,7 @@ from storyforge.auth import (
     verify_token,
 )
 from storyforge.db import SessionLocal
+from storyforge.main import app
 
 
 @pytest.fixture
@@ -796,6 +802,128 @@ async def test_serving_stale_does_not_retry_the_dead_endpoint_on_every_request(l
     assert cache.stale_serves == 10
 
 
+# --- the OTHER way a fetch fails: the endpoint answers (DEVIATIONS 26.5-26.6) -
+#
+# Every outage test above simulates the outage by repointing the cache at a
+# closed port, so all of them exercise one branch of `_fetch`: the transport
+# raised. The second branch — the endpoint answered 200 and its document could
+# not be used — had no test at all, and it is the branch a MISCONFIGURATION
+# lands on: a `CLERK_JWKS_URL` typo behind a proxy that 200s an HTML error page,
+# an empty `keys` array, a key set with no RSA in it.
+#
+# The question that matters is whether that branch fails open. It does not, and
+# these pin it.
+
+
+@pytest.fixture
+def unusable_jwks():
+    """A JWKS endpoint whose body the test can swap mid-flight."""
+    import json as _json
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state = {"body": b'{"keys": []}'}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler's name
+            body = state["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args) -> None:
+            """Silence."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state["url"] = f"http://127.0.0.1:{server.server_address[1]}/.well-known/jwks.json"
+    state["json"] = _json
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        ("an empty key set", b'{"keys": []}'),
+        ("an HTML error page served as 200", b"<html>502 Bad Gateway</html>"),
+        ("no keys array at all", b'{"error": "nope"}'),
+        (
+            "a key set with no RSA key in it",
+            b'{"keys": [{"kty": "EC", "kid": "k1", "crv": "P-256", "x": "a", "y": "b"}]}',
+        ),
+    ],
+)
+async def test_a_cold_cache_fails_closed_when_the_document_is_unusable(
+    unusable_jwks, label, body
+):
+    """No key, no exception swallowed, no default. 503, every time.
+
+    A cold cache has nothing to fall back on, so this is the pure fail-open
+    test: if any of these four documents ever yields a key, verification has
+    become optional for whoever controls the JWKS URL.
+    """
+    from storyforge.auth import JwksUnavailable
+
+    unusable_jwks["body"] = body
+    cache = JwksCache(unusable_jwks["url"], ttl_s=600, timeout_s=2, stale_grace_s=3600)
+    with pytest.raises(JwksUnavailable):
+        await cache.key_for("k1")
+    assert cache.stats()["keys"] == [], f"{label} left a key in the cache"
+    assert cache.stale_serves == 0
+
+
+async def test_an_answering_endpoint_is_not_reported_as_unreachable(
+    unusable_jwks, caplog
+):
+    """DEVIATIONS 26.5: the two failures are one status and two different jobs.
+
+    The stale serve is correct here — the cached key is real and every claim
+    check still runs — but an operator told "the JWKS endpoint is unreachable"
+    while it is answering every request goes and looks at the network instead of
+    at `CLERK_JWKS_URL`. The log line has to name which half broke.
+    """
+    live = {
+        "kty": "RSA",
+        "kid": "k1",
+        "use": "sig",
+        "alg": "RS256",
+        # A real 2048-bit modulus is not needed: this asserts the message, and
+        # `_parse_jwks` is what decides the key is usable.
+        "n": "sXchDaQebHnPiGvyDOAT4saGEUetSyo9MKLOoWFsueri23bOdgWp4Dy1Wl"
+        "UzewbgBHod5pcM9H95GQRV3JDXboIRROSBigeC5yjU1hGzHHyXss8UDpre"
+        "cbAYxknTcQkhslANGRUZmdTOQ5qTRsLAt6BTYuyvVRdhS8exSZEy_c4gs_"
+        "7svlJJQ4H9_NxsiIoLwAEk7-Q3UXERGYw_75IDrGA84-lA_-Ct4eTlXHBI"
+        "Y2EaV7t7LjJaynVJCpkv4LKjTTAumiGUIuQhrNhZLuF_RJLqHpM2kgWFLU"
+        "7-VTdL1VbC2tejvcI2BlMkEpk1BzBZI0KQB0GaDWFLN-aEAw3vRw",
+        "e": "AQAB",
+    }
+    unusable_jwks["body"] = unusable_jwks["json"].dumps({"keys": [live]}).encode()
+    cache = JwksCache(
+        unusable_jwks["url"], ttl_s=0.05, timeout_s=2, stale_grace_s=3600, failure_backoff_s=0
+    )
+    assert await cache.key_for("k1") is not None
+
+    time.sleep(0.1)  # the TTL lapses
+    unusable_jwks["body"] = b'{"keys": []}'  # ...and the endpoint starts answering junk
+
+    with caplog.at_level("WARNING", logger="storyforge.auth"):
+        assert await cache.key_for("k1") is not None
+    assert cache.stale_serves == 1
+
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ANSWERED" in message, (
+        f"the stale-serve log blamed the network for an answering endpoint: {message}"
+    )
+    assert "CLERK_JWKS_URL" in message
+
+
 async def test_a_clerk_outage_no_longer_401s_a_signed_in_parent_end_to_end(
     client, local_clerk, monkeypatch
 ):
@@ -1076,3 +1204,92 @@ def test_the_bypass_is_still_permitted_on_this_developer_machine(monkeypatch):
     assert_demo_bypass_is_local()
     monkeypatch.undo()
     reset_auth_config()
+
+
+# --- §18: the half of the guard that could not be taken at import (26.7) ------
+#
+# DEVIATIONS 8.66 recorded the gap in its own words: "The remaining half of the
+# inverse control — refuse unless the process is bound to `127.0.0.1` — is still
+# not taken, because the bind address does not exist yet when this runs".
+#
+# Measured, that gap boots an unauthenticated children's-data API: a rented VPS
+# running `uvicorn --host 0.0.0.0` directly on the host, Postgres on `localhost`,
+# a `sk_test_…` key and no PaaS variables produces ZERO deployment signals —
+# `test_a_vps_shaped_environment_produces_no_signals_at_import` below is that
+# measurement, and it is the reason the request-time check exists.
+
+
+@pytest.mark.parametrize(
+    ("peer", "local"),
+    [
+        ("127.0.0.1", True),
+        ("127.0.0.53", True),  # all of 127.0.0.0/8, not just the one spelling
+        ("::1", True),
+        ("::ffff:127.0.0.1", True),  # IPv4-mapped IPv6, what a dual-stack peer is
+        ("localhost", True),
+        ("", False),  # no peer address is not evidence of a laptop
+        ("10.0.2.15", False),  # a private LAN address is still not this machine
+        ("203.0.113.9", False),
+        ("example.com", False),
+        ("0.0.0.0", False),  # noqa: S104 — the bind-all address is not a peer
+    ],
+)
+def test_only_this_machine_counts_as_loopback(peer, local):
+    """The predicate, decided numerically rather than by a list of spellings."""
+    from storyforge.auth import peer_is_loopback
+
+    request = SimpleNamespace(client=SimpleNamespace(host=peer) if peer else None)
+    assert peer_is_loopback(request) is local, peer
+
+
+def test_a_vps_shaped_environment_produces_no_signals_at_import(monkeypatch):
+    """Why the request-time check had to exist: the import-time one passes here.
+
+    Not a claim that the guard is bad — every signal it has is a real signal.
+    It is a claim about what a bare VPS looks like, which is: like a laptop.
+    """
+    for junk in (*ENV_NAME_VARS, *PLATFORM_VARS, *SERVING_HINT_VARS):
+        monkeypatch.delenv(junk, raising=False)
+    assert (
+        deployment_signals(
+            "postgresql+psycopg://storyforge:storyforge@localhost:5432/storyforge",
+            "sk_test_not_a_real_key",
+        )
+        == []
+    ), "if this ever grows a signal, say so in 26.7 — it would change the argument"
+
+
+async def test_the_bypass_refuses_a_request_from_the_network(local_clerk, monkeypatch):
+    """§18 is a laptop fallback, so a request off the network is refused.
+
+    Driven with a real non-loopback peer through the same ASGI app the rest of
+    the suite uses — `ASGITransport(client=...)` is what sets `scope["client"]`,
+    which is the address a socket would have supplied.
+
+    A 403 rather than a fall-through to real verification: `demo_bypass_auth` is
+    one bit on `/api/health`, and a bypass that applied to some callers and not
+    others is how AUDIT-PHASE6's finding 0 happened — two readers, opposite
+    conclusions about whether auth was on.
+    """
+    monkeypatch.setenv("DEMO_BYPASS_AUTH", "true")
+    monkeypatch.delenv("PORT", raising=False)
+    reset_auth_config()
+    try:
+        remote = httpx.ASGITransport(app=app, client=("203.0.113.9", 4444))
+        async with httpx.AsyncClient(transport=remote, base_url="http://test") as c:
+            resp = await c.get("/api/kids")
+        assert resp.status_code == 403, resp.text
+        assert "laptop" in resp.json()["detail"]
+        assert "203.0.113.9" in resp.json()["detail"]
+
+        # ...and the same app, same flag, from this machine: still the demo.
+        local = httpx.ASGITransport(app=app, client=("127.0.0.1", 4444))
+        async with httpx.AsyncClient(transport=local, base_url="http://test") as c:
+            allowed = await c.get("/api/kids")
+        assert allowed.status_code == 200, (
+            f"the loopback path broke: {allowed.status_code} {allowed.text} — this "
+            "control is what stops the check above costing a developer their demo"
+        )
+    finally:
+        monkeypatch.undo()
+        reset_auth_config()

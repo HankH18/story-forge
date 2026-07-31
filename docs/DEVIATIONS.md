@@ -13337,3 +13337,189 @@ helpers structurally cannot see a rendered box, which is the same reason 13.1 an
   reading chrome at three controls, so there is nowhere honest to put one.
 - **`fit-check` is still RED at 68 segments.** That is 13.1's finding — a per-stage
   length budget on GENERATION — and this pass deliberately did not touch it.
+
+### 26.4 — the replacement: a posture table the app is checked against
+
+`test_health_is_the_only_unauthenticated_route` is now four tests, and the shape
+matters more than the count:
+
+- **`test_the_route_inventory_is_readable`** is the anti-vacuity control, and it
+  is the assertion 26.1 needed and did not have. It asserts the walk finds every
+  path this file and `test_admin.py` drive with a real request. Reintroduce the
+  original defect — stop the recursion — and it goes red naming the four routes
+  that survived, where the old code absorbed the same change as silence.
+- **`test_every_route_declares_its_auth_posture`** checks the app's inventory
+  against four declared tables: `PUBLIC_API_ROUTES` (§9's `(public, cached)`
+  pair plus `/api/health`), `OWNER_SCOPED_ROUTES`, `ADMIN_ONLY_ROUTES` and
+  `SESSION_ONLY_ROUTES`. A route in none of them is a failure. The tables are
+  spelled out rather than derived from the routers on purpose: the point is that
+  they are a **decision list**, so a public route added to `catalog.py` tomorrow
+  turns the file red instead of updating it.
+- **`test_no_route_ships_without_a_session`** is 26.1's original subject, now
+  actually reading routes. A route with no `dependant` at all is counted as
+  **open** rather than skipped — that `continue` is what swallowed the entire API.
+- **`test_every_owner_scoped_route_refuses_another_parent`** drives every entry
+  in `OWNER_SCOPED_ROUTES` with parent B against parent A's real ids, asserting
+  the owner succeeds first (or B's 404 proves nothing) and B gets 404. A seventh
+  owner-scoped route cannot be added without either wiring `owned_kid` /
+  `owned_reading` or turning this red.
+
+### 26.5 — the JWKS fails CLOSED, and the log line said the wrong thing about why
+
+The audit's second question was whether JWKS verification fails open. **It does
+not.** Measured across every failure shape, on a cold cache with nothing to fall
+back on:
+
+| the endpoint does this | result |
+|---|---|
+| refuses the connection | `JwksUnavailable` → **503** |
+| answers 200 with `{"keys": []}` | `JwksUnavailable` → **503** |
+| answers 200 with an HTML error page | `JwksUnavailable` → **503** |
+| answers 200 with `{"error": "nope"}` | `JwksUnavailable` → **503** |
+| answers 200 with a key set holding no RSA key | `JwksUnavailable` → **503** |
+| is not configured at all (`CLERK_JWKS_URL=""`) | **503** |
+
+and a failed fetch never wipes a good cache, so an outage cannot *become* a
+lockout either. The stale window is bounded by `ttl_s + stale_grace_s` and past
+it the cache refuses again; an unknown `kid` is refused throughout. No path
+yields a key, and no path yields a 200.
+
+**Every one of those outage tests simulated the outage the same way** — repoint
+`cache.url` at a closed port — so all of them exercised one branch of `_fetch`,
+the transport-raised one. The other branch, *the endpoint answered and its
+document could not be used*, had no test, and it is the branch a
+**misconfiguration** lands on: a `CLERK_JWKS_URL` typo behind a proxy that 200s
+an error page. It is now covered in both directions.
+
+The defect that fell out of covering it is small and real. On the stale-serve
+path both branches logged the same sentence — *"the JWKS endpoint is
+unreachable"* — so an operator whose JWKS URL was answering every request and
+returning junk was told to go and look at the network. `JwksUnavailable` now
+carries `document_rejected`, `_fetch` is split so the flag means what it says
+(`raise_for_status` stays on the transport side: a 5xx from a JWKS host is a
+broken host, not a statement about the key set), and the warning names which
+half broke and points at `CLERK_JWKS_URL`.
+
+### 26.6 — role escalation, and the 401/403/404 boundary
+
+Both were driven, not read. Fifteen sabotages were applied one at a time in a
+sandboxed copy and the whole suite re-run against a recorded control; **all
+fifteen were caught**, including `require_admin`'s 403 removed (10 tests),
+`role_from_claims` returning an unrecognised role verbatim (3), the RS256 pin
+removed (2 — and note PyJWT's own `algorithms=` list still refuses the token, so
+the pin is genuinely belt-and-braces rather than the only defence), `exp`
+dropped from `require` (1), and the token role no longer overwriting `users.role`
+on upsert (2).
+
+The boundary itself is consistent and deliberate, measured live through the ASGI
+app with three sessions:
+
+| route | no token | parent | admin |
+|---|---|---|---|
+| `/api/health`, `/api/themes`, `/api/stages` | 200 | 200 | 200 |
+| `GET /api/kids` | 401 | 200 | 200 (own kids only) |
+| `GET /api/kids/{other}/progress` | 401 | **404** | **404** |
+| `POST /api/validate`, `/api/admin/*` | 401 | **403** | 200 |
+| `GET /api/stories/{unknown}` | 401 | 404 | 404 |
+
+The two refusals are different on purpose and the rule is legible: **403 where
+the route's existence is public** (it is in the OpenAPI schema, so there is
+nothing to conceal and an operator needs to be told they are not an admin), and
+**404 where the row's existence is the secret** (a 403 would turn every kid route
+into an enumeration oracle over other families' children). An admin is refused
+by the *ownership* rule exactly like anyone else — `GET /api/kids` returns an
+admin's own children and `GET /api/kids/{other}/progress` is 404 for them too,
+which is 6.10's "an admin is not an owner" holding on a live request.
+
+### 26.7 — §18's guard: the half 8.66 named and did not take, now taken
+
+The brief was to **defeat** the bypass guard rather than re-verify it. It has one
+open flank and 8.66 wrote it down in its own words: *"The remaining half of the
+inverse control — refuse unless the process is bound to `127.0.0.1` — is still
+not taken, because the bind address does not exist yet when this runs"*.
+
+Measured, that flank is not theoretical. A rented VPS running `uvicorn --host
+0.0.0.0` **directly on the host** — Postgres on `localhost`, a `sk_test_…` key,
+no PaaS variables, nothing containerised — produces:
+
+```
+container signals on this host: []
+deployment signals for a VPS-shaped env: []
+VERDICT: GUARD PASSES — bypass would boot
+```
+
+Every signal the guard has is a real signal; the problem is that a bare VPS
+looks exactly like a laptop to all of them. And the one thing that would tell
+them apart is not an environment variable — it is **who is on the other end of
+the socket**.
+
+`assert_demo_bypass_is_local()` was already called a second time from inside
+`current_principal`, which holds the `Request`, so the peer address is available
+precisely where the grant is made. `peer_is_loopback(request)` now guards the
+bypass branch: a bypassed request from a non-loopback peer is **403 with the
+peer address in the message**, loudly logged. Before the change, driving
+`GET /api/kids` through the app from `203.0.113.9` returned **200 and the demo
+parent's kid list**; after it, 403 — and the same app from `127.0.0.1` still
+returns 200, which is the control that stops this costing a developer their demo.
+
+A refusal rather than a fall-through to real verification, deliberately:
+`demo_bypass_auth` is one bit on `/api/health`, and a bypass that applied to some
+callers and not others is how AUDIT-PHASE6's finding 0 happened — two readers,
+opposite conclusions about whether auth was on.
+
+**What it does not close, stated rather than implied.** A reverse proxy on the
+same host (nginx public, uvicorn on `127.0.0.1`) makes every peer look like
+loopback, and nothing inside this process can see nginx. The bound address would
+catch that case and is not usable here — under an ASGI test transport
+`scope["server"]` is not an address at all, so keying on it would fail the entire
+suite rather than a deployment. This narrows the hole; it does not fill it.
+Production is unaffected either way: `DEMO_BYPASS_AUTH` is false there, so the
+whole branch is inert.
+
+### 26.8 — every test here was sabotage-checked, and at which line
+
+The rule is not "the test fails" but "the test fails at **its own** assertion".
+Each row is a source change applied in the sandbox with the test run against it:
+
+| sabotage | test that went red | line |
+|---|---|---|
+| the route walk stops recursing (26.1's original defect) | `test_the_route_inventory_is_readable` | `test_kids.py:600` |
+| a route mounted with no auth dependency | `test_every_route_declares_its_auth_posture` | `test_kids.py:624` |
+| " | `test_no_route_ships_without_a_session` | `test_kids.py:652` |
+| `owned_kid` removed from `kid_progress` | `test_every_owner_scoped_route_refuses_another_parent` | `test_kids.py:700` |
+| `owned_reading` removed from `complete_reading` | `test_complete_another_parents_reading_is_404_and_changes_nothing` | `test_kids.py:292` |
+| `_parse_jwks` yields a key for an empty set | `test_a_cold_cache_fails_closed_when_the_document_is_unusable` | `test_auth.py:870` |
+| the stale reason goes back to blaming the network | `test_an_answering_endpoint_is_not_reported_as_unreachable` | `test_auth.py:915` |
+| the loopback check removed from `current_principal` | `test_the_bypass_refuses_a_request_from_the_network` | `test_auth.py:1281` |
+| `peer_is_loopback` returns True unconditionally | `test_only_this_machine_counts_as_loopback` | `test_auth.py:1242` |
+
+The `test_kids.py:292` row is the one worth reading twice, because it is the
+exact trap this project has been bitten by: the assertion **before** it,
+`assert refused.status_code == 404` on line 291, still passes under that
+sabotage. If line 291 had been the only assertion — which is what the test was
+until this pass — the sabotage would have been invisible. The failure had to land
+on 292 to mean anything, and it does.
+
+### 26.9 — measured and deliberately NOT changed
+
+- **`GET /api/stories/{id}` is not owner-scoped, and should not be.** A warm-pool
+  story is not a per-family artifact; the same row is served to every child at
+  that stage. Ownership binds where a story enters a child's *record* — `POST
+  /api/readings`, which resolves `kid_id` through `owned_kid` and refuses a story
+  above that kid's stage (7.22). Declared in `SESSION_ONLY_ROUTES` so the choice
+  is visible rather than an omission.
+- **A revoked Clerk session's token stays valid for its own lifetime.** Unchanged
+  and still correct per 8.63: the bound is `exp - iat = 60 s` for anything a
+  browser holds, and it reaches that same parent's own family data only.
+- **The stale-key grace treats "the endpoint said there are no keys" like "the
+  endpoint is gone".** Considered and left. An empty or unparseable document is
+  far more often a broken endpoint than a real revocation — Clerk publishes the
+  old and new keys together while it rotates — so refusing everything would be a
+  self-inflicted outage on a misconfiguration. It is bounded by `stale_grace_s`,
+  every claim check still runs, and the log now says which case it is (26.5),
+  which is what an operator needs to decide.
+- **Rate limiting is still per process** (4.10, unchanged), so `_rate_limit_key`
+  keying on `clerk_id` bounds one worker and not the service.
+- **`docs/STATE.md`'s suite line reads "775 passed, 2 skipped"** and the suite is
+  1190/3. Documentation drift, no code effect, and not corrected here because two
+  other agents are live in this worktree and `docs/RESUME.md` is the current doc.
