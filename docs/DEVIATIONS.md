@@ -14449,3 +14449,293 @@ left in a partition the splitter would not reproduce, which
 * **`title` still precedes the story in the schema.** It is the same ordering
   shape as 19.4 — a title committed to before the story exists — and it is not
   what was broken here. Observed, deliberately not changed.
+
+## Phase 8 — rule 1 forbade names and rule 6 demonstrated one (32.1-32.7)
+
+`make vocab-check` was the last red gate and money could not close it. It was RED
+at **23 of 106 servable stories over 6 words**, in two classes; it is **GREEN**
+now, at 0 of 106, for **$0.994129**.
+
+### 32.1 — the defect was a CONTRADICTION INSIDE THE PROMPT, not a missing word
+
+`SYSTEM_RULES` rule 1: *"Every word must come from the PERMITTED WORDS list, the
+SIGHT WORDS list, or the STORY WORDS list. There are no other options."*
+`SYSTEM_RULES` rule 6, the prompt's own worked example of CORRECT output:
+**`"Sam sat. A cat sat on Sam."`**
+
+`common_forms()` filters proper nouns out of `allowed_words` **by design** (11.9 —
+it is the layer that keeps `nixon`, `nasa`, `lebron` and `tampa` away from a
+five-year-old), and nothing ever put a name back. So a name was permitted at ZERO
+stages while the prompt demonstrated one, and the model was obeying the example.
+`_NARRATIVE_ANTIPATTERN` demonstrates a second name (`"Dan sat. Dan ran."`) and
+`_NARRATIVE_BANDS[0]` a third occurrence of the first (`"Sam's map"`).
+
+**Confirmed independently, not inherited.** `--check-vocabulary` on the live pool:
+
+| class | words | stories |
+|---|---|---|
+| PROPER-NOUN-SHAPED | `sam` (59 occurrences / 10 stories), `dan` (26 / 2), `tom` (22 / 2) | **14** |
+| WRONG-STAGE | `every` (12 / 10), `family` (1 / 1), `together` (1 / 1) | 11 |
+| REGISTER | — | 0 |
+
+The handed-down NAME count was 13; it is **14**. And the decisive measurement is
+that the name class was an **unbounded SOURCE TERM, not a backlog** — ~10% of newly
+generated servable stories carried a fresh name offence, and the population is open
+because the model can invent a name no gate has ever seen. Regenerating the
+fourteen buys a smaller number that refills itself. **31.7 was right that money
+cannot close this and a decision can.** The decision taken by the owner: a curated
+allowlist of decodable first names, fed into the prompt AND into `permitted_at`.
+
+The general principle is 31.1's, and this is its second application: **when a word
+list excludes something every story legitimately needs, the LIST is what is
+wrong.** Children's stories have characters, and characters have names.
+
+### 32.2 — `data/child-name-allowlist.txt`, and why it is a THIRD file
+
+Twelve names, exempt from **two** filters and from nothing else.
+
+**Not a patch to `data/child-vocabulary.txt`** — the same argument as 31.1: it is a
+verbatim vendored copy, SHA-256 pinned in `decoder/data/PINS.md` and asserted every
+run, so an edit breaks the digest and is reverted by the next re-vendor.
+
+**Not a line in `data/child-vocabulary-additions.txt` either**, and this is the
+part worth recording. That file widens the REGISTER filter, and
+`test_the_additions_pass_every_other_filter_on_their_own_merits` asserts every line
+in it is a **lowercase Hunspell headword** — written precisely so the register list
+cannot be used to tunnel a proper noun past 11.9. Putting a name there would have
+turned that guard red, and rightly. **A name is not a register error**: Dale-Chall's
+silence about `sam` is CORRECT, because `sam` is not a common noun. The filter that
+is wrong about a name is the PROPER-NOUN filter, and it is not wrong in general — it
+is wrong about this small enumerated set and nothing else. So: same mechanism as
+31.1 (own file, same `_read_word_list`, ratcheted by a test that spells the set out
+literally), applied to the other filter.
+
+`compute_rows` names the exemption at both filter tests rather than folding the
+names into `common_forms()` or `child_forms()`, so `common_forms()` is unchanged and
+`test_capitalised_only_hunspell_entries_are_rejected_as_proper_nouns` still passes
+with `sam` in its parameter list. The hole is greppable: one set, two `or word not
+in names` clauses, both commented.
+
+**NOT INFLECTED**, unlike every other list in `data/`: `sam` + s is `sams` and +
+ing is `samming`. `Sam's` is already handled as a tokenisation artefact by the gate.
+
+### 32.3 — the twelve, their DERIVED minimum stage, and the §13 criteria
+
+Minimum stage is **derived from the validator, never assigned**: `compute_rows`
+runs every name through the unchanged 93-GPC `align()` and the unchanged per-stage
+syllable cap like any other candidate.
+
+| name | min stage | | name | min stage |
+|---|---|---|---|---|
+| `amir` | 1 | | `pam` | 1 |
+| `ann` | 1 | | `sam` | 1 |
+| `ben` | 1 | | `tim` | 1 |
+| `dan` | 1 | | `tom` | 1 |
+| `hana` | 1 | | `beth` | **2** |
+| `meg` | 1 | | `jill` | **2** |
+
+`beth` and `jill` are not stage 1 and that is the mechanism working: both need a
+stage-2 grapheme, so no stage-1 story is offered them. Ten names at stage 1, twelve
+from stage 2 up. +130 `allowed_words` rows (34,263 -> 34,393), which is exactly
+10x11 + 2x10.
+
+**Selection criteria, in the order they bind:**
+
+1. **Decodable, unchanged, at the stage admitted.** Being a name is no argument for
+   being decodable — that is exactly the reasoning that would weaken §1's
+   guarantee. `ruth`, `kai`, `leo`, `mia`, `raj`, `rosa` and `ali` are all ordinary
+   first names this inventory cannot align at ANY stage, and none of them is here.
+2. **One or two syllables**, matching the register the name has to sit inside.
+3. **No blocklist collision**, for the name and for every form `inflect()` would
+   generate, and nothing that reads as a slur in any casing.
+4. **No dominant real-person or brand association.** `nixon`, `lebron`, `clark`,
+   `zara`, `dell`, `alexa` are out; a name a parent maps onto one public figure or
+   product is a reference, not a character. `kim` was measured decodable at stage 1
+   and was deliberately NOT taken, for this reason.
+5. **Not a word this curriculum offers with another meaning.** `bob`, `pat`, `rob`,
+   `hop` and `wes` are Dale-Chall familiar words already in `allowed_words` as verbs
+   and nouns; the same string meaning two things is a real cost to a child decoding
+   word by word. Mechanically `name_allowlist() & child_forms() == set()`. `tom` and
+   `meg` are lowercase Hunspell entries Dale-Chall does not list, so this curriculum
+   never offers them as common words and the string carries only its name meaning.
+6. **Balanced and short.** Six girl-coded, five boy-coded, one unisex; `amir` and
+   `hana` are there because the decodability constraint is brutal and an all-Anglo
+   list was not the only one available. Twelve is short enough to read at once.
+
+### 32.4 — two existing assertions edited, both under `justify-test-edit`
+
+Both were GREEN before this change, so the skill's discriminating question says
+"the code is wrong". The one ground it allows for that case applies and is cited in
+each docstring: **the contract was replaced by a decision, and the decision is the
+user's.** Both edits are narrow, both record the reason at the assertion, and
+**both are accompanied by a strictly stronger assertion in the same diff.**
+
+* `test_no_proper_noun_reaches_the_allowlist_at_any_stage` — `sam` removed from a
+  thirteen-word refusal list (11.9 used it to *prove the mechanism*, not because Sam
+  is hazardous; the other twelve are unchanged). Replaced by a whole-table
+  assertion: every word in `allowed_words`, at every stage, must be a
+  `common_forms()` word or one of the enumerated names. The old assertion could not
+  see `nixon` arriving under a fourteenth name it never listed; this one can.
+* `test_every_stage_holds_only_child_vocabulary_where_the_filter_applies` — the
+  register predicate gains `and word not in name_allowlist()`, which is the same
+  two-clause rule `compute_rows` now applies, spelled where it is visible. Every
+  word that is not one of the twelve is judged exactly as before, and the set that
+  is exempt is ratcheted by a second test.
+
+### 32.5 — the prompt, and how names reach the model WITHOUT raising the limit
+
+**Permitting a word does not offer it** — 31.5's caveat, and it would have made
+this change cosmetic. `load_vocabulary` sends `ORDER BY freq_rank LIMIT
+PROMPT_WORD_LIMIT` (400). Measured against the live table, the 400th-ranked word is
+rank **6,442 at stage 1** and **784 at stage 11**, while `sam` is rank 2,258 — so a
+name in `allowed_words` reaches the model at stages 1-2 and nowhere else.
+
+**`PROMPT_WORD_LIMIT` is NOT raised**, and a test asserts it is still 400 with that
+reason in its message. It sizes every per-stage cached prefix, so raising it grows
+and invalidates all eleven of them permanently to buy room for twelve strings
+(invariant 10). Instead the names get their own section, `CHARACTER NAMES`, in
+`build_vocabulary_block` — the block that is already cached per stage — derived by
+`character_names(stage)` from `_first_decodable_stage`, which is `precompute`'s own
+`min_stage` computation over the same validator. Twelve words, once per stage.
+
+Names are **removed from the printed PERMITTED WORDS list** and printed once,
+capitalised, in their own section. Otherwise the same string appears in two cases
+and rule 2 ("never inflect or MODIFY a permitted word") contradicts the capital
+letter rule 1 now requires — and a lowercase `sam` could be selected as a
+`practice_words` spelling pattern.
+
+**Rule 1 vs rule 6, resolved in the prompt text** so the next reader does not
+rediscover it. Rule 1's closed enumeration now names four lists, and says in so
+many words that names were where it used to contradict itself; rule 6 says Sam is
+on the CHARACTER NAMES list and that this is what makes its example legal. The
+section is a RULE and not a preference (`build_practice_block` is the preference):
+"prefer these names" leaves the model free to invent one, which is the defect.
+Naming nobody is explicitly allowed, because a prompt that reads as an instruction
+to name a character is how 9.40 deleted the theme from six stories.
+
+This invalidates every cached prefix once. That is the price named in 31.7 and it
+is paid.
+
+### 32.6 — the WRONG-STAGE half: coverage checked FIRST, then $0.994129
+
+The other class (`every` x10, `family`, `together` — 11 stories) is pure 21.2 drift
+and has **no free repair**: a word is load-bearing inside a sentence. It is also a
+CLOSED backlog, unlike the names — all eleven were generated between 02:20 and
+04:11 on 2026-07-30, and **21 servable stories generated after the newest offender
+carry none**, because `every` is no longer in the stage-5 prompt.
+
+**Coverage was measured BEFORE anything was pulled, and it is the reason the
+command prints what it does.** The eleven were not spread out: **nine were every
+servable story at stage 5, in all three themes.** Quarantining and stopping would
+have taken (5, animals), (5, dragons) and (5, space) to ZERO and stage 5 to 0
+against §8's floor of 5 — turning a green gate red to shrink a red one, which is
+exactly what 31.7 refused to risk.
+
+`storyforge/quarantine_vocabulary.py` is the re-status half, mirroring 31.3: it
+never deletes (`answers.question_id` is `ON DELETE CASCADE`), never edits story
+text, never generates, and is idempotent. It reuses the **existing**
+`vocabulary_quarantine` key and record shape (22.6 left 13 rows under it, and
+`tests/test_phase3.py::_PULL_PATHS` already registers it), so "was this row pulled?"
+keeps one answer. It selects **every** class rather than one: `classify_offence` is
+documented as sorting the report and never deciding the exit code, so making a
+heuristic load-bearing in a command that re-statuses rows would be the wrong shape.
+
+Run against the live pool: **11 pulled, 0 deleted, 24 quarantined rows still
+present with 22 readings and 5 answers preserved.** Refill in two passes —
+`--stages 5,6,7 --themes all` (9 warm, 2 rejected by §13 layer 1 on `fight`), then
+`--stages 5,6 --themes dragons` for the two pairs that left short. **33 of 33 pairs
+at target and 11 of 11 stages >= 5 afterwards.**
+
+**EXACT SPEND: $0.994129**, all-in from `stories.gen_meta` over the 13 generations
+(11 servable, 2 rejected). The two runs printed $0.7339 + $0.1244 = $0.8583, which
+is generation + moderation only; enrichment is $0.1358 more and is printed per
+story on the `enrich` lines. Authorisation was $2.00.
+
+Two of the new stories are titled **"Tom And The Scales"** and **"Tim and the
+Treasure"** — the model taking names from the list, live, which is the only
+end-to-end evidence that matters.
+
+### 32.7 — sabotage: twenty-six, and the two that came back GREEN
+
+Every test written here was broken at its SOURCE and confirmed RED at its OWN
+assertion line, never an earlier one.
+
+`tests/test_character_names.py`:
+
+| # | sabotage | RED at |
+|---|---|---|
+| 1 | `ruth` (a real first name this inventory cannot align) added to the file | `:94` |
+| 2 | `character_names` ignores the stage | `:112` |
+| 3 | the offer SHRINKS as the ladder rises | `:125` |
+| 4 | stage 1 offers no name at all | `:135` |
+| 5a | `hell` (a blocklist entry) added to the file | `:148` |
+| 5b | `but`, whose inflections `butted`/`butting` are blocked | `:151` |
+| 6 | `bob` (already a Dale-Chall word) added | `:168` |
+| 7 | `sam` also written into the register-additions file | `:189` |
+| 8 | `tom` removed from the file — the ratchet | `:200` |
+| 9a | `CHARACTER NAMES` dropped from rule 1's enumeration | `:238` |
+| 9b | rule 6 stops pointing at the list | `:244` |
+| 10a | the names section is never printed | `:271` |
+| 10b | `PROMPT_WORD_LIMIT` raised to 600 to make room instead | `:261` |
+| 11 | names left lowercase in the permitted list | `:285` |
+| 12 | the names section reworded as a preference | `:302` |
+| 13 | the register-filter exemption removed from `compute_rows` + rebuild | `:330` |
+| 14 | the prompt offers `beth` one stage early | `:358` |
+
+`tests/test_vocabulary_filters.py` (the two edited assertions):
+
+| # | sabotage | RED at |
+|---|---|---|
+| 15 | `nixon` added to the name file + rebuild | `:419` |
+| 16 | the register filter turned off at the entry stage + rebuild | `:506` |
+| 17 | BOTH filters holed for one word no hardcoded list names + rebuild | `:431` |
+
+`tests/test_vocabulary_quarantine.py`:
+
+| # | sabotage | RED at |
+|---|---|---|
+| Q1 | the offence filter dropped — every servable story pulled | `:102` |
+| Q2 | `--only` ignored | `:110` |
+| Q3 | a DELETE added beside the UPDATE | `:154` |
+| Q4 | `at` dropped from the pull record | `:200` |
+| Q5 | the record nested under `gen_meta.enrichment` (11.117's shape) | `:199` |
+| Q6 | the status left servable — idempotence | `:213` |
+
+**Two came back GREEN and one of them was a real defect in a test written here.**
+
+* **9a was a test defect.** The first version asserted `NAMES_HEADER in
+  SYSTEM_RULES`, and rule 6's own back-reference satisfies that — so deleting the
+  whole clause from rule 1 left it green. A test that cannot tell WHICH rule carries
+  the licence cannot see the contradiction it exists to prevent. It now slices rule
+  1 and rule 6 apart and asserts of rule 1's **closed enumeration** specifically,
+  which is what "there are no other options" is attached to.
+* **17 was a bad sabotage, twice.** The first attempt added `boston` to the name
+  file, which the new assertion subtracts by construction; the ratchet is what
+  guards the file's contents. The second attempt dropped the proper-noun filter
+  alone and stayed green, which is 11.9's own documented redundancy while
+  `REGISTER_FILTER_FROM_STAGE` is 1 — the register filter catches the same words.
+  The sabotage that reaches the assertion is holing BOTH filters for one word no
+  hardcoded list names, which is precisely the defect class the assertion was added
+  for. (5b was also a bad sabotage first time: `inflect("as")` is
+  `ases/ased/asing`, not `asses`.)
+
+Two harness lessons, both paid for. A sabotage that makes the code RAISE rather
+than the assertion FAIL is not a verified sabotage — Q3's first version was an
+invalid `DELETE` and the test died at the call site, one line above its own
+assertion. And a sabotage harness must snapshot files to a temp directory, never
+`git checkout` them: the first run silently reverted every uncommitted source
+change in this pass.
+
+### 32.8 — not fixed here, and why
+
+* **`make promote-check` is RED, unchanged.** Stages [6, 7, 8, 9, 10] terminal,
+  the set invariant 15 records. Refilling stage 5-7 moved nothing there.
+* **The `eval`-status rows still carry out-of-band chips** (31.7's third bullet).
+  Not servable, no gate reads them, unchanged.
+* **One library hole remains**: `animals/friendly_creature` on 1 screen, no asset
+  in any theme. `--check-art` prints it and stays green; it is 28.6's residual, not
+  a new one.
+* **A name is decodable, not necessarily FAMILIAR.** `amir` and `hana` clear §1's
+  gate at stage 1 on two syllables each, which is the same load `dragon` already
+  carries there. If the pool later shows five-year-olds stalling on them, the
+  remedy is to shorten the list, not to weaken the derivation.

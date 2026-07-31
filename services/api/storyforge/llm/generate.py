@@ -76,7 +76,12 @@ from storyforge.mastery import word_gpc_ids
 # stories with. A shortlist a story writer is told to PREFER has to clear it —
 # a word is far likelier to reach a child from a 24-word "use these" list than
 # from rank 300 of a flat 400-word allowlist.
-from storyforge.precompute import load_blocklist
+#
+# `name_allowlist` is the same file `precompute.compute_rows` exempts from the
+# proper-noun filter, imported and never restated: the prompt offering a name the
+# table does not permit, or the table permitting one the prompt never mentions, are
+# the two halves of DEVIATIONS 31.5's caveat and both are defects (32.3).
+from storyforge.precompute import load_blocklist, name_allowlist
 
 # Frozen. Any edit invalidates every cached prefix, so keep per-request detail out.
 #
@@ -94,9 +99,17 @@ not a style preference — a word outside the permitted list is unreadable for t
 child and makes the story useless.
 
 Rules, in priority order:
-1. Every word must come from the PERMITTED WORDS list, the SIGHT WORDS list, or
-   the STORY WORDS list. There are no other options. If you cannot express an
-   idea with those words, change the idea.
+1. Every word must come from the PERMITTED WORDS list, the SIGHT WORDS list, the
+   CHARACTER NAMES list, or the STORY WORDS list. There are no other options. If
+   you cannot express an idea with those words, change the idea.
+   Names are the one place this rule used to contradict itself. Rule 6's example
+   gives a character a name, and a name is not on a word list, so there was no
+   legal way to write the very output rule 6 calls correct. CHARACTER NAMES is
+   that missing list, and it settles it: a character may be named, and ONLY from
+   that list, spelled exactly as it is printed there and with its capital letter.
+   Never invent a name. An invented name is a word this child has not been taught
+   to sound out, however ordinary the name looks to you, and it is the one kind of
+   unreadable word that looks harmless on the page.
 2. Never inflect or modify a permitted word. If the list has "run" you may not
    write "running" unless "running" is itself listed.
 3. Use at most the story words you are given, and only those.
@@ -109,7 +122,9 @@ Rules, in priority order:
 5. Short sentences. Concrete actions. A beginning, a middle, and an end.
 6. This register sounds simple by design. "Sam sat. A cat sat on Sam." is
    correct output, not a first draft to improve on. Simple is not the same as
-   broken: keep it plain AND grammatical.
+   broken: keep it plain AND grammatical. Sam is on the CHARACTER NAMES list, and
+   that is what makes this example legal under rule 1 — copy the shape of the
+   sentences, and take the name itself from the list you are given below.
 7. Never describe what a person's body or looks are like. Do not write that
    someone is fat, thin, big, small, tall or short, and never compare one
    person's body with another's. A word list this small turns such a sentence
@@ -443,6 +458,75 @@ def build_practice_block(allowed_words: list[str], sight_words: list[str]) -> st
     )
 
 
+#: The character-name section's header. Named for the same reason
+#: `PRACTICE_HEADER` is — and referenced by `SYSTEM_RULES` rule 1, exactly as
+#: "PERMITTED WORDS list" is, because a rule that names a list the prompt never
+#: prints is the contradiction 32.1 exists to remove.
+NAMES_HEADER = "CHARACTER NAMES"
+
+
+@lru_cache(maxsize=16)
+def character_names(stage: int | None) -> tuple[str, ...]:
+    """The curated first names a story at `stage` may use, capitalised.
+
+    **This is the half of the fix that DEVIATIONS 31.5 says is missing.** Putting a
+    word in `allowed_words` makes it PERMITTED; it does not make it OFFERED.
+    `load_vocabulary` sends `ORDER BY freq_rank LIMIT PROMPT_WORD_LIMIT`, and a
+    name's frequency rank is nowhere near the front of that window: measured, the
+    400th-ranked word is rank 6,442 at stage 1 but rank 784 at stage 11, so `sam`
+    (rank 2,258) reaches the model at stage 1 and at no stage above 2. A name
+    permitted everywhere and shown nowhere would leave rule 1 and rule 6 exactly as
+    contradictory as before, with a data file to show for it.
+
+    **The limit is NOT raised to fix that** (STATE invariant 10): `PROMPT_WORD_LIMIT`
+    is the size of every per-stage cached prefix, so raising it grows and
+    invalidates all eleven of them permanently to make room for twelve strings. The
+    names get their own section instead — twelve words, once per stage, in the
+    block that is already cached per stage.
+
+    Derived from `_first_decodable_stage`, which is `precompute`'s own `min_stage`
+    computation over the same unchanged validator, so the offer cannot drift from
+    the table by hand-assignment. One honest gap: `compute_rows` ALSO applies the
+    per-stage syllable cap, which this cannot see without the database, so a cap
+    change could in principle offer a name one stage before the table permits it.
+    That is asserted away rather than argued away —
+    `test_every_offered_name_is_permitted_by_the_live_table` reads both and
+    compares them at every stage, and `--check-vocabulary` would fail loudly on the
+    story rather than the child being handed an unreadable word quietly.
+    """
+    if stage is None:
+        return ()
+    return tuple(
+        name.capitalize()
+        for name in sorted(name_allowlist())
+        if (first := _first_decodable_stage(name)) is not None and first <= stage
+    )
+
+
+def build_names_block(names: tuple[str, ...]) -> str:
+    """The CHARACTER NAMES section, or "" when no name is decodable yet.
+
+    Unlike `build_practice_block` this is not a preference, and the difference is
+    deliberate: the practice section suggests which permitted words to reach for,
+    while this one is the exhaustive statement of rule 1 for a category of word the
+    prompt previously licensed nowhere. "Prefer these names" would leave the model
+    free to invent one, which is the defect.
+    """
+    if not names:
+        return ""
+    return (
+        f"\n\n{NAMES_HEADER} ({len(names)}) — the only names you may give a "
+        "character at this stage:\n"
+        + ", ".join(names)
+        + "\n\nUse one exactly as it is spelled here, with its capital letter. A "
+        "name you invent is a word this child has never been taught to sound out, "
+        "however ordinary it looks to you, so never write one that is not on this "
+        "line. Naming anyone at all is optional — \"a cat\", \"the man\" and \"her "
+        "mum\" are all fine, and one or two named characters is plenty for a story "
+        "this short."
+    )
+
+
 #: The narrative section's header. Named for the same reason `PRACTICE_HEADER` is:
 #: the request block does not know the stage and so cannot reference this section,
 #: and the tests need one string to assert on.
@@ -657,13 +741,23 @@ def build_vocabulary_block(
     for no benefit, and putting it in `SYSTEM_RULES` would be worse still — that
     prefix is frozen precisely so per-stage material cannot invalidate it.
     """
+    names = character_names(allowlist_stage(tuple(allowed_words)))
+    lowered = {name.lower() for name in names}
+    # A name is printed ONCE, in the section that licenses it, capitalised. Leaving
+    # it in the frequency-ordered permitted list as well would print the same string
+    # in two cases, and would put rule 2 ("never inflect or MODIFY a permitted
+    # word") in direct conflict with the capital letter rule 1 now requires. It also
+    # keeps the name out of `practice_words`, where a lowercase "sam" would be
+    # offered as a spelling pattern to prefer.
+    words = [w for w in allowed_words if w.strip().lower() not in lowered]
     return (
         f"STAGE: {stage_name}\n\n"
-        f"PERMITTED WORDS ({len(allowed_words)}), most common first:\n"
-        + ", ".join(allowed_words)
+        f"PERMITTED WORDS ({len(words)}), most common first:\n"
+        + ", ".join(words)
+        + build_names_block(names)
         + f"\n\nSIGHT WORDS ({len(sight_words)}) — permitted, learned by sight:\n"
         + ", ".join(sorted(sight_words))
-        + build_practice_block(allowed_words, sight_words)
+        + build_practice_block(words, sight_words)
     )
 
 

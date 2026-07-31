@@ -1,0 +1,115 @@
+# Child-story CHARACTER NAMES — the curated first names a generated story may
+# give a character. DEVIATIONS 32.1-32.7.
+#
+# WHY THIS FILE EXISTS AT ALL.
+# `SYSTEM_RULES` rule 1 says every word must come from the PERMITTED WORDS, SIGHT
+# WORDS or STORY WORDS list and that "there are no other options". `SYSTEM_RULES`
+# rule 6's worked example of CORRECT output is "Sam sat. A cat sat on Sam." Those
+# two rules contradict each other, because `common_forms()` filters proper nouns
+# out of `allowed_words` BY DESIGN (DEVIATIONS 11.9, which is what keeps `nixon`,
+# `nasa` and `lebron` away from a five-year-old) and nothing ever put a name back.
+# So a name was permitted at ZERO stages while the prompt demonstrated one, and
+# the model obeyed the example: measured 2026-07-31 on the live pool, `sam`/`tom`/
+# `dan` were unlicensed words on 14 of 106 servable stories, and **~10% of newly
+# generated servable stories carried a FRESH name offence (7 of the 67 most
+# recent)** — an unbounded source term, not a backlog. Regenerating the fourteen
+# buys a smaller number that refills itself.
+#
+# The `dragon` precedent (31.1) settles the general principle: when a word list
+# excludes something every story legitimately needs, the LIST is what is wrong.
+# Children's stories have characters and characters have names.
+#
+# WHY THIS IS NOT `data/child-vocabulary-additions.txt`.
+# That file widens the REGISTER filter and is guarded by
+# `test_the_additions_pass_every_other_filter_on_their_own_merits`, which asserts
+# every line there is a lowercase Hunspell headword — written precisely so the
+# register list cannot be used to tunnel a proper noun past 11.9. A name is not a
+# register error: Dale-Chall's silence about `sam` is CORRECT, because `sam` is
+# not a common noun. The filter that is wrong about a name is the PROPER-NOUN
+# filter, and it is not wrong in general — it is wrong about this small, curated,
+# enumerated set and about nothing else. Same mechanism as 31.1 (its own file,
+# read by the same `precompute._read_word_list`, ratcheted by a test that spells
+# the set out literally), applied to the other filter.
+#
+# WHY THIS IS NOT A PATCH TO `data/child-vocabulary.txt`.
+# Same reason as 31.1: that file is a VERBATIM vendored copy of textstat's
+# `easy_words.txt`, SHA-256 pinned in `storyforge/decoder/data/PINS.md` and
+# asserted every run. An edit there breaks the digest and is silently reverted by
+# the next `scripts/vendor-word-lists.py`.
+#
+# NOT INFLECTED, unlike every other list in `data/`. `sam` + s is `sams` and
+# `sam` + ing is `samming`; a name has no morphology worth generating, and the
+# possessive `Sam's` is already handled as a tokenisation artefact by
+# `--check-vocabulary`. `precompute.compute_rows` reads this set literally.
+#
+# THE SELECTION CRITERIA, and they are narrow on purpose. Every line here is a
+# string printed to a five-year-old, so §13 is the second bar and the first is
+# §1's gate:
+#
+#   1. DECODABLE, unchanged, at the stage it is admitted — and DERIVED, never
+#      assigned. Being a name is no argument for being decodable; that is exactly
+#      the reasoning that would weaken §1's guarantee. `compute_rows` runs every
+#      line below through the unchanged 93-GPC `align()` and the unchanged
+#      per-stage syllable cap like any other candidate, and drops it if the
+#      inventory cannot spell it. `test_every_permitted_name_is_decodable_by_the
+#      _unchanged_inventory` asserts it per name, and
+#      `test_a_permitted_name_reaches_every_stage_that_can_decode_it` asserts the
+#      TABLE that comes out. `ruth`, `kai`, `leo`, `mia`, `raj` and `rosa` are all
+#      ordinary first names this inventory cannot align at any stage, and none of
+#      them is here.
+#   2. Short and one or two syllables, matching the decodable-reader register a
+#      name has to sit inside. A name is a word the child must sound out like any
+#      other, not a free pass.
+#   3. NO BLOCKLIST COLLISION. Neither the name nor any form `inflect()` would
+#      generate may appear in `blocked_forms()`, and no name may read as a slur in
+#      any casing. Asserted by `test_no_permitted_name_collides_with_the_blocklist`.
+#   4. NO DOMINANT REAL-PERSON OR BRAND ASSOCIATION. `nixon`, `lebron`, `clark`,
+#      `zara`, `dell` and `alexa` are all decodable or near enough and all are
+#      out: a name a parent maps onto one specific public figure or product is not
+#      a character, it is a reference. Preferred are names that are ordinary given
+#      names across the English-speaking world with no single dominant referent.
+#   5. NOT A WORD THIS CURRICULUM OFFERS WITH ANOTHER MEANING. `bob`, `pat`,
+#      `rob`, `hop` and `wes` are Dale-Chall familiar words and are already in
+#      `allowed_words` as verbs and nouns; making one a name would let the same
+#      string mean two things for a child who is decoding word by word. The
+#      mechanical form of the rule is `name_allowlist() & child_forms() == set()`,
+#      asserted by `test_no_permitted_name_is_already_a_child_word`. `tom` and
+#      `meg` are lowercase Hunspell entries that Dale-Chall does not list, so this
+#      curriculum never offers them as common words and the string carries only
+#      its name meaning here.
+#   6. BALANCED AND SHORT. Six girl-coded, five boy-coded, one unisex, and a list
+#      short enough that a reviewer can read the whole of it. A short curated list
+#      beats a long generated one: every line is a judgement someone made, and the
+#      ratchet `test_the_permitted_names_are_a_closed_deliberate_set` forces the
+#      next line to be a judgement too rather than a drive-by edit.
+#
+# ONE WORD PER LINE, lowercase, `#` comments and blanks ignored — the same reader
+# (`precompute._read_word_list`) as every other list in `data/`. They are written
+# lowercase here because that is the key `allowed_words` is stored under and the
+# form `--check-vocabulary` tokenises to; the prompt capitalises them
+# (`llm/generate.character_names`) and the story must too.
+#
+# The derived minimum stage of each name is a MEASUREMENT, printed by
+# `test_a_permitted_name_reaches_every_stage_that_can_decode_it` and not restated
+# here — a number copied into a comment is a number that goes stale.
+
+# --- boy-coded ---------------------------------------------------------------
+dan
+tom
+tim
+ben
+amir
+
+# --- girl-coded --------------------------------------------------------------
+ann
+meg
+pam
+hana
+beth
+jill
+
+# --- unisex ------------------------------------------------------------------
+# `sam` is the name `SYSTEM_RULES` rule 6 has demonstrated since the prompt was
+# written, and the single largest offence in the pool (59 occurrences over 10
+# servable stories). Rule 6 keeps its example; this line is what makes it legal.
+sam

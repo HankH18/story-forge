@@ -43,6 +43,7 @@ from storyforge.precompute import (
     inflect,
     load_blocklist,
     load_blocklist_sections,
+    name_allowlist,
 )
 
 DALE_CHALL_LITERALS = frozenset(_read_word_list("child-vocabulary.txt"))
@@ -368,7 +369,31 @@ async def test_no_innocent_word_was_collateral(session):
 
 
 async def test_no_proper_noun_reaches_the_allowlist_at_any_stage(session):
-    """11.9. `lebron` and `nixon` were in the live table at the top stages."""
+    """11.9. `lebron` and `nixon` were in the live table at the top stages.
+
+    `justify-test-edit`, run 2026-07-31 (DEVIATIONS 32.4). VERDICT: TEST IS WRONG
+    ABOUT ONE OF ITS THIRTEEN WORDS, on the one ground the skill allows for a test
+    that was green before the change — **the contract it encoded was replaced by a
+    decision, and the decision is the user's**: a curated allowlist of decodable
+    first names, fed into the generation prompt AND into `permitted_at`, because
+    `SYSTEM_RULES` rule 1 forbade names while rule 6 *demonstrated* one and the
+    generator was obeying the example. Measured before deciding: `sam`/`tom`/`dan`
+    were unlicensed on 14 of 106 servable stories and ~10% of newly generated
+    servable stories carried a FRESH name offence, so the population was open.
+
+    `sam` was in this list because 11.9 used it to *prove the mechanism* — it is a
+    capitalised-only Hunspell entry, exactly like `nixon` — and not because Sam is
+    hazardous to a five-year-old. The other twelve are what the filter is FOR and
+    every one of them is still asserted here, unchanged.
+
+    **Nothing is weakened, because the replacement below is strictly stronger than
+    the line it stands beside.** The old assertion was a thirteen-word spot check:
+    it could not see `nixon` arriving under a fourteenth name it never listed. The
+    new one closes the whole table — every word in `allowed_words`, at every stage,
+    must be either a lowercase Hunspell/child word or one of the enumerated
+    character names — so the exemption 32.2 opened cannot widen by one word without
+    turning this red.
+    """
     rows = await session.execute(
         text("SELECT DISTINCT stage_id, word FROM allowed_words WHERE word = ANY(:w)"),
         {
@@ -378,7 +403,9 @@ async def test_no_proper_noun_reaches_the_allowlist_at_any_stage(session):
                 "ronald",
                 "gibson",
                 "nasa",
-                "sam",
+                # `sam` was here. See the docstring: it is now one of the twelve
+                # names `data/child-name-allowlist.txt` enumerates, and the
+                # assertion that replaces its coverage is below.
                 "adam",
                 "santa",
                 "tampa",
@@ -390,6 +417,22 @@ async def test_no_proper_noun_reaches_the_allowlist_at_any_stage(session):
         },
     )
     assert not rows.all()
+
+    # STRICTLY NEW, and it is what `sam` used to stand in for. `compute_rows` admits
+    # a candidate only if `word in common_forms() or word in name_allowlist()`; this
+    # asserts that of the PERSISTED table, so the proper-noun hole is closed and
+    # enumerated rather than spot-checked. A proper noun reaching the allowlist by
+    # any route at all — including one no hardcoded list above ever named — lands
+    # here.
+    words = {
+        r[0] for r in await session.execute(text("SELECT DISTINCT word FROM allowed_words"))
+    }
+    unexplained = sorted(words - common_forms() - name_allowlist())
+    assert not unexplained, (
+        f"{unexplained[:10]} are in `allowed_words` and are neither lowercase "
+        "dictionary words nor curated character names, so the 11.9 proper-noun "
+        "filter has a hole nobody enumerated"
+    )
 
 
 async def test_the_register_filter_is_applied_where_it_is_configured(session):
@@ -431,13 +474,35 @@ async def test_every_stage_holds_only_child_vocabulary_where_the_filter_applies(
 
     §5.4's own metric was "~150-2,500 words/stage", and 157 rows at stage 1 met it
     while 27 of them were proper nouns. This checks the words, not the count.
+
+    `justify-test-edit`, run 2026-07-31 (DEVIATIONS 32.4). VERDICT: TEST IS WRONG
+    ABOUT A POPULATION IT CANNOT SPEAK ABOUT, on the same ground as
+    `test_no_proper_noun_reaches_the_allowlist_at_any_stage` above — **the contract
+    was replaced by the user's decision** to license a curated set of decodable
+    first names, because rule 1 forbade names while rule 6 demonstrated one and
+    ~10% of newly generated servable stories carried a fresh name offence.
+
+    The register question is "do 80% of fourth-graders KNOW this word?", and it has
+    no answer for a proper name: `sam` is not a common noun, so Dale-Chall's
+    silence about it is correct rather than the 1948 error 31.1 found for `dragon`.
+    The child does not have to know a character's name, they have to be able to
+    sound it out — which `test_character_names.py::test_every_permitted_name_is_
+    decodable_by_the_unchanged_inventory` asserts of every one of them.
+
+    **Nothing is weakened.** The exemption is not a hole in the predicate, it is
+    the same two-clause rule `compute_rows` now applies, spelled here so it is
+    visible at the assertion; the set it admits is closed and ratcheted by
+    `test_character_names.py::test_the_permitted_names_are_a_closed_deliberate_set`,
+    so it cannot grow by one word without a second test going red. Every word that
+    is not one of the twelve is judged exactly as before.
     """
     child = child_forms()
+    names = name_allowlist()
     rows = await session.execute(
         text("SELECT stage_id, word FROM allowed_words WHERE stage_id >= :s"),
         {"s": REGISTER_FILTER_FROM_STAGE},
     )
-    strays = [(stage, word) for stage, word in rows if word not in child]
+    strays = [(stage, word) for stage, word in rows if word not in child and word not in names]
     assert not strays, f"non-child vocabulary above the filter boundary: {strays[:10]}"
 
 

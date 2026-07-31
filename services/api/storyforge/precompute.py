@@ -263,6 +263,31 @@ def child_additions() -> frozenset[str]:
 
 
 @cache
+def name_allowlist() -> frozenset[str]:
+    """The curated CHARACTER NAMES a story may give a character (32.1-32.7).
+
+    Read literally and **never inflected**: `sam` + s is `sams` and `sam` + ing is
+    `samming`. A name has no morphology worth generating, and the possessive
+    `Sam's` is already excluded by `--check-vocabulary` as a tokenisation artefact.
+
+    This is the ONE deliberate exception to the proper-noun filter, and it is an
+    exception to that filter alone. `common_forms()` (11.9) is right in general —
+    it is what keeps `nixon`, `nasa` and `lebron` out — so it is left exactly as it
+    was and `compute_rows` names this set at the two filter tests instead. That
+    keeps the exception greppable: a reader who asks "how did a proper noun get
+    into `allowed_words`?" finds one answer, in one place, with the set enumerated
+    in a file that states its own criteria.
+
+    Kept as its own accessor rather than folded into `child_forms()` for the same
+    reason 31.1 kept `child_additions()` separate — plus one that is specific to
+    names: `llm/generate.character_names` needs to know WHICH permitted words are
+    names, because those are the only ones the model must capitalise, and a set
+    union would have destroyed that distinction.
+    """
+    return frozenset(_read_word_list("child-name-allowlist.txt"))
+
+
+@cache
 def child_forms() -> frozenset[str]:
     """Dale-Chall familiar words plus their inflections (DEVIATIONS 11.8).
 
@@ -313,7 +338,10 @@ def candidate_pool() -> list[tuple[int, str]]:
     """
     ranked = load_frequency()
     known = {word for _, word in ranked}
-    extra = sorted(child_forms() - known)
+    # `name_allowlist()` joins the union for the same reason (32.2): a curated name
+    # the adult subtitle corpus never ranks would otherwise never be a candidate at
+    # all, and the two filter exemptions below would exempt it from nothing.
+    extra = sorted((child_forms() | name_allowlist()) - known)
     return ranked + [(_UNRANKED_RANK_BASE + i, word) for i, word in enumerate(extra)]
 
 
@@ -327,12 +355,20 @@ def compute_rows(max_syllables: dict[int, int]) -> list[dict]:
     blocked = blocked_forms()
     common = common_forms()
     child = child_forms()
+    # DEVIATIONS 32.2. The curated character names, and the ONLY thing being a name
+    # buys is an exemption from the two filters that exist to judge REGISTER and
+    # PROVENANCE. It buys nothing from the blocklist test above, nothing from
+    # CMUdict, nothing from `align()` and nothing from the syllable cap — a name
+    # that this 93-GPC inventory cannot spell is dropped exactly like any other
+    # word, which is what keeps "it is a name" from becoming an argument for
+    # decodability (STATE invariant 1).
+    names = name_allowlist()
     rows: list[dict] = []
 
     for rank, word in candidate_pool():
         if word in blocked:
             continue  # 11.1-11.5: entries AND their inflections
-        if word not in common:
+        if word not in common and word not in names:
             continue  # 11.9: a proper noun (`nixon`) or not a word at all (`lebron`)
         prons = lexicon.get(word)
         if not prons:
@@ -363,7 +399,14 @@ def compute_rows(max_syllables: dict[int, int]) -> list[dict]:
             # 11.8/11.11: the register filter is per-STAGE, because stage 1 cannot
             # afford it. `amid` is decodable from stage 1 up, so it is dropped from
             # every stage this reaches and survives only where it does not.
-            if stage >= REGISTER_FILTER_FROM_STAGE and word not in child:
+            #
+            # A curated name is exempt (32.2). Dale-Chall's silence about `sam` is
+            # not the 1948 list being wrong the way it was about `dragon` — `sam` is
+            # not a common noun and never was one. It is the register question not
+            # APPLYING: "do 80% of fourth-graders know this word?" has no answer for
+            # a proper name, and the child does not have to know it, they have to be
+            # able to sound it out, which is what the alignment above just proved.
+            if stage >= REGISTER_FILTER_FROM_STAGE and word not in child and word not in names:
                 continue
             rows.append(
                 {"stage_id": stage, "word": word, "syllables": syllables, "freq_rank": rank}
@@ -444,6 +487,13 @@ def main() -> None:
         f"({', '.join(sorted(child_additions()))}) -> {len(child_forms()):,} forms; "
         f"register filter applies from stage {REGISTER_FILTER_FROM_STAGE} "
         f"(11.8, 11.11, 31.1)"
+    )
+    # The one deliberate hole in the proper-noun filter, printed for the same
+    # reason: an exemption nobody counts is an exemption nobody notices growing.
+    print(
+        f"character names: {len(name_allowlist()):,} curated, exempt from the "
+        f"proper-noun and register filters and from NOTHING else "
+        f"({', '.join(sorted(name_allowlist()))}) (32.1-32.2)"
     )
     # §18: a stage with almost no vocabulary starves generation. Say so loudly
     # rather than letting it surface later as "the stories got boring". Since the

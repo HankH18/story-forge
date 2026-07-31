@@ -17,12 +17,12 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 |---|---|
 | 0 scaffold | `make dev` boots PG16 + FastAPI + Vite. Style-guide tokens confirmed in a real browser (computed styles, not just a 200). |
 | 1 decoder | Pure validator, **93**-GPC inventory, vendored SHA-pinned CMUdict. 18/18 §5.7 goldens. Anti-golden suite + vacuity ratchet (**44.75%**, ceiling 50%) — both sabotage-tested, and the ratchet has now refused a real proposed row (DEVIATIONS 8.12). `wh`→/w/ added at the digraph stage (8.13; stage 2 since the renumber). |
-| 2 precompute | `make seed` idempotent; `make precompute` → **34,366** rows / 12 stages in 1.9s, **4,397** distinct words. `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **228** entries → **1,009** forms with inflections, **38** sight words (DEVIATIONS 8.10–8.17, 8.73–8.74, 8.81, **11.1–11.12**). **Two filters replaced §5.4's SUBTLEX intersection and the row counts moved a long way: 64,296 → 34,366.** (a) The blocklist match is **morphology-aware** — it was `if word in blocked` against a list of BASE forms, so the exact-match hit count read **0** while 50 inflections of blocked entries (`fucks`, `asses`, `killings`, `corpses`, `punching`, `addicts`) sat in the live table; `moderate.blocklist_check` deliberately still matches literals, because a layer-1 hit short-circuits layer 3 (11.6). (b) §5.4 named the **wrong corpus** — adult film-subtitle frequency proves a word is common in adult speech, not that a five-year-old knows it, and `amid` (rank 7,528), `lebron`, `nixon` and `nasa` were offered at stage 1. Dale-Chall familiar words now filter register and lowercase Hunspell headwords filter proper nouns. **Stage 1 is 78 and that is a measured CEILING**: its nine GPCs can spell only 78 child words, and its old 157 cleared §18's 150 floor only because 27 were proper nouns and 61 were adult register. It is the ONLY stage below the floor — every other stage is 771–4,397 — so the authorised remedy is **retiring stage 1** (inventories are cumulative, so new stage 1 = old stage 2 = 771 words). **That renumbering is now DONE** (12.1-12.14): stage rows, GPC/sight-word assignments, `MAX_STAGE` (canonical home now `storyforge.decoder`), the §5.7 goldens (re-derived, not decremented), the vacuity ratchet (re-measured: 44.75%, unmoved — the top stage's cumulative set is the same 93 GPCs), §17's demo (stage 2), and live `stage_id` data via migration `f3a91c6d0e24`, sabotage-verified per old stage. `make precompute` now writes **34,221** rows / 11 stages, **769**–4,397 per stage — every stage clears §18's 150 floor. **The 34,288/771 those numbers replace were measured with the syllable cap asking the wrong question** (DEVIATIONS 21.2): the cap was checked against `min_syllables(prons)` — the fewest syllables in ANY CMUdict pronunciation, including ones the aligner could not use at that stage — so **67 rows over 20 words (`every`, `family`, `several`, `towards`, `different`…) were offered at stages whose cap they broke**, and 199 rows carried a count from a reading no child there can produce. It is now `aligned_syllables`, counted per stage over the pronunciations that actually align, and `test_syllable_cap_is_honoured` could never see this because it compares the STORED number to the cap — precompute agreeing with itself. **The vacuity ratchet is also no longer a property of a stage number** (21.3): it measured `mastered_ids(MAX_STAGE)`, which equals the full inventory only by the convention that the top stage is review, so a re-stage moves the reading without moving permissiveness (simulated at `MAX_STAGE=8`: 44.00% and a quiet pass, against 44.75% unmoved). It measures `full_inventory()` now, and asserts the top stage teaches all 93. |
+| 2 precompute | `make seed` idempotent; `make precompute` → **34,366** rows / 12 stages in 1.9s, **4,397** distinct words. `POST /api/validate` reproduces the §17 demo sentence exactly. Blocklist **228** entries → **1,009** forms with inflections, **38** sight words (DEVIATIONS 8.10–8.17, 8.73–8.74, 8.81, **11.1–11.12**). **Two filters replaced §5.4's SUBTLEX intersection and the row counts moved a long way: 64,296 → 34,366.** (a) The blocklist match is **morphology-aware** — it was `if word in blocked` against a list of BASE forms, so the exact-match hit count read **0** while 50 inflections of blocked entries (`fucks`, `asses`, `killings`, `corpses`, `punching`, `addicts`) sat in the live table; `moderate.blocklist_check` deliberately still matches literals, because a layer-1 hit short-circuits layer 3 (11.6). (b) §5.4 named the **wrong corpus** — adult film-subtitle frequency proves a word is common in adult speech, not that a five-year-old knows it, and `amid` (rank 7,528), `lebron`, `nixon` and `nasa` were offered at stage 1. Dale-Chall familiar words now filter register and lowercase Hunspell headwords filter proper nouns. **Stage 1 is 78 and that is a measured CEILING**: its nine GPCs can spell only 78 child words, and its old 157 cleared §18's 150 floor only because 27 were proper nouns and 61 were adult register. It is the ONLY stage below the floor — every other stage is 771–4,397 — so the authorised remedy is **retiring stage 1** (inventories are cumulative, so new stage 1 = old stage 2 = 771 words). **That renumbering is now DONE** (12.1-12.14): stage rows, GPC/sight-word assignments, `MAX_STAGE` (canonical home now `storyforge.decoder`), the §5.7 goldens (re-derived, not decremented), the vacuity ratchet (re-measured: 44.75%, unmoved — the top stage's cumulative set is the same 93 GPCs), §17's demo (stage 2), and live `stage_id` data via migration `f3a91c6d0e24`, sabotage-verified per old stage. `make precompute` now writes **34,393** rows / 11 stages, **782**–4,413 per stage — every stage clears §18's 150 floor. **The 34,288/771 those numbers replace were measured with the syllable cap asking the wrong question** (DEVIATIONS 21.2): the cap was checked against `min_syllables(prons)` — the fewest syllables in ANY CMUdict pronunciation, including ones the aligner could not use at that stage — so **67 rows over 20 words (`every`, `family`, `several`, `towards`, `different`…) were offered at stages whose cap they broke**, and 199 rows carried a count from a reading no child there can produce. It is now `aligned_syllables`, counted per stage over the pronunciations that actually align, and `test_syllable_cap_is_honoured` could never see this because it compares the STORED number to the cap — precompute agreeing with itself. **The vacuity ratchet is also no longer a property of a stage number** (21.3): it measured `mastered_ids(MAX_STAGE)`, which equals the full inventory only by the convention that the top stage is review, so a re-stage moves the reading without moving permissiveness (simulated at `MAX_STAGE=8`: 44.00% and a quiet pass, against 44.75% unmoved). It measures `full_inventory()` now, and asserts the top stage teaches all 93. |
 | 3 generation | `make eval-smoke` PASSES live: 4/4, 99–100% decodability, p95 rewrite depth 0–1, ~$0.04/run. `make warm` **targets** ≥3 per (stage,theme) over all 11 stages × 3 themes, idempotent — see the pool row below for what the database actually holds. Moderation = free blocklist + Haiku judge. |
 | warm pool | **`make warm-check` is GREEN: 33 of 33 (stage,theme) pairs hold ≥3 servable stories, and 11 of 11 STAGES hold ≥5** — the pair count fell 36→33 with the stage-1 retirement, and the per-stage floor was added because the pair gate read green while 29 of 33 pairs held fewer than 5, which is §8's actual promotion requirement. Filled in three passes for **$0.35** total, because `make warm` fills only the shortfall — it is not a re-run. Two earlier versions of this row were wrong in opposite directions and both are worth remembering: the first claimed "`make warm` fills ≥3 per (stage,theme)" when the command defaulted to `--stages 1,2,3 --themes dragons`, so a first deploy got 9 stories across 3 stages — and §17's demo is dragons at a low stage, so **the demo would have passed with nine stages empty**. The second recorded the pool as 13/36 with the gate red, which was honest when written and is now stale. The lesson is the gate, not the number: `make warm-check` exits non-zero and is the only claim here that cannot rot (DEVIATIONS 8.40–8.48). |
 | 4 enrichment + API | `POST /api/stories/request` returns a full StoryDTO with questions + assets — verified live. §11.3 questions prove their own correctness from GPC alignments. 42-tag closed scene vocabulary. Langfuse §15 tracing wired; trace ids on `stories`. |
 
-**API: 1231 passed, 3 skipped** (`cd services/api && uv run pytest`; the suite uses
+**API: 1250 passed, 3 skipped** (`cd services/api && uv run pytest`; the suite uses
 pytest-randomly and has pre-existing order-dependent failures under a random seed
 — use `-p no:randomly` for a clean baseline). Web: **279 pass** (239 + the 40 of
 DEVIATIONS 27), `tsc` clean, `bun run build` clean. This row read "775 passed, 2
@@ -70,6 +70,10 @@ cd services/api && uv run python -m storyforge.quarantine_story_words       # fr
        # ^ the two halves of --check-story-words. The first DROPS a chip the reader
        #   never needed; the second PULLS a story whose chip no repair can fix (the
        #   word is in the text either way) and prints the PAID refill (31.3-31.4).
+cd services/api && uv run python -m storyforge.quarantine_vocabulary        # free
+       # ^ --check-vocabulary has NO free repair (a word is load-bearing inside a
+       #   sentence), so this is the re-status half only: it pulls, never deletes,
+       #   never generates, and prints the PAID refill with its shortfall (32.6).
 make eval | eval-smoke
 cd services/api && uv run python -m storyforge.{eval,warm,precompute,seed}
 ```
@@ -220,21 +224,50 @@ handed-down counts (43 + 23) were wrong in both directions; they were 38 + 16.
 that reads the pool against something OUTSIDE it** — every servable title and
 body re-validated against the CURRENT `allowed_words`, because a precomputed
 input changing must invalidate the artefacts built from it (DEVIATIONS 22.1-22.9).
-**RED, at 23 of 106 stories / 6 words — but its `REGISTER` class, the only one
-the gate itself calls a child-facing defect, is now EMPTY** (31.1, 31.7). What is
-left is two classes that money cannot close, and the NAME class is the reason:
-`sam`/`tom`/`dan` are refused by the proper-noun filter ANSWERING CORRECTLY — a
-name is a name, and 11.9 exists to keep `nixon`/`nasa` out — while `SYSTEM_RULES`
-rule 6 *demonstrates* `"Sam sat. A cat sat on Sam."` as correct output. **Measured:
-~10% of newly generated servable stories carry a FRESH name offence (7 of the 67
-most recent), so this is an unbounded SOURCE TERM, not a backlog** — regenerating
-the 13 buys a smaller number that refills itself. The remedy is a decision, not a
-spend: either a small curated decodable name list fed into the prompt AND into
-`permitted_at`, or rule 6 stops demonstrating a name. Both are prompt changes and
-invalidate every cached prefix (invariant 10). The `every`/`family`/`together`
-class (11 stories) is pure 21.2 drift, costs ~$0.40, closes no gate while the NAME
-class stands, and would risk stages 5-7 which sit at EXACTLY the coverage floor —
-deliberately not spent.
+**GREEN today — 0 of 106 servable stories — and it had never been green**
+(31.1, 31.7, **32.1-32.8**). It went 36/110 -> 23/106 -> **0/106**.
+**The last red class was a CONTRADICTION INSIDE THE PROMPT, not a missing word.**
+Rule 1 said every word comes from three lists and "there are no other options";
+rule 6's worked example of CORRECT output was **`"Sam sat. A cat sat on Sam."`** —
+and `common_forms()` filters proper nouns out of `allowed_words` BY DESIGN (11.9,
+which is what keeps `nixon`/`nasa`/`lebron` out), so a name was permitted at ZERO
+stages while the prompt demonstrated one. The model was obeying the example:
+`sam`/`tom`/`dan` on **14** of 106 stories, and **~10% of newly generated servable
+stories carried a FRESH offence** — an unbounded SOURCE TERM, because the model can
+invent a name no gate has ever seen. Money could not close that; a decision could.
+**`data/child-name-allowlist.txt`: twelve curated first names, exempt from the
+proper-noun and register filters and from NOTHING else.** Minimum stage is DERIVED
+from the validator per name (ten at stage 1; `beth` and `jill` at 2, because both
+need a stage-2 grapheme), never assigned — `compute_rows` still runs each through
+the unchanged `align()` and syllable cap, and `ruth`/`kai`/`leo`/`mia`/`raj` are
+ordinary first names this inventory cannot spell at any stage and are not on it.
+§13 is the second bar: no blocklist collision for the name or any inflection, no
+dominant real-person or brand association (`kim` was measured stage-1 decodable and
+deliberately NOT taken), and **not a word this curriculum already offers with
+another meaning** (`bob`/`pat`/`rob`/`hop` are Dale-Chall words and are out;
+`name_allowlist() & child_forms()` is asserted empty). It is a THIRD file on
+purpose: the additions file widens the REGISTER filter and is guarded to hold
+lowercase Hunspell headwords only, precisely so it cannot tunnel a proper noun past
+11.9 — Dale-Chall's silence about `sam` is CORRECT, and the filter that is wrong
+about a name is the other one. **Names reach the model without raising
+`PROMPT_WORD_LIMIT`** (invariant 10): the 400th-ranked word is rank 6,442 at stage 1
+but 784 at stage 11, so `allowed_words` membership alone would have offered a name
+at stages 1-2 and nowhere else — 31.5's caveat, now closed. They get their own
+`CHARACTER NAMES` section inside the per-stage cached block instead, and are removed
+from the printed permitted list so no name is ever offered lowercase. **Rule 1 and
+rule 6 now resolve the contradiction in the prompt text itself.** The remaining
+`every`/`family`/`together` class was a CLOSED backlog (all 11 generated inside a
+two-hour window on 2026-07-30; 21 servable stories generated after the newest carry
+none) with no free repair, so it was quarantined and refilled — **coverage measured
+FIRST, and it is the reason that command prints what it does: nine of the eleven
+were every servable story at stage 5 in all three themes**, so pulling and stopping
+would have taken stage 5 to zero against §8's floor of 5.
+`storyforge.quarantine_vocabulary` pulled 11, deleted 0, kept 22 readings and 5
+answers, and reuses 22.6's existing `vocabulary_quarantine` key so "was this row
+pulled?" keeps one answer; refill took two passes to **33 of 33 pairs and 11 of 11
+stages >= 5**. **$0.994129 all-in** (13 generations, 2 rejected by §13 layer 1),
+against a $2.00 authorisation. Two of the new stories are titled "Tom And The
+Scales" and "Tim and the Treasure" — the model taking names from the list, live.
 **`make art-check` (`--check-art`) is the EIGHTH gate and the first whose unit is
 the STORY** — §12's illustration. The owner's first complaint about this app was
 "there are no images in the stories", and the art was never missing: **33 asset
@@ -417,6 +450,24 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     the SHA-pinned vendored list. **When a condition keeps refusing the same word,
     ask whether the word or the list is wrong — and require a MEASUREMENT in the
     pool before widening, never a hunch about the word.**
+    **That lesson has now been applied a SECOND time, to the OTHER filter, and the
+    second application is the one that shows where the limit is** (32.1-32.3).
+    `sam`/`tom`/`dan` were refused by the PROPER-NOUN filter, which — unlike
+    Dale-Chall's silence about `dragon` — was answering its own question
+    CORRECTLY: a name is a name, and 11.9 exists to keep `nixon` and `nasa` away
+    from a five-year-old. The defect was that `SYSTEM_RULES` rule 1 forbade names
+    while rule 6 *demonstrated* one, so the model was obeying an example the rules
+    made illegal, on ~10% of every new batch. The remedy is therefore NOT "widen
+    the filter" but "enumerate the exception": `data/child-name-allowlist.txt`
+    holds twelve names, exempt from the proper-noun and register filters and from
+    NOTHING else — not the blocklist, not CMUdict, not `align()`, not the syllable
+    cap. **Being a name is no argument for being decodable**, and every name's
+    minimum stage is DERIVED from the validator rather than assigned. Three data
+    files now widen something; each states its own criteria, is ratcheted by a test
+    that spells the set out literally, and exempts a word from exactly one filter's
+    question. **And a permitted word is not an OFFERED one**: the fix is not
+    complete until the prompt says it, which is why the names have their own
+    `CHARACTER NAMES` section rather than a bigger `PROMPT_WORD_LIMIT` (31.5, 32.5).
 18. **A client-side fallback is only real if it is tested against the payload the
     SERVER SENDS.** `lib/grade.ts` is what decides right from wrong when
     `POST /answers` does not answer, and `Comprehension` turns "undecidable" into
