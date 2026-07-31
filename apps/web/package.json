@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test src",
     "check": "tsc --noEmit && bun test src",
-    "fit-check": "bun scripts/fit-check.mjs"
+    "fit-check": "bun scripts/fit-check.mjs",
+    "kid-check": "bun scripts/kid-check.mjs"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.3",

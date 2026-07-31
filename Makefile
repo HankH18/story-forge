@@ -11,7 +11,7 @@ WEB := apps/web
 .DEFAULT_GOAL := help
 .PHONY: help install db db-stop dev api web test test-api test-web lint \
         migrate seed precompute warm warm-check promote-check prompt-check \
-        mcq2-check fit-check story-word-check vocab-check art-check art-repair \
+        mcq2-check fit-check story-word-check vocab-check art-check kid-check art-repair \
         warm-plan eval eval-smoke codegen clean
 
 # `[0-9]` is load-bearing: `mcq2-check` was invisible to `make help` without it,
@@ -200,6 +200,21 @@ vocab-check: ## Refuse a pool whose stories use words the current allowlist no l
 # draws it and cross-checks the CSV both ways.
 art-check: ## Refuse a pool whose stories render one repeated picture on every page
 	cd $(API) && uv run python -m storyforge.warm --check-art
+
+# The NINTH gate, and the first that measures what the BROWSER does rather than
+# what the app renders. §13: "No email, DOB, mic, camera, free-text input, or
+# third-party trackers in kid mode" — and nothing measured whether a child could
+# LEAVE kid mode. One platform back gesture did: `/read/:kidId` is one component
+# with the phase in React state, so a session pushed no history of its own and
+# `back` mid-story landed a five-year-old on `/app`, with the parent's email and
+# `Add a reader` one tap from a text input (DEVIATIONS 27.1). The containment
+# creates a second failure — a history trap the PARENT cannot escape — so this
+# gate asserts both halves: four assertions contain the child, four free the
+# adult. It needs an ENFORCED API (it refuses to run against DEMO_BYPASS_AUTH and
+# proves the refusal with a garbage token), a Clerk secret to mint a real
+# session, and a headless browser. It opens ONE `readings` row per run.
+kid-check: ## Refuse a kid session a child can leave, or an adult cannot
+	cd $(WEB) && bun run kid-check
 
 # Re-runs §12's selection over the tags ALREADY on the rows: the tagging pass has
 # been paid for and is stored, so this costs $0.00 and makes no API call. It never

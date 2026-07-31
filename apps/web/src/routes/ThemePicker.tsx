@@ -20,19 +20,38 @@
  *
  * The theme name is set in Andika: it is a word a child reads, and §03 makes
  * Andika non-negotiable for choice labels.
+ *
+ * **This is also the one screen in kid mode with a way OUT of it** (`onExit`,
+ * DEVIATIONS 27.2). Kid mode refuses the platform back gesture now, so the adult
+ * needs a door that a child does not stumble through, and it belongs here rather
+ * than in the reading view: §10 fixes the reading chrome at three controls, and
+ * the picker is where a parent already is when they hand the tablet over and
+ * when they take it back. `onExit` is optional so the component stays renderable
+ * without one — the harness and the "no story" fallback both do that.
  */
 
 import { useState } from 'react'
 import type { Theme } from '../lib/api'
 import { coverFor } from '../lib/art'
+import GrownUpExit from '../ui/GrownUpExit'
 
 export interface ThemePickerProps {
   themes: Theme[]
   readerName?: string
   onPick: (theme: Theme) => void
+  /** The adult's way out of kid mode. Omitted, the screen simply has none. */
+  onExit?: () => void
+  /** Harness override for the hold duration; the product never passes it. */
+  exitHoldMs?: number
 }
 
-export default function ThemePicker({ themes, readerName, onPick }: ThemePickerProps) {
+export default function ThemePicker({
+  themes,
+  readerName,
+  onPick,
+  onExit,
+  exitHoldMs,
+}: ThemePickerProps) {
   // §07: 3–6 cards. More than six is a wall, fewer than three is not a choice.
   const shown = themes.slice(0, 6)
   /** Slugs whose cover file did not load. Falls back to the emoji, never a gap. */
@@ -96,6 +115,12 @@ export default function ThemePicker({ themes, readerName, onPick }: ThemePickerP
           )
         })}
       </ul>
+
+      {onExit ? (
+        <footer className="flex justify-center">
+          <GrownUpExit onExit={onExit} {...(exitHoldMs ? { holdMs: exitHoldMs } : {})} />
+        </footer>
+      ) : null}
     </main>
   )
 }

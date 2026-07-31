@@ -72,6 +72,26 @@
  *
  * Nothing here invents a reader: §13 means kid mode holds no name, no birthday,
  * no identity of any kind that a parent did not already enter.
+ *
+ * **Kid mode is a MODE now, not a route** (DEVIATIONS 27.1-27.6). Two ways out
+ * of it were reachable by a child and neither was a bug in any one screen:
+ *
+ *   - **the platform back gesture left the app's child surface entirely.** The
+ *     whole session is one route with the phase in React state, so it pushed no
+ *     history of its own and one `back` — an edge swipe on the tablet §11
+ *     designs for — landed a five-year-old on `/app`: the parent's email address,
+ *     every other reader's name and stage, and `Add a reader` one tap from a
+ *     free-text input. §13: *"No email, DOB, mic, camera, free-text input, or
+ *     third-party trackers in kid mode."*
+ *   - **a reload lost the reading.** Same cause, other direction: the phase, the
+ *     story and the step lived only in this component, so a reload returned to
+ *     the picker and §7 then served a DIFFERENT story.
+ *
+ * Both are answered by giving the session state the platform can see. `back` is
+ * the ← button (`lib/kidHistory.ts`); a reload is a resume (`lib/resume.ts`).
+ * The adult's escape routes are enumerated in `lib/kidHistory.ts` and proved in
+ * `scripts/kid-check.mjs`, because a back button that never leaves is a trap and
+ * a trap is worse than the leak.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -92,6 +112,7 @@ import {
   type Theme,
 } from '../lib/api'
 import { branchFixture, isFixtureRequested } from '../lib/fixtures'
+import { backOutcome, guardState, needsGuardEntry } from '../lib/kidHistory'
 import { loadLastStory, saveLastStory } from '../lib/lastStory'
 import {
   buildPlan,
@@ -101,6 +122,7 @@ import {
   withChoice,
   type PlanStep,
 } from '../lib/plan'
+import { chosenIds, forgetResume, isResumablePhase, restoreSession, saveResume } from '../lib/resume'
 import { cancelSpeech, primeVoices } from '../lib/speech'
 import { distinctWords } from '../lib/text'
 import Button from '../ui/Button'
@@ -171,6 +193,20 @@ export default function KidSession() {
   const announced = useRef<Set<string>>(new Set())
   /** Printer screens this session has parked on. See `MAX_STALLS`. */
   const stalls = useRef(0)
+  /**
+   * The phase, for the `popstate` listener. The listener is registered once —
+   * re-registering it per phase would drop a back gesture that arrives during
+   * the swap — so it cannot close over `phase` and has to read it.
+   */
+  const phaseRef = useRef<Phase>(phase)
+  phaseRef.current = phase
+  /** The reader, for the same reason — `toPicker` is registered once. */
+  const kidRef = useRef<Kid | null>(kid)
+  kidRef.current = kid
+  /** A navigation this component asked for. The back guard must not fight it. */
+  const leaving = useRef(false)
+  /** A resume is attempted once per reader, at the start, or never. */
+  const restored = useRef(false)
 
   useEffect(() => {
     primeVoices()
@@ -190,6 +226,7 @@ export default function KidSession() {
       // screen with a real explanation, not an error page, and `RequireParent`
       // sends a signed-out visitor on to sign-in.
       setKidMissing(true)
+      leaving.current = true
       navigate('/app', { replace: true })
     })
     return () => {
@@ -279,6 +316,7 @@ export default function KidSession() {
 
       stalls.current += 1
       if (stalls.current >= MAX_STALLS) {
+        leaving.current = true
         // Nothing to read and the API is not answering. A child cannot fix this
         // and must not be left in front of it, so the tablet goes back to the
         // adult — `/app` is a real screen with a real explanation, not an error
@@ -297,6 +335,10 @@ export default function KidSession() {
     () => {
       cancelSpeech()
       setPhase('celebration')
+      // The reading is being completed. A resume into the celebration would
+      // replay a latched `complete` and blank the "Sounds you read" card
+      // (DEVIATIONS 25.4's triple-`Finish`), so the record ends here.
+      if (kid) forgetResume(kid.id)
       // Complete first, then read the totals back: the deltas this reading
       // produced are only in `gpc_stats` after the complete call lands, and the
       // celebration's "+1 · 3 of 4" is the two answers side by side.
@@ -340,7 +382,95 @@ export default function KidSession() {
     setPlan([])
     setStep(0)
     setPhase('picker')
+    // Leaving a story is a decision, so there is nothing to come back to. This
+    // is the ← button and the back gesture both; a reload after either one must
+    // NOT drop the child into the story they just walked out of.
+    if (kidRef.current) forgetResume(kidRef.current.id)
   }, [])
+
+  /**
+   * The adult's door (`ui/GrownUpExit`). `leaving` first, so the unmount that
+   * follows cannot be mistaken by the back guard for a child pressing back.
+   */
+  const exitToParent = useCallback(() => {
+    cancelSpeech()
+    leaving.current = true
+    navigate('/app')
+  }, [navigate])
+
+  /**
+   * §13's containment: the platform back gesture, handed to the ← button.
+   *
+   * One extra history entry for this same URL is pushed on mount and re-pushed
+   * every time a back gesture consumes it, so `history.back()` inside kid mode
+   * is always answered here and never by the browser leaving the route.
+   * `needsGuardEntry` keeps the depth at exactly one across a reload.
+   *
+   * Registered once, with no dependencies. A listener that re-registered per
+   * phase would be absent for the frame in which it is swapped, and a back
+   * gesture in that frame is the whole defect.
+   */
+  useEffect(() => {
+    if (needsGuardEntry(window.history.state)) {
+      window.history.pushState(guardState(window.history.state), '')
+    }
+    const onPop = () => {
+      // A navigation this component asked for. Let it happen.
+      if (leaving.current) return
+      if (needsGuardEntry(window.history.state)) {
+        window.history.pushState(guardState(window.history.state), '')
+      }
+      if (backOutcome(phaseRef.current) === 'to-picker') toPicker()
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [toPicker])
+
+  /**
+   * The reload half: put the child back where they were (`lib/resume.ts`).
+   *
+   * Once per resolved reader and never after the session has moved — `restored`
+   * latches before anything is read, so a re-render cannot re-enter a story the
+   * child has since left.
+   */
+  useEffect(() => {
+    if (!kid || restored.current) return
+    restored.current = true
+    const session = restoreSession(kid.id, kid.stage_id)
+    if (!session) return
+    announced.current = new Set()
+    stalls.current = 0
+    setStalled(false)
+    setStory(session.story)
+    setPlan(session.plan)
+    setStep(session.step)
+    setReadingId(session.readingId)
+    setCompleted(null)
+    setProgress(null)
+    setPhase(session.phase)
+  }, [kid])
+
+  /**
+   * …and keep it current. Written on every page turn rather than on unload:
+   * `beforeunload` does not fire for a crashed tab, a killed browser or a tablet
+   * that runs out of battery, which are three of the four ways a reading is
+   * actually interrupted.
+   *
+   * The story itself is NOT written here — `beginStory` already hands it to
+   * `lib/lastStory`, which owns the one decision about whether a stored story
+   * may be shown to a child.
+   */
+  useEffect(() => {
+    if (!kid || !story || story.id <= 0) return
+    if (!isResumablePhase(phase)) return
+    saveResume(kid.id, {
+      storyId: story.id,
+      step,
+      phase,
+      readingId,
+      choices: chosenIds(plan),
+    })
+  }, [kid, story, plan, step, phase, readingId])
 
   const shouldAnnounce = useCallback((word: string) => !announced.current.has(word), [])
   const onAnnounced = useCallback((word: string) => {
@@ -386,6 +516,7 @@ export default function KidSession() {
           themes={themes}
           readerName={kid?.display_name}
           onPick={(theme) => void pickTheme(theme)}
+          onExit={exitToParent}
         />
       </div>
     )
@@ -396,7 +527,11 @@ export default function KidSession() {
     // screen that always works rather than render nothing.
     return (
       <div className="min-h-screen bg-paper-page">
-        <ThemePicker themes={themes} onPick={(theme) => void pickTheme(theme)} />
+        <ThemePicker
+          themes={themes}
+          onPick={(theme) => void pickTheme(theme)}
+          onExit={exitToParent}
+        />
       </div>
     )
   }

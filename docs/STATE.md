@@ -24,9 +24,10 @@ Branch `k5-learning-app-gstack-setup`, fast-forwarded into `master` each phase.
 
 **API: 1190 passed, 3 skipped** (`cd services/api && uv run pytest`; the suite uses
 pytest-randomly and has pre-existing order-dependent failures under a random seed
-— use `-p no:randomly` for a clean baseline). Web: **239 pass**, `tsc` clean,
-`bun run build` clean. This row read "775 passed, 2 skipped" for long enough to be
-stale by 415 tests; an agent flagged it rather than trusting it.
+— use `-p no:randomly` for a clean baseline). Web: **279 pass** (239 + the 40 of
+DEVIATIONS 27), `tsc` clean, `bun run build` clean. This row read "775 passed, 2
+skipped" for long enough to be stale by 415 tests; an agent flagged it rather
+than trusting it.
 
 **Postgres is on port 5433, not 5432** — `services/api/.env` is the authority, and
 source it BEFORE overriding `DATABASE_URL`, never after. Hardcoding 5432 gives
@@ -42,7 +43,7 @@ window. Before believing a red suite, re-run it against a private copy:
 `docker exec storyforge-db sh -c 'pg_dump -U storyforge storyforge | psql -U storyforge -d sfscratch'`
 then `DATABASE_URL=…/sfscratch uv run pytest` (note port 5433). The counts above are from exactly that
 (DEVIATIONS 8.47).
-**Web: 239 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers —
+**Web: 279 tests** (`cd apps/web && bun test src`) over the pure `lib/` helpers —
 the line said 137 for several phases after the number had moved.
 `make test` = `test-api` + `test-web`, and **`test-web` is now typecheck AND
 tests** — it was typecheck alone for five phases, which is why the "395 tests
@@ -61,7 +62,7 @@ Lint: `cd services/api && uv run ruff check storyforge tests`.
 ```
 make dev | test | seed | precompute | warm | warm-plan
 make warm-check | promote-check | prompt-check | mcq2-check | fit-check \
-     story-word-check | vocab-check | art-check                # the eight gates
+     story-word-check | vocab-check | art-check | kid-check    # the nine gates
 make art-repair                        # free, no API call (DEVIATIONS 26.4)
 cd services/api && uv run python -m storyforge.warm --story-word-repair     # free
 cd services/api && uv run python -m storyforge.quarantine_story_words       # free
@@ -240,7 +241,17 @@ is 8 (theme, tag) pairs over 25 screens** — `dragons water` 9, `dragons villag
 answered through another tag, so what is lost is match quality, not the picture.
 The 18-19 untagged screens are unchanged and correct (the prompt invites an
 empty list; invariant 11 says an enrichment node degrades).
-All eight are free, and none implies the others.
+**`make kid-check` is the NINTH gate and the first that measures what the
+BROWSER does rather than what the app renders** — §13's "no email … no free-text
+input … in kid mode", which nothing checked was still true after a *back
+gesture*. It drives the production bundle at 1024x768 against an enforced API
+with a real Clerk session: four assertions contain the child (back at the picker,
+back mid-story, no email/input reachable, a reload that resumes) and four free
+the adult (three taps do not open the exit, a 1500ms hold does, the address bar
+and a new tab always work). **8 of 8 GREEN.** It exits 2 when it cannot run and
+**refuses to run against `DEMO_BYPASS_AUTH`, proving the refusal with a garbage
+token**. It opens one `readings` row per run (DEVIATIONS 27.1-27.8).
+All nine are free of money, and none implies the others.
 `make eval` is the §14 harness and the §1-item-2 check: 11 stages x 3 themes x 5
 stories against the live model, writing `eval_runs`/`eval_run_items` and
 `reports/eval-{ts}.md`. It exits non-zero when the criteria are not met. Latest
@@ -387,6 +398,30 @@ numbers, model ids, pricing date and total cost: **`docs/EVAL.md`**.
     outside the offered options, so it adds a way to be right about "wrong" and no
     way to guess. **Never let a test fixture invent a field the DTO omits**
     (DEVIATIONS 25.1).
+19. **Kid mode is a MODE, not a route — and a containment with no door is worse
+    than the leak.** §13: *"No email, DOB, mic, camera, free-text input, or
+    third-party trackers in kid mode."* The whole session is one component with
+    the phase in React state, so it pushed NO history of its own and **one
+    platform back gesture — an edge swipe on the tablet §11 designs for — landed
+    a five-year-old on `/app`**: the parent's email, seven readers' names and
+    stages, and `<input id="kid-name">` one tap further. Driven live at 1024x768
+    against an enforced API, mid-story, page 3 of 7. Contained now
+    (`lib/kidHistory.ts`): back inside a story is the ← button, back at the
+    picker is nothing, and `needsGuardEntry` keeps the depth at one across a
+    reload. **The fix is not complete without the escapes, and there are five,
+    each driven**: a **1500ms press-and-hold** on the picker (three taps and a
+    1200ms hold both stay), the address bar, a new tab, `Celebration`'s "All
+    done", and the app's own hand-backs (`/read/999999`, `/read/nonsense`,
+    MAX_STALLS). **Never hide the exit to make it child-proof** — §11 floors
+    every kid-mode control at 48px, so the asymmetry that works is INTENT, not
+    visibility: a five-year-old taps. **And a kid session IS resumable**
+    (`lib/resume.ts`): the story and the place in it, 30 minutes, same reader,
+    same device, into reading/story-end/questions but **never the celebration**
+    (a replayed `complete` is latched and returns empty deltas). The reading id
+    is reused, never reopened — reading 28324 survived a reload mid-story AND one
+    mid-questions, completed once, both answers recorded. `make kid-check` is the
+    only thing in the repo that can see any of this, and its A5 came back GREEN
+    once because Chrome caps history at 50 (DEVIATIONS 27.1-27.8).
 
 | 5 kid mode + mastery | Full kid session live in a real browser (dev AND production bundle): theme picker → reading → questions → celebration, TTS, §11 floors verified by computed style. `readings`/`answers` APIs, `gpc_stats`, stage promotion proven at the 79/80% boundary. **§11 re-measured from RENDERED PIXELS at both §10 viewports and both reading sizes** (DEVIATIONS 25.3): no contrast, tap-target, gap or focus-order violation; narrowest margins are the earned foil seal at 7.24:1 (floor 7) and the kid primary button at 4.70:1 (floor 4.5); smallest gap between two targets 9.5px (floor 8); and `speechSynthesis` was wrapped for a whole session — 72 operations, every `speak()` preceded by a `cancel()`, never two at once. |
 
